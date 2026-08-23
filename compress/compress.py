@@ -8,16 +8,14 @@ from .huffman_tables import FIRST_MASK, get_distribution_tables
 from .tensor_buffer import TensorBuffer
 
 
-BLOCK_SIZE = 32768
-LANES = 128             # Number of symbols per stream
-STEPS = BLOCK_SIZE // LANES
+BLOCK_SIZE = 32768              # Number of elements encoded per block
+LANES = 128                     # Number of streams processed in parallel
+STEPS = BLOCK_SIZE // LANES     # Number of symbols per stream
 
-# A fixed-size stream lets every lane encode independently without a prefix
-# scan or per-lane offset array.
-FIXED_BITS = 832        # Size of stream. Excess bits go into fallback.
-FIXED_WORDS = FIXED_BITS // 32
+FIXED_BITS = 832                # Size of stream. Excess bits go into fallback.
+FIXED_WORDS = FIXED_BITS // 32  # Number of 32-bit words in stream.
 
-CENTER_SAMPLE_SIZE = 4096  # Number of samples used to estimate mean
+CENTER_SAMPLE_SIZE = 4096       # Number of samples used to estimate mean
 
 
 def _geometry(layout: CompressionLayout):
