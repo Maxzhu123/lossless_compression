@@ -9,35 +9,32 @@ from .tensor_buffer import TensorBuffer
 
 
 BLOCK_SIZE = 32768
-LANES = 128
+LANES = 128             # Number of symbols per stream
 STEPS = BLOCK_SIZE // LANES
 
 # A fixed-size stream lets every lane encode independently without a prefix
 # scan or per-lane offset array.
-FIXED_BITS = 832
+FIXED_BITS = 832        # Size of stream. Excess bits go into fallback.
 FIXED_WORDS = FIXED_BITS // 32
 
 CENTER_SAMPLE_SIZE = 4096  # Number of samples used to estimate mean
 
 
-def _geometry(layout: CompressionLayout = CompressionLayout.CLEAN):
+def _geometry(layout: CompressionLayout):
+    """ Set the shape of the fixed size payload.
+        Average number of bits per symbol is lanes / (32*fixed_words) = lanes / fixed_bits
+    """
     if layout == CompressionLayout.MEDIUM:
         # 32768-element blocks, 256 lanes, 128 steps/stream, 19 words = 608
-        # bits/stream.  Total non-fallback storage is 128 raw sign/mantissa
-        # bytes + 76 exponent bytes = 204 B/stream.  Allowed average is
-        # 608 / 128 = 4.75 bits/symbol; Gaussian exponents use ~3.22
-        # bits/symbol, so fallback is avoided.
+        # bits/stream. Allowed average is
+        # 608 / 128 = 4.75 bits/symbol
         return BLOCK_SIZE, LANES * 2, STEPS // 2, (FIXED_WORDS + 12) // 2
     if layout == CompressionLayout.HIGH:
         # 32768-element blocks, 256 lanes, 128 steps/stream, 22 words = 704
-        # bits/stream.  Total non-fallback storage is 128 raw sign/mantissa
-        # bytes + 88 exponent bytes = 216 B/stream.  Allowed average is
-        # 704 / 128 = 5.5 bits/symbol; Gaussian fits with headroom.
+        # bits/stream. Allowed average is 704 / 128 = 5.5 bits/symbol
         return BLOCK_SIZE, LANES * 2, STEPS // 2, FIXED_WORDS // 2 + 9
     # 65536-element blocks, 256 lanes, 256 steps/stream, 26 words = 832
-    # bits/stream.  Total non-fallback storage is 256 raw sign/mantissa bytes
-    # + 104 exponent bytes = 360 B/stream.  Allowed average is 832 / 256 =
-    # 3.25 bits/symbol; Gaussian exponents use ~3.22 bits/symbol and fit.
+    # bits/stream. Allowed average is 832 / 256 = 3.25 bits/symbol
     return BLOCK_SIZE * 2, LANES * 2, STEPS, FIXED_WORDS
 
 
