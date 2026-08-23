@@ -1,25 +1,12 @@
-"""Distribution-aware BF16 exponent-compression benchmark.
-
-The test suite mirrors ``compression/prepare.py``. Each case first creates
-the same int8 exponent distribution, then packs it into BF16 values with
-independent random sign and mantissa bits. The codec must therefore compress
-only the exponent field while preserving every BF16 bit exactly.
-"""
-
+"""Distribution-aware BF16 exponent-compression benchmark."""
 import time
 from random import Random
 from dataclasses import fields
-
 import torch
 
 from compress.compress import compress, decompress
 from compress.tensor_buffer import Allocation, TensorBuffer
-from compress.code_storage import (
-    CompressedTensor,
-    CompressionLayout,
-    Distribution,
-    DistributionFamily,
-)
+from compress.code_storage import CompressedTensor, CompressionLayout, Distribution, DistributionFamily
 
 
 SHAPE_OPTIONS = [50_000_000, 200_000_000]
