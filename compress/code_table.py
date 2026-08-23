@@ -6,7 +6,7 @@ from functools import lru_cache
 
 import torch
 
-from code_storage import Distribution, DistributionFamily
+from .code_storage import Distribution, DistributionFamily
 
 
 FIRST_BITS = 10

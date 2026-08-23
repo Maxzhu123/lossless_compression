@@ -2,9 +2,9 @@ import torch
 import triton
 import triton.language as tl
 
-from code_storage import CompressedTensor, CompressionLayout, Distribution
-from code_table import FIRST_MASK, get_distribution_tables
-from code_memory import TensorBuffer
+from .code_storage import CompressedTensor, CompressionLayout, Distribution
+from .code_table import FIRST_MASK, get_distribution_tables
+from .code_memory import TensorBuffer
 
 
 BLOCK_SIZE = 32768
@@ -12,10 +12,11 @@ LANES = 128
 STEPS = BLOCK_SIZE // LANES
 
 # A fixed-size stream lets every lane encode independently without a prefix
-# scan or per-lane offset array.  The benchmark distribution fits comfortably
-# in this budget with the full 256-symbol codebook below.
+# scan or per-lane offset array.
 FIXED_BITS = 832
 FIXED_WORDS = FIXED_BITS // 32
+
+CENTER_SAMPLE_SIZE = 4096       # Number of samples used to estimate mean
 
 
 def _geometry(layout: CompressionLayout = CompressionLayout.CLEAN):
@@ -44,9 +45,6 @@ def _get_tables(distribution: Distribution):
     return tables.encode_shifted, tables.decode, tables.rare_length
 
 
-CENTER_SAMPLE_SIZE = 4096
-
-
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK": 1024}, num_warps=2, num_stages=2),
@@ -60,12 +58,8 @@ CENTER_SAMPLE_SIZE = 4096
 )
 @triton.jit
 def _estimate_center_kernel(
-    source_bits,
-    center_out,
-    size,
-    SAMPLE_SIZE: tl.constexpr,
-    STRIDE: tl.constexpr,
-    BLOCK: tl.constexpr,
+    source_bits, center_out, size,
+    SAMPLE_SIZE: tl.constexpr, STRIDE: tl.constexpr, BLOCK: tl.constexpr,
 ):
     offsets = tl.arange(0, BLOCK)
     total = tl.zeros((BLOCK,), tl.int32)
@@ -118,18 +112,10 @@ def _estimate_center(source_bits, size):
 )
 @triton.jit
 def _encode_kernel(
-    source_bits,
-    sign_mantissa,
-    encoded,
-    encode_table,
-    center,
-    extra_starts,
-    n_elements,
-    n_streams,
-    FIXED_WORDS: tl.constexpr,
-    BLOCK: tl.constexpr,
-    N_LANES: tl.constexpr,
-    N_STEPS: tl.constexpr,
+    source_bits, sign_mantissa, encoded, encode_table,
+    center, extra_starts,
+    n_elements, n_streams,
+    FIXED_WORDS: tl.constexpr, BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
 ):
     block = tl.program_id(0)
     lanes = tl.arange(0, N_LANES)
@@ -222,13 +208,8 @@ def _encode_kernel(
 @triton.jit
 def _compact_bad_streams_kernel(
     extra_starts,
-    bad_streams_out,
-    bad_starts_out,
-    fallback_offsets_out,
-    bad_count,
-    fallback_total,
-    n_streams,
-    steps,
+    bad_streams_out, bad_starts_out, fallback_offsets_out,
+    bad_count, fallback_total, n_streams, steps,
     BLOCK: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -268,16 +249,10 @@ def _compact_bad_streams_kernel(
 @triton.jit
 def _compact_extra_kernel(
     source_bits,
-    extra_streams,
-    extra_starts,
-    fallback_offsets,
-    fallback_data,
-    bad_count,
+    extra_streams, extra_starts,
+    fallback_offsets, fallback_data, bad_count,
     n_elements,
-    BLOCK: tl.constexpr,
-    N_LANES: tl.constexpr,
-    N_STEPS: tl.constexpr,
-    TILE: tl.constexpr,
+    BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr, TILE: tl.constexpr
 ):
     pid = tl.program_id(0)
     tile = pid * TILE + tl.arange(0, TILE)
@@ -313,20 +288,11 @@ def _compact_extra_kernel(
 )
 @triton.jit
 def _scatter_fallback_kernel(
-    bad_streams,
-    bad_starts,
-    fallback_offsets,
-    fallback_buffer,
-    fallback_base,
-    fallback_count,
+    bad_streams, bad_starts,
+    fallback_offsets, fallback_buffer, fallback_base, fallback_count,
     sign_mantissa,
-    output,
-    n_elements,
-    n_bad,
-    TILE: tl.constexpr,
-    BLOCK: tl.constexpr,
-    N_LANES: tl.constexpr,
-    N_STEPS: tl.constexpr,
+    output, n_elements, n_bad,
+    TILE: tl.constexpr, BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
 ):
     pid = tl.program_id(0)
     tile = pid * TILE + tl.arange(0, TILE)
@@ -389,20 +355,11 @@ def _pack_bf16(value, sm):
 )
 @triton.jit
 def _decode_kernel(
-    encoded,
-    sign_mantissa,
-    output,
-    decode_table,
-    n_elements,
-    n_streams,
+    encoded, sign_mantissa, output,
+    decode_table, n_elements, n_streams,
     center,
-    SKIP_FALLBACK: tl.constexpr,
-    FIRST_MASK: tl.constexpr,
-    RARE_LENGTH: tl.constexpr,
-    BLOCK: tl.constexpr,
-    N_LANES: tl.constexpr,
-    N_STEPS: tl.constexpr,
-    FIXED_WORDS: tl.constexpr,
+    SKIP_FALLBACK: tl.constexpr, FIRST_MASK: tl.constexpr, RARE_LENGTH: tl.constexpr,
+    BLOCK: tl.constexpr,N_LANES: tl.constexpr, N_STEPS: tl.constexpr, FIXED_WORDS: tl.constexpr,
 ):
     block = tl.program_id(0)
     lanes = tl.arange(0, N_LANES)
