@@ -70,15 +70,13 @@ class Distribution:
 
 @dataclass(frozen=True)
 class CompressedTensor:
-    dtype: torch.dtype  # Original input dtype (always bfloat16 for this codec).
     data: torch.Tensor  # Fixed exponent payload or source fallback.
     size: int  # Logical number of input elements.
     sign_mantissa: torch.Tensor | None = None  # Raw sign + 7-bit mantissa.
     offsets: torch.Tensor | None = None  # Overflowing stream IDs.
     fallback_starts: torch.Tensor | None = None  # First fallback step per stream.
-    fallback_offsets: torch.Tensor | None = None  # Offsets into fallback_data.
-    fallback_data: torch.Tensor | None = None  # Compact raw exponent suffixes.
-    fallback_buffer: torch.Tensor | None = None  # Shared TensorBuffer storage for fallback data.
+    fallback_offsets: torch.Tensor | None = None  # Offsets into fallback storage.
+    fallback_buffer: torch.Tensor | None = None  # Shared or private fallback storage.
     fallback_base: int = 0  # Byte offset of this tensor's region in fallback_buffer.
     fallback_count: torch.Tensor | None = None  # Device scalar with the number of fallback streams.
     fallback_used: torch.Tensor | None = None  # Device scalar with actual fallback bytes used.

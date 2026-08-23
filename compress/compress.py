@@ -1,7 +1,7 @@
 import torch
 import triton
 
-from trition_kernels import _estimate_center_kernel, _encode_kernel, _compact_bad_streams_kernel, _compact_extra_kernel, \
+from .trition_kernels import _estimate_center_kernel, _encode_kernel, _compact_bad_streams_kernel, _compact_extra_kernel, \
     _scatter_fallback_kernel, _decode_kernel
 from .code_storage import CompressedTensor, CompressionLayout, Distribution
 from .huffman_tables import FIRST_MASK, get_distribution_tables
@@ -39,9 +39,7 @@ def _geometry(layout: CompressionLayout):
 def _estimate_center(source_bits, size):
     """Estimate the exponent center with one strided-sampling pass."""
     sample_size = min(size, CENTER_SAMPLE_SIZE)
-    if sample_size == 0:
-        return 0
-    stride = max(size // sample_size, 1)
+    stride = size // sample_size
     center = torch.empty(1, dtype=torch.int32, device=source_bits.device)
     _estimate_center_kernel[(1,)](
         source_bits,
@@ -70,16 +68,6 @@ def compress(
     source = data.contiguous().view(-1)
     size = source.numel()
 
-    if size == 0:
-        return CompressedTensor(
-            data.dtype,
-            source,
-            size,
-            layout=layout,
-            distribution=distribution,
-            shape=shape,
-        )
-
     # The fixed exponent payload size depends only on the input size and
     # selected layout, so bypass the codec before allocating or launching it
     # when that payload alone exceeds the available one byte per element.
@@ -89,7 +77,6 @@ def compress(
     payload_words = streams * fixed_words
     if (payload_words + 4) * 4 > size:
         return CompressedTensor(
-            data.dtype,
             source,
             size,
             layout=layout,
@@ -192,14 +179,12 @@ def compress(
         TILE=32,
     )
     return CompressedTensor(
-        data.dtype,
         encoded,
         size,
         sign_mantissa,
         bad_streams,
         bad_starts,
         fallback_offsets,
-        None,
         fallback_buffer=buffer.data if buffer is not None else fallback_data,
         fallback_base=fallback_base,
         fallback_count=bad_count_tensor,
@@ -220,7 +205,6 @@ def decompress(data: CompressedTensor) -> torch.Tensor:
     block_size, lanes, steps, fixed_words = _geometry(data.layout)
     blocks = triton.cdiv(data.size, block_size)
     out_bits = torch.empty(data.size, dtype=torch.int16, device=data.data.device)
-    has_fallback = data.fallback_data is not None or data.fallback_buffer is not None
     _decode_kernel[(blocks,)](
         data.data,
         data.sign_mantissa,
@@ -229,7 +213,7 @@ def decompress(data: CompressedTensor) -> torch.Tensor:
         data.size,
         blocks * lanes,
         data.center,
-        SKIP_FALLBACK=has_fallback,
+        SKIP_FALLBACK=True,
         FIRST_MASK=FIRST_MASK,
         RARE_LENGTH=rare_length,
         BLOCK=block_size,
@@ -237,37 +221,20 @@ def decompress(data: CompressedTensor) -> torch.Tensor:
         N_STEPS=steps,
         FIXED_WORDS=fixed_words,
     )
-    if has_fallback:
-        if data.fallback_buffer is not None:
-            fallback_buffer = data.fallback_buffer
-            fallback_base = data.fallback_base
-            fallback_count = data.fallback_count
-            n_bad = data.offsets.numel()
-        else:
-            # Compatibility with non-buffer compressed tensors.
-            fallback_buffer = data.fallback_data
-            fallback_base = 0
-            fallback_count = torch.full(
-                (1,),
-                data.offsets.numel(),
-                dtype=torch.int32,
-                device=data.data.device,
-            )
-            n_bad = data.offsets.numel()
-        _scatter_fallback_kernel[(triton.cdiv(n_bad, 64),)](
-            data.offsets,
-            data.fallback_starts,
-            data.fallback_offsets,
-            fallback_buffer,
-            fallback_base,
-            fallback_count,
-            data.sign_mantissa,
-            out_bits,
-            data.size,
-            n_bad,
-            TILE=64,
-            BLOCK=block_size,
-            N_LANES=lanes,
-            N_STEPS=steps,
-        )
+    n_bad = data.offsets.numel()
+    _scatter_fallback_kernel[(triton.cdiv(n_bad, 64),)](
+        data.offsets,
+        data.fallback_starts,
+        data.fallback_offsets,
+        data.fallback_buffer,
+        data.fallback_base,
+        data.fallback_count,
+        data.sign_mantissa,
+        out_bits,
+        data.size,
+        TILE=64,
+        BLOCK=block_size,
+        N_LANES=lanes,
+        N_STEPS=steps,
+    )
     return out_bits.view(torch.bfloat16).reshape(data.shape)

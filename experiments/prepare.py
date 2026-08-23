@@ -54,7 +54,7 @@ def get_compressed_size(data: CompressedTensor) -> int:
                 continue
             if (
                 data.fallback_buffer is not None
-                and f.name in {"offsets", "fallback_starts", "fallback_offsets", "fallback_data", "fallback_count", "fallback_used"}
+                and f.name in {"offsets", "fallback_starts", "fallback_offsets", "fallback_count", "fallback_used"}
             ):
                 continue
             total += tensor.nbytes
@@ -67,7 +67,6 @@ def free_compressed(data: CompressedTensor, buffer: TensorBuffer) -> None:
     # non-buffer compressed tensors own their fallback tensors directly.
     if (
         data.fallback_buffer is None
-        or buffer is None
         or data.fallback_buffer is not buffer.data
     ):
         return
@@ -82,12 +81,7 @@ def free_compressed(data: CompressedTensor, buffer: TensorBuffer) -> None:
         if tensor is not None:
             buffer.free(tensor)
 
-    # The raw fallback data region is stored only as a base offset in the
-    # buffer-backed representation.
-    if data.fallback_data is not None:
-        buffer.free(data.fallback_data)
-    else:
-        buffer.free(data.fallback_base)
+    buffer.free(data.fallback_base)
 
 
 def _pack_exponents(exponents: torch.Tensor, G: torch.Generator) -> torch.Tensor:

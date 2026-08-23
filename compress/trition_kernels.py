@@ -3,26 +3,21 @@ from triton import language as tl
 
 # Autotune configurations
 
+# Keep the configs that were selected/strongest on the benchmark GPU.
+# Each list is deliberately small (<= 5) to keep the first-call autotune
+# cost low while still covering the distinct tuning keys used by the codec.
 ESTIMATE_CENTER_AUTOTUNE_CONFIGS = [
-    triton.Config({"BLOCK": 1024}, num_warps=2, num_stages=2),
-    triton.Config({"BLOCK": 2048}, num_warps=2, num_stages=2),
-    triton.Config({"BLOCK": 2048}, num_warps=4, num_stages=2),
     triton.Config({"BLOCK": 4096}, num_warps=4, num_stages=2),
-    triton.Config({"BLOCK": 4096}, num_warps=8, num_stages=2),
-    triton.Config({"BLOCK": 8192}, num_warps=8, num_stages=2),
 ]
 ENCODE_AUTOTUNE_CONFIGS = [
-    triton.Config({}, num_warps=1, num_stages=2, maxnreg=64),
-    triton.Config({}, num_warps=2, num_stages=2, maxnreg=64),
-    triton.Config({}, num_warps=4, num_stages=2, maxnreg=None),
-    triton.Config({}, num_warps=4, num_stages=3, maxnreg=64),
     triton.Config({}, num_warps=8, num_stages=2, maxnreg=64),
+    triton.Config({}, num_warps=4, num_stages=2, maxnreg=64),
+    triton.Config({}, num_warps=4, num_stages=3, maxnreg=64),
     triton.Config({}, num_warps=4, num_stages=4, maxnreg=128),
 ]
 COMPACT_BAD_STREAMS_AUTOTUNE_CONFIGS = [
     triton.Config({}, num_warps=1, num_stages=2),
     triton.Config({}, num_warps=2, num_stages=2),
-    triton.Config({}, num_warps=4, num_stages=2),
     triton.Config({}, num_warps=2, num_stages=3),
 ]
 COMPACT_EXTRA_AUTOTUNE_CONFIGS = [
@@ -38,17 +33,10 @@ SCATTER_FALLBACK_AUTOTUNE_CONFIGS = [
     triton.Config({}, num_warps=2, num_stages=3),
 ]
 DECODE_AUTOTUNE_CONFIGS = [
-    triton.Config({}, num_warps=1, num_stages=2, maxnreg=64),
-    triton.Config({}, num_warps=1, num_stages=3, maxnreg=64),
+    triton.Config({}, num_warps=2, num_stages=2, maxnreg=64),
+    triton.Config({}, num_warps=2, num_stages=3, maxnreg=64),
     triton.Config({}, num_warps=1, num_stages=2, maxnreg=None),
     triton.Config({}, num_warps=1, num_stages=3, maxnreg=None),
-    triton.Config({}, num_warps=2, num_stages=3, maxnreg=64),
-    triton.Config({}, num_warps=4, num_stages=2, maxnreg=None),
-    triton.Config({}, num_warps=4, num_stages=3, maxnreg=64),
-    triton.Config({}, num_warps=2, num_stages=2, maxnreg=64),
-    triton.Config({}, num_warps=2, num_stages=2, maxnreg=None),
-    triton.Config({}, num_warps=8, num_stages=2, maxnreg=64),
-    triton.Config({}, num_warps=8, num_stages=3, maxnreg=128),
 ]
 
 
@@ -249,7 +237,7 @@ def _scatter_fallback_kernel(
     bad_streams, bad_starts,
     fallback_offsets, fallback_buffer, fallback_base, fallback_count,
     sign_mantissa,
-    output, n_elements, n_bad,
+    output, n_elements,
     TILE: tl.constexpr, BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -257,7 +245,7 @@ def _scatter_fallback_kernel(
     count = tl.load(fallback_count).to(tl.int32)
     if pid * TILE >= count:
         return
-    valid = tile < tl.minimum(count, n_bad)
+    valid = tile < count
     stream = tl.load(bad_streams + tile, mask=valid, other=0).to(tl.int32)
     start = tl.load(bad_starts + tile, mask=valid, other=N_STEPS).to(tl.int32)
     fallback_offset = tl.load(fallback_offsets + tile, mask=valid, other=0).to(tl.int32)
