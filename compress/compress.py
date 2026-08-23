@@ -70,8 +70,24 @@ def compress(
     source = data.contiguous().view(-1)
     size = source.numel()
 
-    # RAW bypasses the codec while retaining the same compressed-tensor API.
-    if layout == CompressionLayout.RAW or size == 0:
+    if size == 0:
+        return CompressedTensor(
+            data.dtype,
+            source,
+            size,
+            layout=layout,
+            distribution=distribution,
+            shape=shape,
+        )
+
+    # The fixed exponent payload size depends only on the input size and
+    # selected layout, so bypass the codec before allocating or launching it
+    # when that payload alone exceeds the available one byte per element.
+    block_size, lanes, steps, fixed_words = _geometry(layout)
+    blocks = triton.cdiv(size, block_size)
+    streams = blocks * lanes
+    payload_words = streams * fixed_words
+    if (payload_words + 4) * 4 > size:
         return CompressedTensor(
             data.dtype,
             source,
@@ -96,10 +112,6 @@ def compress(
 
     # Encode independent streams into a fixed-size payload; the kernel records
     # streams whose remaining values do not fit in that budget.
-    block_size, lanes, steps, fixed_words = _geometry(layout)
-    blocks = triton.cdiv(size, block_size)
-    streams = blocks * lanes
-    payload_words = streams * fixed_words
     # Four padding words make both 64-bit lookaheads safe at the end.
     encoded = torch.empty(
         payload_words + 4, dtype=torch.int32, device=source.device
@@ -119,17 +131,6 @@ def compress(
         N_LANES=lanes,
         N_STEPS=steps,
     )
-    if encoded.nbytes > size:
-        # For very small inputs the fixed-size payload is larger than the
-        # source tensor, so return the original BF16 data instead.
-        return CompressedTensor(
-            data.dtype,
-            source,
-            size,
-            layout=layout,
-            distribution=distribution,
-            shape=shape,
-        )
     bad_count_tensor = torch.zeros(1, dtype=torch.int32, device=source.device)
 
     if buffer is not None:
@@ -169,9 +170,7 @@ def compress(
     )
 
     if buffer is None:
-        # Exact fallback allocation for the non-buffer path, matching the old
-        # dynamic-allocation behaviour.  In the buffer path fallback_data was
-        # already reserved at full capacity.
+        # Exact fallback allocation for the non-buffer path. Causes host synchronization.
         fallback_size = int(fallback_total.item())
         fallback_data = torch.empty(
             fallback_size, dtype=torch.int8, device=source.device

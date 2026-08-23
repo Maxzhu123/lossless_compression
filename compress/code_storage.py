@@ -8,7 +8,6 @@ class CompressionLayout(IntEnum):
     CLEAN = 0  # Default fixed-stream Huffman layout.
     MEDIUM = 2  # Larger fixed payload for medium-noise data.
     HIGH = 3  # Smaller blocks with extra payload for high-noise data.
-    RAW = -1  # Bypass compression and retain the source tensor.
 
 
 class DistributionFamily(Enum):
@@ -72,7 +71,7 @@ class Distribution:
 @dataclass(frozen=True)
 class CompressedTensor:
     dtype: torch.dtype  # Original input dtype (always bfloat16 for this codec).
-    data: torch.Tensor  # Fixed encoded exponent payload or raw source data.
+    data: torch.Tensor  # Fixed exponent payload or source fallback.
     size: int  # Logical number of input elements.
     sign_mantissa: torch.Tensor | None = None  # Raw sign + 7-bit mantissa.
     offsets: torch.Tensor | None = None  # Overflowing stream IDs.
