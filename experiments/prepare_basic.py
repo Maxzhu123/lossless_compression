@@ -10,7 +10,7 @@ from random import Random
 
 import torch
 
-from compress import compress, decompress
+from compress.compress import compress, decompress
 from prepare import (
     CASES,
     ITERS,

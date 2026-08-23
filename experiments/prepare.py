@@ -13,7 +13,7 @@ from dataclasses import fields
 import torch
 
 from compress.compress import compress, decompress
-from compress.tensor_buffer import TensorBuffer
+from compress.tensor_buffer import Allocation, TensorBuffer
 from compress.code_storage import (
     CompressedTensor,
     CompressionLayout,
@@ -29,59 +29,38 @@ ITERS = 15
 
 
 def get_compressed_size(data: CompressedTensor) -> int:
-    total = 0
-    if data.fallback_buffer is not None:
-        # Include the actual bytes used in the shared TensorBuffer: compact
-        # metadata arrays sized by the active fallback count plus the raw
-        # fallback data itself.  The persistent buffer capacity is intentionally
-        # not counted, only what this compressed tensor actually occupies.
-        bad_count = int(data.fallback_count.item())
-        fallback_bytes = int(data.fallback_used.item())
-        metadata_bytes = bad_count * (
-            data.offsets.element_size()
-            + data.fallback_starts.element_size()
-            + data.fallback_offsets.element_size()
-        )
-        total += metadata_bytes + fallback_bytes
+    """Return GPU allocation bytes owned by one compressed tensor.
 
+    A descriptor-backed tensor counts its reserved region, rather than the
+    entire shared arena that may also serve other compressed tensors.
+    """
+    allocations: dict[tuple[torch.device, int], int] = {}
     for f in fields(data):
         tensor = getattr(data, f.name)
         if isinstance(tensor, torch.Tensor):
-            # The shared TensorBuffer is a scratch pool owned by the benchmark.
-            # When a tensor is backed by it, only the actual buffer occupancy is
-            # counted above, so skip the full-size buffer-backed tensors here.
-            if f.name == "fallback_buffer":
+            if f.name == "fallback_buffer" and data.fallback_descriptor is not None:
                 continue
-            if (
-                data.fallback_buffer is not None
-                and f.name in {"offsets", "fallback_starts", "fallback_offsets", "fallback_count", "fallback_used"}
-            ):
-                continue
-            total += tensor.nbytes
+            storage = tensor.untyped_storage()
+            key = (tensor.device, storage.data_ptr())
+            allocations[key] = storage.nbytes()
+    total = sum(allocations.values())
+    if data.fallback_descriptor is not None:
+        total += int(data.fallback_descriptor[1].item())
     return total
 
 
-def free_compressed(data: CompressedTensor, buffer: TensorBuffer) -> None:
+def free_compressed(
+    data: CompressedTensor,
+    buffer: TensorBuffer,
+) -> None:
     """Release every buffer-backed allocation held by a compressed tensor."""
-    # Only release regions that were actually carved from this TensorBuffer;
-    # non-buffer compressed tensors own their fallback tensors directly.
     if (
-        data.fallback_buffer is None
+        data.fallback_descriptor is None
+        or data.fallback_buffer is None
         or data.fallback_buffer is not buffer.data
     ):
         return
-
-    # Metadata arrays are allocated as views in the shared TensorBuffer.
-    for tensor in (
-        data.offsets,
-        data.fallback_starts,
-        data.fallback_offsets,
-        data.fallback_used,
-    ):
-        if tensor is not None:
-            buffer.free(tensor)
-
-    buffer.free(data.fallback_base)
+    buffer.free(Allocation(data.fallback_descriptor, buffer))
 
 
 def _pack_exponents(exponents: torch.Tensor, G: torch.Generator) -> torch.Tensor:
@@ -125,11 +104,6 @@ def make_standard_exponents(n: int, G: torch.Generator) -> torch.Tensor:
     return exponents.to(torch.int8)
 
 
-def make_standard(n: int, seed: int = 0) -> torch.Tensor:
-    G = torch.Generator(device="cuda").manual_seed(seed)
-    return _pack_exponents(make_standard_exponents(n, G), G)
-
-
 def make_gaussian_exponents(
     n: int, mean: float = 0.0, std: float = 2.0, seed: int = 0,
 ) -> torch.Tensor:
@@ -153,12 +127,6 @@ def make_laplace_exponents(
     u = torch.rand(n, device="cuda", dtype=torch.float32, generator=G) - 0.5
     values = -scale * torch.sign(u) * torch.log1p(-2.0 * u.abs())
     return values.round().clamp(-127, 127).to(torch.int8)
-
-
-def make_laplace(n: int, scale: float = 1.5, seed: int = 0) -> torch.Tensor:
-    exponents = make_laplace_exponents(n, scale=scale, seed=seed)
-    G = torch.Generator(device="cuda").manual_seed(seed + 10)
-    return _pack_exponents(exponents, G)
 
 
 def make_localized_noise(n: int, noise_fraction: float = 0.2, seed: int = 0):
@@ -203,11 +171,14 @@ CASES = [
 
 def make_data(name: str, n: int) -> torch.Tensor:
     if name in {"standard/standard/clean", "standard/standard/medium"}:
-        return make_standard(n)
+        G = torch.Generator(device="cuda").manual_seed(0)
+        return _pack_exponents(make_standard_exponents(n, G), G)
     if name in {"gaussian/gaussian/clean", "gaussian/standard/clean"}:
         return make_gaussian(n)
     if name in {"laplace/laplace/clean", "laplace/gaussian/clean"}:
-        return make_laplace(n)
+        exponents = make_laplace_exponents(n)
+        G = torch.Generator(device="cuda").manual_seed(10)
+        return _pack_exponents(exponents, G)
     if name in {
         "shifted_gaussian/gaussian/clean",
         "shifted_gaussian/standard/clean",
@@ -291,7 +262,10 @@ def main():
     # for one worst-case raw-exponent fallback (max SHAPE_OPTIONS bytes) plus
     # full-size int32 fallback metadata arrays.  Inside run_case buffer-backed
     # regions are freed after each iteration so the space is reused.
-    buffer = TensorBuffer(max(SHAPE_OPTIONS) + 64 * 1024 * 1024, device="cuda")
+    buffer = TensorBuffer(
+        max(SHAPE_OPTIONS) + 64 * 1024 * 1024,
+        device="cuda",
+    )
 
     total_time = 0.0
     for weight, (name, distribution, layout, max_ratio, _, n) in zip(

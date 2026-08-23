@@ -165,11 +165,33 @@ def _encode_kernel(
     restore_value=["bad_count", "fallback_total"],
 )
 @triton.jit
+def _count_bad_streams_kernel(
+    extra_starts,
+    bad_count, fallback_total, n_streams, steps,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n_streams
+    start = tl.load(extra_starts + offs, mask=mask, other=steps)
+    bad = mask & (start < steps)
+    lengths = tl.where(bad, steps - start, 0)
+    tl.atomic_add(bad_count, tl.sum(bad.to(tl.int32), axis=0))
+    tl.atomic_add(fallback_total, tl.sum(lengths, axis=0))
+
+
+@triton.autotune(
+    configs=COMPACT_BAD_STREAMS_AUTOTUNE_CONFIGS,
+    key=["n_streams", "steps"],
+    restore_value=["bad_count", "fallback_total"],
+)
+@triton.jit
 def _compact_bad_streams_kernel(
     extra_starts,
     bad_streams_out, bad_starts_out, fallback_offsets_out,
+    metadata_buffer, allocation_descriptor, final_counts,
     bad_count, fallback_total, n_streams, steps,
-    BLOCK: tl.constexpr,
+    BUFFERED: tl.constexpr, BLOCK: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
@@ -184,13 +206,24 @@ def _compact_bad_streams_kernel(
     prefix = tl.cumsum(bad.to(tl.int32), axis=0) - bad.to(tl.int32)
     offset_prefix = tl.cumsum(lengths, axis=0) - lengths
     pos = block_start + prefix
-    tl.store(bad_streams_out + pos, offs.to(tl.int32), mask=bad)
-    tl.store(bad_starts_out + pos, start, mask=bad)
-    tl.store(
-        fallback_offsets_out + pos,
-        fallback_block_start + offset_prefix,
-        mask=bad,
-    )
+    if BUFFERED:
+        count = tl.load(final_counts).to(tl.int32)
+        base_words = tl.load(allocation_descriptor).to(tl.int32) // 4
+        tl.store(metadata_buffer + base_words + pos, offs.to(tl.int32), mask=bad)
+        tl.store(metadata_buffer + base_words + count + pos, start, mask=bad)
+        tl.store(
+            metadata_buffer + base_words + 2 * count + pos,
+            fallback_block_start + offset_prefix,
+            mask=bad,
+        )
+    else:
+        tl.store(bad_streams_out + pos, offs.to(tl.int32), mask=bad)
+        tl.store(bad_starts_out + pos, start, mask=bad)
+        tl.store(
+            fallback_offsets_out + pos,
+            fallback_block_start + offset_prefix,
+            mask=bad,
+        )
 
 
 @triton.autotune(
@@ -201,19 +234,40 @@ def _compact_bad_streams_kernel(
 def _compact_extra_kernel(
     source_bits,
     extra_streams, extra_starts,
-    fallback_offsets, fallback_data, bad_count,
+    fallback_offsets, fallback_data,
+    metadata_buffer, allocation_descriptor, final_counts, bad_count,
     n_elements,
-    BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr, TILE: tl.constexpr
+    BUFFERED: tl.constexpr,
+    BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr, TILE: tl.constexpr,
 ):
     pid = tl.program_id(0)
     tile = pid * TILE + tl.arange(0, TILE)
-    count = tl.load(bad_count).to(tl.int32)
+    if BUFFERED:
+        count = tl.load(final_counts).to(tl.int32)
+    else:
+        count = tl.load(bad_count).to(tl.int32)
     if pid * TILE >= count:
         return
     valid = tile < count
-    stream = tl.load(extra_streams + tile, mask=valid, other=0).to(tl.int32)
-    start = tl.load(extra_starts + tile, mask=valid, other=N_STEPS).to(tl.int32)
-    fallback_offset = tl.load(fallback_offsets + tile, mask=valid, other=0).to(tl.int32)
+    if BUFFERED:
+        base = tl.load(allocation_descriptor).to(tl.int32)
+        base_words = base // 4
+        stream = tl.load(metadata_buffer + base_words + tile, mask=valid, other=0).to(tl.int32)
+        start = tl.load(
+            metadata_buffer + base_words + count + tile,
+            mask=valid,
+            other=N_STEPS,
+        ).to(tl.int32)
+        fallback_offset = tl.load(
+            metadata_buffer + base_words + 2 * count + tile,
+            mask=valid,
+            other=0,
+        ).to(tl.int32)
+        fallback_base = base + 12 * count
+    else:
+        stream = tl.load(extra_streams + tile, mask=valid, other=0).to(tl.int32)
+        start = tl.load(extra_starts + tile, mask=valid, other=N_STEPS).to(tl.int32)
+        fallback_offset = tl.load(fallback_offsets + tile, mask=valid, other=0).to(tl.int32)
     block = stream // N_LANES
     lane = stream - block * N_LANES
     for step in tl.range(0, N_STEPS):
@@ -221,11 +275,14 @@ def _compact_extra_kernel(
         active = valid & (step < (N_STEPS - start)) & (source_offset < n_elements)
         bits = tl.load(source_bits + source_offset, mask=active, other=0).to(tl.int32)
         values = (((bits >> 7) & 0xFF) - 127).to(tl.int8)
-        tl.store(
-            fallback_data + fallback_offset + step,
-            values,
-            mask=active,
-        )
+        if BUFFERED:
+            tl.store(
+                fallback_data + fallback_base + fallback_offset + step,
+                values,
+                mask=active,
+            )
+        else:
+            tl.store(fallback_data + fallback_offset + step, values, mask=active)
 
 
 @triton.autotune(
@@ -235,9 +292,11 @@ def _compact_extra_kernel(
 @triton.jit
 def _scatter_fallback_kernel(
     bad_streams, bad_starts,
-    fallback_offsets, fallback_buffer, fallback_base, fallback_count,
+    fallback_offsets, fallback_buffer, fallback_base,
+    metadata_buffer, allocation_descriptor, fallback_count,
     sign_mantissa,
     output, n_elements,
+    BUFFERED: tl.constexpr,
     TILE: tl.constexpr, BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -246,9 +305,25 @@ def _scatter_fallback_kernel(
     if pid * TILE >= count:
         return
     valid = tile < count
-    stream = tl.load(bad_streams + tile, mask=valid, other=0).to(tl.int32)
-    start = tl.load(bad_starts + tile, mask=valid, other=N_STEPS).to(tl.int32)
-    fallback_offset = tl.load(fallback_offsets + tile, mask=valid, other=0).to(tl.int32)
+    if BUFFERED:
+        base = tl.load(allocation_descriptor).to(tl.int32)
+        base_words = base // 4
+        stream = tl.load(metadata_buffer + base_words + tile, mask=valid, other=0).to(tl.int32)
+        start = tl.load(
+            metadata_buffer + base_words + count + tile,
+            mask=valid,
+            other=N_STEPS,
+        ).to(tl.int32)
+        fallback_offset = tl.load(
+            metadata_buffer + base_words + 2 * count + tile,
+            mask=valid,
+            other=0,
+        ).to(tl.int32)
+        fallback_base = base + 12 * count
+    else:
+        stream = tl.load(bad_streams + tile, mask=valid, other=0).to(tl.int32)
+        start = tl.load(bad_starts + tile, mask=valid, other=N_STEPS).to(tl.int32)
+        fallback_offset = tl.load(fallback_offsets + tile, mask=valid, other=0).to(tl.int32)
     block = stream // N_LANES
     lane = stream - block * N_LANES
     for step in tl.range(0, N_STEPS):
@@ -267,11 +342,7 @@ def _scatter_fallback_kernel(
             | (sm & 0x7F)
             | ((sm & 0x80) << 8)
         )
-        tl.store(
-            output + output_offset,
-            packed.to(tl.int16),
-            mask=active,
-        )
+        tl.store(output + output_offset, packed.to(tl.int16), mask=active)
 
 
 @triton.jit

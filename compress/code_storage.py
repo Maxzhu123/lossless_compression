@@ -77,6 +77,7 @@ class CompressedTensor:
     fallback_starts: torch.Tensor | None = None  # First fallback step per stream.
     fallback_offsets: torch.Tensor | None = None  # Offsets into fallback storage.
     fallback_buffer: torch.Tensor | None = None  # Shared or private fallback storage.
+    fallback_descriptor: torch.Tensor | None = None  # Device allocator descriptor.
     fallback_base: int = 0  # Byte offset of this tensor's region in fallback_buffer.
     fallback_count: torch.Tensor | None = None  # Device scalar with the number of fallback streams.
     fallback_used: torch.Tensor | None = None  # Device scalar with actual fallback bytes used.
