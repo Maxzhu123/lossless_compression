@@ -3,7 +3,7 @@ from functools import lru_cache
 import torch
 
 from .probabilities import standard_probabilities, gaussian_probabilities, laplace_probabilities
-from .code_storage import Distribution, DistributionFamily
+from .code_storage import Distribution, DistType
 
 
 FIRST_BITS = 10
@@ -253,11 +253,11 @@ def get_distribution_tables(dist: Distribution):
     """Return cached CUDA encode, decode, and rare-length tables for ``dist``."""
     if not isinstance(dist, Distribution):
         raise TypeError("distribution must be a Distribution instance")
-    if dist.family == DistributionFamily.STANDARD:
+    if dist.family == DistType.STANDARD:
         probabilities = standard_probabilities()
-    elif dist.family == DistributionFamily.GAUSSIAN:
+    elif dist.family == DistType.GAUSSIAN:
         probabilities = gaussian_probabilities(dist.param)
-    elif dist.family == DistributionFamily.LAPLACE:
+    elif dist.family == DistType.LAPLACE:
         probabilities = laplace_probabilities(dist.param)
     else:  # pragma: no cover - guarded by Distribution validation
         raise ValueError(f"unknown distribution family: {dist.family!r}")

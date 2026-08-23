@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from enum import Enum, IntEnum
 import torch
 
@@ -9,7 +9,7 @@ class CompressionLayout(IntEnum):
     HIGH = 3  # Smaller blocks with extra payload for high-noise data.
 
 
-class DistributionFamily(Enum):
+class DistType(Enum):
     STANDARD = "standard"
     GAUSSIAN = "gaussian"
     LAPLACE = "laplace"
@@ -24,20 +24,20 @@ class Distribution:
     are rounded to the nearest 0.25 so the table cache stays small.
     """
 
-    family: DistributionFamily
+    family: DistType = DistType.STANDARD
     param: float | None = None
 
     def __post_init__(self):
-        if not isinstance(self.family, DistributionFamily):
+        if not isinstance(self.family, DistType):
             raise TypeError("family must be a DistributionFamily member")
-        if self.family == DistributionFamily.STANDARD:
+        if self.family == DistType.STANDARD:
             if self.param is not None:
                 raise ValueError("standard distribution takes no parameter")
         else:
             if self.param is None:
                 default = (
                     2.0
-                    if self.family == DistributionFamily.GAUSSIAN
+                    if self.family == DistType.GAUSSIAN
                     else 1.5
                 )
                 object.__setattr__(self, "param", default)
@@ -48,22 +48,11 @@ class Distribution:
                 param = max(0.25, round(param / 0.25) * 0.25)
                 object.__setattr__(self, "param", float(param))
 
-    @classmethod
-    def standard(cls) -> "Distribution":
-        return cls(DistributionFamily.STANDARD)
-
-    @classmethod
-    def gaussian(cls, std: float = 2.0) -> "Distribution":
-        return cls(DistributionFamily.GAUSSIAN, std)
-
-    @classmethod
-    def laplace(cls, scale: float = 1.5) -> "Distribution":
-        return cls(DistributionFamily.LAPLACE, scale)
 
     def __str__(self) -> str:
-        if self.family == DistributionFamily.STANDARD:
+        if self.family == DistType.STANDARD:
             return self.family.value
-        label = "std" if self.family == DistributionFamily.GAUSSIAN else "scale"
+        label = "std" if self.family == DistType.GAUSSIAN else "scale"
         return f"{self.family.value}/{label}={self.param}"
 
 
@@ -81,6 +70,23 @@ class CompressedTensor:
     fallback_count: torch.Tensor | None = None  # Device scalar with the number of fallback streams.
     fallback_used: torch.Tensor | None = None  # Device scalar with actual fallback bytes used.
     layout: CompressionLayout = CompressionLayout.CLEAN  # Encoding geometry.
-    distribution: Distribution = Distribution(DistributionFamily.STANDARD)  # Huffman table selector.
+    distribution: Distribution = Distribution(DistType.STANDARD)  # Huffman table selector.
     center: torch.Tensor | int = 0  # CUDA center scalar used by encode/decode.
     shape: tuple[int, ...] = ()  # Original tensor shape.
+
+    def memory_size(self):
+        """Return GPU allocation bytes owned by one compressed tensor.
+        """
+        allocations: dict[tuple[torch.device, int], int] = {}
+        for f in fields(self):
+            tensor = getattr(self, f.name)
+            if isinstance(tensor, torch.Tensor):
+                if f.name == "fallback_buffer" and self.fallback_descriptor is not None:
+                    continue
+                storage = tensor.untyped_storage()
+                key = (tensor.device, storage.data_ptr())
+                allocations[key] = storage.nbytes()
+        total = sum(allocations.values())
+        if self.fallback_descriptor is not None:
+            total += int(self.fallback_descriptor[1].item())
+        return total

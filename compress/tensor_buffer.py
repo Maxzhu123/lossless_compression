@@ -1,6 +1,6 @@
 """GPU-resident first-fit allocator for descriptor-based CUDA buffers."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 import torch
 import triton
 from triton import language as tl
@@ -213,9 +213,7 @@ class TensorBuffer:
     """
 
     def __init__(
-        self,
-        capacity_bytes: int,
-        *,
+        self, capacity_bytes: int, *,
         max_free_regions: int = 256,
         device: torch.device | str | None = None,
     ) -> None:
@@ -266,24 +264,11 @@ class TensorBuffer:
 
     def allocate(self, nbytes: torch.Tensor) -> Allocation:
         """Reserve a one-element CUDA integer request without host sync."""
-        if nbytes.device != self.device:
-            raise ValueError("nbytes must be on the allocator device")
-        if nbytes.numel() != 1:
-            raise ValueError("nbytes must contain exactly one value")
-        if nbytes.dtype not in {torch.int32, torch.int64}:
-            raise TypeError("nbytes must have an integer dtype")
-
         descriptor = torch.empty(4, dtype=torch.int32, device=self.device)
         _allocate_kernel[(1,)](
-            nbytes,
-            descriptor,
-            self._free_starts,
-            self._free_sizes,
-            self._free_count,
-            self._lock,
-            self._generation,
-            ALIGNMENT=_ALIGNMENT,
-            MAX_FREE_REGIONS=self.max_free_regions,
+            nbytes, descriptor,
+            self._free_starts, self._free_sizes, self._free_count, self._lock, self._generation,
+            ALIGNMENT=_ALIGNMENT, MAX_FREE_REGIONS=self.max_free_regions,
         )
         return Allocation(descriptor, self)
 
@@ -296,12 +281,8 @@ class TensorBuffer:
         status = torch.empty(1, dtype=torch.int32, device=self.device)
         _free_kernel[(1,)](
             allocation.descriptor,
-            self._free_starts,
-            self._free_sizes,
-            self._free_count,
-            self._lock,
-            self._generation,
-            status,
+            self._free_starts, self._free_sizes, self._free_count,
+            self._lock, self._generation, status,
             MAX_FREE_REGIONS=self.max_free_regions,
         )
         return status
@@ -309,12 +290,8 @@ class TensorBuffer:
     def reset(self) -> None:
         """Reset asynchronously; previously returned descriptors become stale."""
         _reset_kernel[(1,)](
-            self._free_starts,
-            self._free_sizes,
-            self._free_count,
-            self._lock,
-            self._generation,
-            self.capacity_bytes,
+            self._free_starts, self._free_sizes,  self._free_count,
+            self._lock, self._generation, self.capacity_bytes,
             MAX_FREE_REGIONS=self.max_free_regions,
         )
 

@@ -6,7 +6,7 @@ import torch
 
 from compress.compress import compress, decompress
 from compress.tensor_buffer import Allocation, TensorBuffer
-from compress.code_storage import CompressedTensor, CompressionLayout, Distribution, DistributionFamily
+from compress.code_storage import CompressedTensor, CompressionLayout, Distribution, DistType
 
 
 SHAPE_OPTIONS = [50_000_000, 200_000_000]
@@ -135,9 +135,9 @@ def _bf16_ratio(exponent_ratio: float) -> float:
 
 
 # Each case: (name, distribution, layout, max_total_bf16_ratio, weight)
-DIST_STANDARD = Distribution(DistributionFamily.STANDARD)
-DIST_GAUSSIAN = Distribution(DistributionFamily.GAUSSIAN)
-DIST_LAPLACE = Distribution(DistributionFamily.LAPLACE)
+DIST_STANDARD = Distribution(DistType.STANDARD)
+DIST_GAUSSIAN = Distribution(DistType.GAUSSIAN)
+DIST_LAPLACE = Distribution(DistType.LAPLACE)
 
 
 CASES = [

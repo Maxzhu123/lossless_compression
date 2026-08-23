@@ -54,7 +54,7 @@ def _estimate_center(source_bits, size):
 def compress(
     data: torch.Tensor,
     layout: CompressionLayout = CompressionLayout.CLEAN,
-    distribution: Distribution = Distribution.standard(),
+    distribution: Distribution = Distribution(),
     buffer: TensorBuffer | None = None,
 ) -> CompressedTensor:
     """Losslessly encode the exponent byte of a CUDA bfloat16 tensor.
