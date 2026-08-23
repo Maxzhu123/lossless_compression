@@ -1,0 +1,367 @@
+import math
+
+import numpy as np
+from dataclasses import dataclass
+from functools import lru_cache
+
+import torch
+
+from code_storage import Distribution, DistributionFamily
+
+
+FIRST_BITS = 10
+FIRST_MASK = (1 << FIRST_BITS) - 1
+
+
+def _normal_cdf(x):
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _probabilities_from_frequency(frequency):
+    """Expand a frequency dict into a 256-entry probability table."""
+    frequency = dict(frequency)
+    if "tail" not in frequency:
+        frequency["tail"] = 1_500_000
+    total = sum(frequency.values())
+    common = [v for v in frequency if v != "tail"]
+    tail = frequency["tail"]
+    rare = [v for v in range(-128, 128) if v not in common]
+    probs = np.zeros(256, dtype=np.float64)
+    for v in common:
+        probs[v & 255] = frequency[v] / total
+    if rare:
+        probs[[v & 255 for v in rare]] = tail / total / len(rare)
+    return probs
+
+
+def _standard_probabilities():
+    """Probability table for the standard benchmark distribution."""
+    return _probabilities_from_frequency(_make_standard_frequency())
+
+
+def _gaussian_probabilities(std=2.0, uniform_mix=0.01):
+    """Rounded/clamped Gaussian int8 probability table.
+
+    A small uniform mixture is included so the designed codebook remains
+    robust to the localized uniform-noise cases in the benchmark.
+    """
+    p = np.zeros(256, dtype=np.float64)
+    for v in range(-128, 128):
+        lo = _normal_cdf((v - 0.5) / std)
+        hi = _normal_cdf((v + 0.5) / std)
+        if v == -128:
+            lo = 0.0
+        if v == 127:
+            hi = 1.0
+        p[v & 255] = hi - lo
+    p /= p.sum()
+    uniform = np.full(256, 1.0 / 256.0, dtype=np.float64)
+    p = (1.0 - uniform_mix) * p + uniform_mix * uniform
+    return p
+
+
+def _laplace_probabilities(scale=1.5):
+    """Rounded/clamped Laplace int8 probability table."""
+    p = np.zeros(256, dtype=np.float64)
+
+    def cdf(x):
+        if x < 0:
+            return 0.5 * math.exp(x / scale)
+        return 1.0 - 0.5 * math.exp(-x / scale)
+
+    for v in range(-128, 128):
+        lo = cdf(v - 0.5)
+        hi = cdf(v + 0.5)
+        if v == -128:
+            lo = 0.0
+        if v == 127:
+            hi = 1.0
+        p[v & 255] = hi - lo
+    p /= p.sum()
+    return p
+
+
+def _length_limited_huffman_lengths(
+    weights,
+    max_length=FIRST_BITS,
+):
+    """Optimal length-limited Huffman code lengths via Package-Merge."""
+    weights = np.asarray(weights, dtype=np.longdouble)
+    n = len(weights)
+
+    if n == 0:
+        return np.empty(0, dtype=np.int16)
+    if np.any(weights < 0) or not np.any(weights > 0):
+        raise ValueError("weights must be nonnegative and not all zero")
+    if n > (1 << max_length):
+        raise ValueError("Too many symbols for requested maximum length")
+
+    if n <= 2:
+        return np.ones(n, dtype=np.int16)
+
+    # Package-Merge works with ascending weights.
+    order = np.argsort(weights, kind="stable")
+    original = weights[order].tolist()
+    previous = original
+
+    rows = []
+
+    for _ in range(max_length - 1):
+        m = len(previous) & ~1
+        packages = [
+            previous[i] + previous[i + 1]
+            for i in range(0, m, 2)
+        ]
+
+        current = []
+        is_package = []
+
+        i = j = 0
+        while i < n and j < len(packages):
+            if original[i] <= packages[j]:
+                current.append(original[i])
+                is_package.append(False)
+                i += 1
+            else:
+                current.append(packages[j])
+                is_package.append(True)
+                j += 1
+
+        if i < n:
+            current.extend(original[i:])
+            is_package.extend([False] * (n - i))
+
+        if j < len(packages):
+            current.extend(packages[j:])
+            is_package.extend([True] * (len(packages) - j))
+
+        rows.append(is_package)
+        previous = current
+
+    lengths_sorted = np.zeros(n, dtype=np.int16)
+    num_analyze = 2 * n - 2
+
+    for is_package in reversed(rows):
+        num_merged = 0
+        symbol = 0
+
+        for packaged in is_package[:num_analyze]:
+            if packaged:
+                num_merged += 1
+            else:
+                lengths_sorted[symbol] += 1
+                symbol += 1
+
+        num_analyze = 2 * num_merged
+
+    lengths_sorted[:num_analyze] += 1
+
+    lengths = np.empty(n, dtype=np.int16)
+    lengths[order] = lengths_sorted
+    return lengths
+
+
+def _optimal_escape_solution(probabilities, max_length=FIRST_BITS, max_esc_length=8):
+    """Exact optimal escape-cutoff solution using Package-Merge.
+
+    ``max_esc_length`` is accepted for API compatibility.  The package-merge
+    implementation uses a single global max length; when an ESC cap is given
+    we use it as the global cap so rare codes also stay within the existing
+    decoder constraints.
+    """
+    if max_esc_length is not None:
+        max_length = min(max_length, max_esc_length)
+    p = np.asarray(probabilities, dtype=np.longdouble)
+    p /= p.sum()
+    n = len(p)
+
+    order = np.argsort(-p, kind="stable")
+    ps = p[order]
+
+    tail = np.zeros(n + 1, dtype=np.longdouble)
+    tail[1:] = np.cumsum(ps[::-1], dtype=np.longdouble)
+
+    # No ESC case.
+    lengths = _length_limited_huffman_lengths(ps, max_length)
+    best_cost = float(np.dot(ps, lengths.astype(np.longdouble)))
+    best_k = 0
+    best_lengths = lengths
+    best_pesc = 0.0
+
+    for k in range(1, n):
+        num_direct = n - k
+        p_esc = float(tail[k])
+
+        weights = np.empty(num_direct + 1, dtype=np.longdouble)
+        weights[:num_direct] = ps[:num_direct]
+        weights[-1] = tail[k]
+
+        lengths = _length_limited_huffman_lengths(weights, max_length)
+
+        cost = float(
+            np.dot(weights, lengths.astype(np.longdouble)) + 8.0 * tail[k]
+        )
+
+        if cost < best_cost:
+            best_cost = cost
+            best_k = k
+            best_lengths = lengths.copy()
+            best_pesc = p_esc
+
+    if best_k == 0:
+        direct_indices = order
+        escaped_indices = np.empty(0, dtype=np.int64)
+        direct_lengths = best_lengths
+        esc_length = 0
+    else:
+        num_direct = n - best_k
+        direct_indices = order[:num_direct]
+        escaped_indices = order[num_direct:]
+        direct_lengths = best_lengths[:num_direct]
+        esc_length = int(best_lengths[-1])
+
+    return {
+        "expected_bits": best_cost,
+        "k": best_k,
+        "direct_indices": direct_indices,
+        "escaped_indices": escaped_indices,
+        "direct_lengths": direct_lengths,
+        "esc_length": esc_length,
+        "escape_probability": best_pesc,
+    }
+
+
+def _canonical_codes(lengths):
+    """Build canonical prefix codes from a length vector."""
+    n = len(lengths)
+    max_len = max(lengths) if n else 0
+    counts = [0] * (max_len + 1)
+    for length in lengths:
+        counts[length] += 1
+    next_code = [0] * (max_len + 1)
+    code = 0
+    for bits in range(1, max_len + 1):
+        code = (code + counts[bits - 1]) << 1
+        next_code[bits] = code
+    codes = {}
+    for idx in sorted(range(n), key=lambda i: (lengths[i], i)):
+        length = lengths[idx]
+        codes[idx] = (next_code[length], length)
+        next_code[length] += 1
+    return codes
+
+
+def _reverse_bits(value, length):
+    result = 0
+    for _ in range(length):
+        result = (result << 1) | (value & 1)
+        value >>= 1
+    return result
+
+
+def _build_huffman_tables_from_lengths(probabilities, max_length=FIRST_BITS, max_esc_length=8):
+    """Exact optimal escape-cutoff Huffman tables.
+
+    Returns the ``(encode, decode, rare_length)`` triple generated from the
+    exact escape-cutoff solver.
+    """
+    solution = _optimal_escape_solution(
+        probabilities, max_length=max_length, max_esc_length=max_esc_length
+    )
+    direct_indices = solution["direct_indices"]
+    escaped_indices = solution["escaped_indices"]
+    direct_lengths = solution["direct_lengths"]
+    esc_length = solution["esc_length"]
+
+    # Lengths for all direct symbols plus ESC as the last symbol.
+    all_lengths = np.concatenate([direct_lengths, [esc_length]])
+    codes = _canonical_codes(all_lengths)
+    esc_code, _ = codes[len(direct_lengths)]  # ESC is the last symbol
+
+    # Build codewords for all 256 raw exponent bytes.
+    codewords = {}
+    for pos, raw in enumerate(direct_indices):
+        value = raw if raw < 128 else raw - 256
+        codewords[value] = codes[pos]
+    for raw in escaped_indices:
+        value = raw if raw < 128 else raw - 256
+        codewords[value] = (
+            (esc_code << 8) | _reverse_bits(raw & 255, 8),
+            esc_length + 8,
+        )
+
+    encode = []
+    for raw in range(256):
+        value = raw if raw < 128 else raw - 256
+        code, length = codewords[value]
+        encode.append(_reverse_bits(code, length) | (length << 20))
+
+    decode = [0] * (1 << FIRST_BITS)
+    for symbol, (code, length) in codewords.items():
+        reversed_code = _reverse_bits(code, length)
+        packed = length | (symbol << 8)
+        if length <= FIRST_BITS:
+            for suffix in range(1 << (FIRST_BITS - length)):
+                decode[reversed_code | (suffix << length)] = packed
+        else:
+            decode[reversed_code & FIRST_MASK] = 0
+
+    return encode, decode, esc_length
+
+
+def _make_standard_frequency():
+    """Default static Huffman codebook for the benchmark body."""
+    return {
+        -9: 97_300,
+        -8: 193_000,
+        -7: 386_000,
+        -6: 762_000,
+        -5: 1_488_000,
+        -4: 2_850_000,
+        -3: 5_186_000,
+        -2: 8_623_000,
+        -1: 11_866_000,
+        0: 11_812_000,
+        1: 5_271_000,
+        2: 976_000,
+        3: 390_000,
+    }
+
+
+@dataclass(frozen=True)
+class DistributionTables:
+    encode_shifted: torch.Tensor
+    decode: torch.Tensor
+    rare_length: int
+
+
+def _make_shifted_encode_table(encode_list):
+    encode_tensor = torch.tensor(encode_list, dtype=torch.int32, device="cuda")
+    centers = torch.arange(-128, 128, device="cuda", dtype=torch.int64).view(
+        256, 1
+    )
+    symbols = torch.arange(256, device="cuda", dtype=torch.int64).view(1, 256)
+    indices = (symbols - centers) % 256
+    return encode_tensor[indices]
+
+
+@lru_cache(maxsize=None)
+def get_distribution_tables(dist: Distribution) -> DistributionTables:
+    """Return cached CUDA Huffman tables for ``dist``."""
+    if not isinstance(dist, Distribution):
+        raise TypeError("distribution must be a Distribution instance")
+    if dist.family == DistributionFamily.STANDARD:
+        probabilities = _standard_probabilities()
+    elif dist.family == DistributionFamily.GAUSSIAN:
+        probabilities = _gaussian_probabilities(dist.param)
+    elif dist.family == DistributionFamily.LAPLACE:
+        probabilities = _laplace_probabilities(dist.param)
+    else:  # pragma: no cover - guarded by Distribution validation
+        raise ValueError(f"unknown distribution family: {dist.family!r}")
+
+    encode, decode, rare_length = _build_huffman_tables_from_lengths(
+        probabilities, max_length=FIRST_BITS, max_esc_length=8
+    )
+    decode_tensor = torch.tensor(decode, dtype=torch.int32, device="cuda")
+    shifted = _make_shifted_encode_table(encode)
+    return DistributionTables(shifted, decode_tensor, rare_length)

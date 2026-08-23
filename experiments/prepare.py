@@ -1,0 +1,318 @@
+"""Distribution-aware BF16 exponent-compression benchmark.
+
+The test suite mirrors ``compression/prepare.py``. Each case first creates
+the same int8 exponent distribution, then packs it into BF16 values with
+independent random sign and mantissa bits. The codec must therefore compress
+only the exponent field while preserving every BF16 bit exactly.
+"""
+
+import time
+from random import Random
+from dataclasses import fields
+
+import torch
+
+from compress.code_main import compress, decompress
+from compress.code_memory import TensorBuffer
+from compress.code_storage import (
+    CompressedTensor,
+    CompressionLayout,
+    Distribution,
+    DistributionFamily,
+)
+
+
+SHAPE_OPTIONS = [50_000_000, 200_000_000]
+SHAPE_SEED = 0
+WARMUP = 3
+ITERS = 15
+
+
+def get_compressed_size(data: CompressedTensor) -> int:
+    total = 0
+    if data.fallback_buffer is not None:
+        # Include the actual bytes used in the shared TensorBuffer: compact
+        # metadata arrays sized by the active fallback count plus the raw
+        # fallback data itself.  The persistent buffer capacity is intentionally
+        # not counted, only what this compressed tensor actually occupies.
+        bad_count = int(data.fallback_count.item())
+        fallback_bytes = int(data.fallback_used.item())
+        metadata_bytes = bad_count * (
+            data.offsets.element_size()
+            + data.fallback_starts.element_size()
+            + data.fallback_offsets.element_size()
+        )
+        total += metadata_bytes + fallback_bytes
+
+    for f in fields(data):
+        tensor = getattr(data, f.name)
+        if isinstance(tensor, torch.Tensor):
+            # The shared TensorBuffer is a scratch pool owned by the benchmark.
+            # When a tensor is backed by it, only the actual buffer occupancy is
+            # counted above, so skip the full-size buffer-backed tensors here.
+            if f.name == "fallback_buffer":
+                continue
+            if (
+                data.fallback_buffer is not None
+                and f.name in {"offsets", "fallback_starts", "fallback_offsets", "fallback_data", "fallback_count", "fallback_used"}
+            ):
+                continue
+            total += tensor.nbytes
+    return total
+
+
+def free_compressed(data: CompressedTensor, buffer: TensorBuffer) -> None:
+    """Release every buffer-backed allocation held by a compressed tensor."""
+    # Only release regions that were actually carved from this TensorBuffer;
+    # non-buffer compressed tensors own their fallback tensors directly.
+    if (
+        data.fallback_buffer is None
+        or buffer is None
+        or data.fallback_buffer is not buffer.data
+    ):
+        return
+
+    # Metadata arrays are allocated as views in the shared TensorBuffer.
+    for tensor in (
+        data.offsets,
+        data.fallback_starts,
+        data.fallback_offsets,
+        data.fallback_used,
+    ):
+        if tensor is not None:
+            buffer.free(tensor)
+
+    # The raw fallback data region is stored only as a base offset in the
+    # buffer-backed representation.
+    if data.fallback_data is not None:
+        buffer.free(data.fallback_data)
+    else:
+        buffer.free(data.fallback_base)
+
+
+def _pack_exponents(exponents: torch.Tensor, G: torch.Generator) -> torch.Tensor:
+    """Build BF16 values with these unbiased int8 exponents.
+
+    The raw BF16 exponent byte is biased by 127. Sign and mantissa are random
+    to ensure the raw side stream is also exercised, but do not affect the
+    distribution presented to the entropy codec.
+    """
+    exponent_bits = (exponents.to(torch.int16) + 127) & 0xFF
+    sign = torch.randint(
+        0, 2, exponents.shape, device=exponents.device, dtype=torch.int16,
+        generator=G,
+    )
+    mantissa = torch.randint(
+        0, 128, exponents.shape, device=exponents.device, dtype=torch.int16,
+        generator=G,
+    )
+    bits = (sign << 15) | (exponent_bits << 7) | mantissa
+    return bits.view(torch.bfloat16)
+
+
+def make_standard_exponents(n: int, G: torch.Generator) -> torch.Tensor:
+    """Exponential body / power-law tail matching the int8 benchmark."""
+    scale = torch.as_tensor(0.5, device="cuda", dtype=torch.bfloat16)
+    alpha = torch.as_tensor(2.8, device="cuda", dtype=torch.bfloat16)
+    p_tail = torch.as_tensor(0.05, device="cuda", dtype=torch.bfloat16)
+
+    x_tail = -scale * torch.log(p_tail)
+    u = torch.rand(n, device="cuda", dtype=torch.bfloat16, generator=G)
+    eps = torch.finfo(torch.bfloat16).eps
+    u = torch.clamp(u, max=1.0 - eps)
+
+    body = u < (1.0 - p_tail)
+    values = torch.empty_like(u)
+    values[body] = -scale * torch.log1p(-u[body])
+    values[~body] = x_tail * (p_tail / (1.0 - u[~body])) ** (
+        1.0 / (alpha - 1.0)
+    )
+    _, exponents = torch.frexp(values)
+    return exponents.to(torch.int8)
+
+
+def make_standard(n: int, seed: int = 0) -> torch.Tensor:
+    G = torch.Generator(device="cuda").manual_seed(seed)
+    return _pack_exponents(make_standard_exponents(n, G), G)
+
+
+def make_gaussian_exponents(
+    n: int, mean: float = 0.0, std: float = 2.0, seed: int = 0,
+) -> torch.Tensor:
+    G = torch.Generator(device="cuda").manual_seed(seed)
+    values = torch.randn(n, device="cuda", dtype=torch.float32, generator=G)
+    return (values * std + mean).round().clamp(-127, 127).to(torch.int8)
+
+
+def make_gaussian(
+    n: int, mean: float = 0.0, std: float = 2.0, seed: int = 0,
+) -> torch.Tensor:
+    exponents = make_gaussian_exponents(n, mean=mean, std=std, seed=seed)
+    G = torch.Generator(device="cuda").manual_seed(seed + 10)
+    return _pack_exponents(exponents, G)
+
+
+def make_laplace_exponents(
+    n: int, scale: float = 1.5, seed: int = 0,
+) -> torch.Tensor:
+    G = torch.Generator(device="cuda").manual_seed(seed)
+    u = torch.rand(n, device="cuda", dtype=torch.float32, generator=G) - 0.5
+    values = -scale * torch.sign(u) * torch.log1p(-2.0 * u.abs())
+    return values.round().clamp(-127, 127).to(torch.int8)
+
+
+def make_laplace(n: int, scale: float = 1.5, seed: int = 0) -> torch.Tensor:
+    exponents = make_laplace_exponents(n, scale=scale, seed=seed)
+    G = torch.Generator(device="cuda").manual_seed(seed + 10)
+    return _pack_exponents(exponents, G)
+
+
+def make_localized_noise(n: int, noise_fraction: float = 0.2, seed: int = 0):
+    """Gaussian-like exponent data with a contiguous uniform-noise region."""
+    exponents = make_gaussian_exponents(n, mean=0.0, std=2.0, seed=seed)
+    start = n // 2
+    end = min(n, start + int(n * noise_fraction))
+    G = torch.Generator(device="cuda").manual_seed(seed + 1)
+    exponents[start:end] = torch.randint(
+        -126, 127, (end - start,), device="cuda", dtype=torch.int8, generator=G,
+    )
+    G = torch.Generator(device="cuda").manual_seed(seed + 10)
+    return _pack_exponents(exponents, G)
+
+
+def _bf16_ratio(exponent_ratio: float) -> float:
+    """Convert an exponent-stream ratio to a total BF16 storage ratio."""
+    return (1.0 + exponent_ratio) / 2.0
+
+
+# Each case: (name, distribution, layout, max_total_bf16_ratio, weight)
+DIST_STANDARD = Distribution(DistributionFamily.STANDARD)
+DIST_GAUSSIAN = Distribution(DistributionFamily.GAUSSIAN)
+DIST_LAPLACE = Distribution(DistributionFamily.LAPLACE)
+
+
+CASES = [
+    ("standard/standard/clean", DIST_STANDARD, CompressionLayout.CLEAN, _bf16_ratio(0.42), 5),
+    ("standard/standard/medium", DIST_STANDARD, CompressionLayout.MEDIUM, _bf16_ratio(0.60), 5),
+    ("gaussian/gaussian/clean", DIST_GAUSSIAN, CompressionLayout.CLEAN, _bf16_ratio(0.42), 5),
+    ("gaussian/standard/clean", DIST_STANDARD, CompressionLayout.CLEAN, _bf16_ratio(0.65), 1),
+    ("laplace/laplace/clean", DIST_LAPLACE, CompressionLayout.CLEAN, _bf16_ratio(0.43), 5),
+    ("laplace/gaussian/clean", DIST_GAUSSIAN, CompressionLayout.CLEAN, _bf16_ratio(0.55), 1),
+    ("shifted_gaussian/gaussian/clean", DIST_GAUSSIAN, CompressionLayout.CLEAN, _bf16_ratio(0.42), 5),
+    ("shifted_gaussian/standard/clean", DIST_STANDARD, CompressionLayout.CLEAN, _bf16_ratio(0.65), 1),
+    ("localized/gaussian/high", DIST_GAUSSIAN, CompressionLayout.HIGH, _bf16_ratio(0.83), 5),
+    ("localized/standard/high", DIST_STANDARD, CompressionLayout.HIGH, _bf16_ratio(0.84), 1),
+    ("localized/gaussian/medium", DIST_GAUSSIAN, CompressionLayout.MEDIUM, _bf16_ratio(0.76), 5),
+    ("localized/standard/medium", DIST_STANDARD, CompressionLayout.MEDIUM, _bf16_ratio(0.76), 1),
+]
+
+
+def make_data(name: str, n: int) -> torch.Tensor:
+    if name in {"standard/standard/clean", "standard/standard/medium"}:
+        return make_standard(n)
+    if name in {"gaussian/gaussian/clean", "gaussian/standard/clean"}:
+        return make_gaussian(n)
+    if name in {"laplace/laplace/clean", "laplace/gaussian/clean"}:
+        return make_laplace(n)
+    if name in {
+        "shifted_gaussian/gaussian/clean",
+        "shifted_gaussian/standard/clean",
+    }:
+        return make_gaussian(n, mean=50.0)
+    if name in {
+        "localized/gaussian/high",
+        "localized/standard/high",
+        "localized/gaussian/medium",
+        "localized/standard/medium",
+    }:
+        return make_localized_noise(n)
+    raise ValueError(f"unknown case: {name}")
+
+
+def run_case(name, n, distribution, layout, max_ratio, buffer):
+    x = make_data(name, n)
+
+    # Correctness pass: allocate, decode, then release the buffer regions.
+    compressed = compress(
+        x, layout=layout, distribution=distribution, buffer=buffer
+    )
+    restored = decompress(compressed)
+    assert torch.equal(x, restored), f"roundtrip mismatch: {name}"
+    free_compressed(compressed, buffer)
+
+    for _ in range(WARMUP):
+        compressed = compress(
+            x, layout=layout, distribution=distribution, buffer=buffer
+        )
+        restored = decompress(compressed)
+        free_compressed(compressed, buffer)
+    torch.cuda.synchronize()
+
+    start = time.perf_counter()
+    for i in range(ITERS):
+        compressed = compress(
+            x, layout=layout, distribution=distribution, buffer=buffer
+        )
+        restored = decompress(compressed)
+        # Keep the final compressed object live so ratio can be measured after
+        # the timed loop.  Every earlier iteration is released and reused.
+        if i != ITERS - 1:
+            free_compressed(compressed, buffer)
+    torch.cuda.synchronize()
+    elapsed_ms = (time.perf_counter() - start) / ITERS * 1000.0
+
+    ratio = get_compressed_size(compressed) / x.nbytes
+    assert ratio <= max_ratio, (
+        f"{name} n={n}: ratio {ratio:.4f} exceeds {max_ratio:.4f}"
+    )
+
+    print(
+        f"{name:32s} n={n / 1e6:6.0f}M  "
+        f"time={elapsed_ms:7.3f} ms  ratio={ratio:.4f}"
+    )
+    free_compressed(compressed, buffer)
+    del x, compressed, restored
+    torch.cuda.empty_cache()
+    return elapsed_ms
+
+
+def main():
+    # Each case runs once. Shuffle a balanced size assignment with a fixed
+    # seed, keeping the benchmark reproducible and as close to 50/50 as nine
+    # cases allow.
+    shape_rng = Random(SHAPE_SEED)
+    sizes = [SHAPE_OPTIONS[0]] * (len(CASES) // 2)
+    sizes += [SHAPE_OPTIONS[1]] * (len(CASES) - len(sizes))
+    shape_rng.shuffle(sizes)
+    scheduled_cases = [
+        (*case, size) for case, size in zip(CASES, sizes)
+    ]
+    weights = [weight for _, _, _, _, weight, _ in scheduled_cases]
+    total_weight = sum(weights)
+    weights = [weight / total_weight for weight in weights]
+    print(f"WEIGHTINGS = {[round(weight, 4) for weight in weights]}")
+    print(f"SHAPES = {[shape for *_, shape in scheduled_cases]}")
+
+    # Persistent buffer used by the codec for fallback storage.  It is sized
+    # for one worst-case raw-exponent fallback (max SHAPE_OPTIONS bytes) plus
+    # full-size int32 fallback metadata arrays.  Inside run_case buffer-backed
+    # regions are freed after each iteration so the space is reused.
+    buffer = TensorBuffer(max(SHAPE_OPTIONS) + 64 * 1024 * 1024, device="cuda")
+
+    total_time = 0.0
+    for weight, (name, distribution, layout, max_ratio, _, n) in zip(
+        weights, scheduled_cases
+    ):
+        elapsed_ms = run_case(name, n, distribution, layout, max_ratio, buffer)
+        total_time += weight * elapsed_ms
+
+    # Individual buffer-backed regions are freed inside run_case.  Reset the
+    # allocator once more so repeated benchmark runs start from a clean state.
+    buffer.reset()
+
+    print("passed")
+    print(f"Total time: {total_time:.5g}ms")
+
+
+if __name__ == "__main__":
+    main()
