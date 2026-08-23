@@ -12,8 +12,8 @@ from dataclasses import fields
 
 import torch
 
-from compress.code_main import compress, decompress
-from compress.code_memory import TensorBuffer
+from compress.compress import compress, decompress
+from compress.tensor_buffer import TensorBuffer
 from compress.code_storage import (
     CompressedTensor,
     CompressionLayout,

@@ -1,84 +1,13 @@
-import math
-
 import numpy as np
-from dataclasses import dataclass
 from functools import lru_cache
-
 import torch
 
+from .probabilities import standard_probabilities, gaussian_probabilities, laplace_probabilities
 from .code_storage import Distribution, DistributionFamily
 
 
 FIRST_BITS = 10
 FIRST_MASK = (1 << FIRST_BITS) - 1
-
-
-def _normal_cdf(x):
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
-
-
-def _probabilities_from_frequency(frequency):
-    """Expand a frequency dict into a 256-entry probability table."""
-    frequency = dict(frequency)
-    if "tail" not in frequency:
-        frequency["tail"] = 1_500_000
-    total = sum(frequency.values())
-    common = [v for v in frequency if v != "tail"]
-    tail = frequency["tail"]
-    rare = [v for v in range(-128, 128) if v not in common]
-    probs = np.zeros(256, dtype=np.float64)
-    for v in common:
-        probs[v & 255] = frequency[v] / total
-    if rare:
-        probs[[v & 255 for v in rare]] = tail / total / len(rare)
-    return probs
-
-
-def _standard_probabilities():
-    """Probability table for the standard benchmark distribution."""
-    return _probabilities_from_frequency(_make_standard_frequency())
-
-
-def _gaussian_probabilities(std=2.0, uniform_mix=0.01):
-    """Rounded/clamped Gaussian int8 probability table.
-
-    A small uniform mixture is included so the designed codebook remains
-    robust to the localized uniform-noise cases in the benchmark.
-    """
-    p = np.zeros(256, dtype=np.float64)
-    for v in range(-128, 128):
-        lo = _normal_cdf((v - 0.5) / std)
-        hi = _normal_cdf((v + 0.5) / std)
-        if v == -128:
-            lo = 0.0
-        if v == 127:
-            hi = 1.0
-        p[v & 255] = hi - lo
-    p /= p.sum()
-    uniform = np.full(256, 1.0 / 256.0, dtype=np.float64)
-    p = (1.0 - uniform_mix) * p + uniform_mix * uniform
-    return p
-
-
-def _laplace_probabilities(scale=1.5):
-    """Rounded/clamped Laplace int8 probability table."""
-    p = np.zeros(256, dtype=np.float64)
-
-    def cdf(x):
-        if x < 0:
-            return 0.5 * math.exp(x / scale)
-        return 1.0 - 0.5 * math.exp(-x / scale)
-
-    for v in range(-128, 128):
-        lo = cdf(v - 0.5)
-        hi = cdf(v + 0.5)
-        if v == -128:
-            lo = 0.0
-        if v == 127:
-            hi = 1.0
-        p[v & 255] = hi - lo
-    p /= p.sum()
-    return p
 
 
 def _length_limited_huffman_lengths(
@@ -309,32 +238,6 @@ def _build_huffman_tables_from_lengths(probabilities, max_length=FIRST_BITS, max
     return encode, decode, esc_length
 
 
-def _make_standard_frequency():
-    """Default static Huffman codebook for the benchmark body."""
-    return {
-        -9: 97_300,
-        -8: 193_000,
-        -7: 386_000,
-        -6: 762_000,
-        -5: 1_488_000,
-        -4: 2_850_000,
-        -3: 5_186_000,
-        -2: 8_623_000,
-        -1: 11_866_000,
-        0: 11_812_000,
-        1: 5_271_000,
-        2: 976_000,
-        3: 390_000,
-    }
-
-
-@dataclass(frozen=True)
-class DistributionTables:
-    encode_shifted: torch.Tensor
-    decode: torch.Tensor
-    rare_length: int
-
-
 def _make_shifted_encode_table(encode_list):
     encode_tensor = torch.tensor(encode_list, dtype=torch.int32, device="cuda")
     centers = torch.arange(-128, 128, device="cuda", dtype=torch.int64).view(
@@ -346,16 +249,16 @@ def _make_shifted_encode_table(encode_list):
 
 
 @lru_cache(maxsize=None)
-def get_distribution_tables(dist: Distribution) -> DistributionTables:
-    """Return cached CUDA Huffman tables for ``dist``."""
+def get_distribution_tables(dist: Distribution):
+    """Return cached CUDA encode, decode, and rare-length tables for ``dist``."""
     if not isinstance(dist, Distribution):
         raise TypeError("distribution must be a Distribution instance")
     if dist.family == DistributionFamily.STANDARD:
-        probabilities = _standard_probabilities()
+        probabilities = standard_probabilities()
     elif dist.family == DistributionFamily.GAUSSIAN:
-        probabilities = _gaussian_probabilities(dist.param)
+        probabilities = gaussian_probabilities(dist.param)
     elif dist.family == DistributionFamily.LAPLACE:
-        probabilities = _laplace_probabilities(dist.param)
+        probabilities = laplace_probabilities(dist.param)
     else:  # pragma: no cover - guarded by Distribution validation
         raise ValueError(f"unknown distribution family: {dist.family!r}")
 
@@ -364,4 +267,4 @@ def get_distribution_tables(dist: Distribution) -> DistributionTables:
     )
     decode_tensor = torch.tensor(decode, dtype=torch.int32, device="cuda")
     shifted = _make_shifted_encode_table(encode)
-    return DistributionTables(shifted, decode_tensor, rare_length)
+    return shifted, decode_tensor, rare_length
