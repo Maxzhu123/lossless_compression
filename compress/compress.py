@@ -87,7 +87,7 @@ def compress(
     if (payload_words + 4) * 4 > size:
         return CompressedTensor(
             source, size,
-            distribution=distribution, shape=shape,
+            buffer=buffer, distribution=distribution, shape=shape,
         )
 
     # A bfloat16 layout is [sign:1 | exponent:8 | mantissa:7]. Keep the
@@ -154,6 +154,7 @@ def compress(
             sign_mantissa,
             fallback_buffer=buffer.data,
             fallback_descriptor=allocation.descriptor,
+            buffer=buffer,
             fallback_count=counts[:1],
             fallback_used=counts[1:2],
             distribution=distribution,
@@ -199,6 +200,7 @@ def compress(
         encoded, size, sign_mantissa,
         bad_streams, bad_starts, fallback_offsets,
         fallback_buffer=fallback_data, fallback_base=fallback_base,
+        buffer=buffer,
         fallback_count=bad_count_tensor, fallback_used=fallback_total,
         distribution=distribution, center=center, shape=shape,
     )
