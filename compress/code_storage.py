@@ -1,16 +1,16 @@
 from dataclasses import dataclass, fields
-from enum import Enum, IntEnum
+from enum import Enum, auto
 import torch
 
 
-class CompressionLayout(IntEnum):
-    CLEAN = 0  # Default fixed-stream Huffman layout.
-    MEDIUM = 2  # Larger fixed payload for medium-noise data.
-    HIGH = 3  # Smaller blocks with extra payload for high-noise data.
+class NoiseLevel(Enum):
+    CLEAN = auto()   # Default fixed-stream Huffman layout.
+    MEDIUM = auto()  # Larger fixed payload for medium-noise data.
+    HIGH = auto()    # Smaller blocks with extra payload for high-noise data.
 
 
 class DistType(Enum):
-    STANDARD = "standard"
+    EMPIRICAL = "empirical"
     GAUSSIAN = "gaussian"
     LAPLACE = "laplace"
 
@@ -20,24 +20,24 @@ class Distribution:
     """Codec distribution selector.
 
     ``family`` is a :class:`DistType` enum member. ``param`` is the source
-    value scale: standard-distribution scale, Gaussian standard deviation, or
+    value scale: empirical-distribution scale, Gaussian standard deviation, or
     Laplace scale. Parameters are rounded to the nearest 0.25 so the table
     cache stays small.
     """
 
-    family: DistType = DistType.STANDARD
+    family: DistType = DistType.EMPIRICAL
     param: float | None = None
-    layout: CompressionLayout = CompressionLayout.CLEAN
+    noise_level: NoiseLevel = NoiseLevel.CLEAN
 
     def __post_init__(self):
         if not isinstance(self.family, DistType):
             raise TypeError("family must be a DistType member")
-        if not isinstance(self.layout, CompressionLayout):
-            raise TypeError("layout must be a CompressionLayout member")
+        if not isinstance(self.noise_level, NoiseLevel):
+            raise TypeError("noise_level must be a NoiseLevel member")
         if self.param is None:
             default = (
                 0.5
-                if self.family == DistType.STANDARD
+                if self.family == DistType.EMPIRICAL
                 else 2.0
                 if self.family == DistType.GAUSSIAN
                 else 1.5
@@ -53,7 +53,7 @@ class Distribution:
 
     def __str__(self) -> str:
         label = "std" if self.family == DistType.GAUSSIAN else "scale"
-        return f"{self.family.value}/{label}={self.param}/{self.layout.name.lower()}"
+        return f"{self.family.value}/{label}={self.param}/{self.noise_level.name.lower()}"
 
 
 @dataclass(frozen=True)
@@ -69,7 +69,7 @@ class CompressedTensor:
     fallback_base: int = 0  # Byte offset of this tensor's region in fallback_buffer.
     fallback_count: torch.Tensor | None = None  # Device scalar with the number of fallback streams.
     fallback_used: torch.Tensor | None = None  # Device scalar with actual fallback bytes used.
-    distribution: Distribution = Distribution(DistType.STANDARD)  # Huffman table selector.
+    distribution: Distribution = Distribution(DistType.EMPIRICAL)  # Huffman table selector.
     center: torch.Tensor | int = 0  # CUDA center scalar used by encode/decode.
     shape: tuple[int, ...] = ()  # Original tensor shape.
 

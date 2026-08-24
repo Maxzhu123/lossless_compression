@@ -44,8 +44,8 @@ def laplace_probabilities(scale: float = 1.5):
     return _exponent_probabilities(magnitude_cdf)
 
 
-def standard_probabilities(scale: float = 0.5):
-    """BF16 exponent probabilities for the standard body-and-tail values."""
+def empirical_probabilities(scale: float = 0.5):
+    """BF16 exponent probabilities for empirical body-and-tail values."""
     tail_probability = 0.05
     tail_alpha = 2.8
     tail_start = -scale * math.log(tail_probability)

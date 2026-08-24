@@ -2,7 +2,7 @@ import numpy as np
 from functools import lru_cache
 import torch
 
-from .probabilities import standard_probabilities, gaussian_probabilities, laplace_probabilities
+from .probabilities import empirical_probabilities, gaussian_probabilities, laplace_probabilities
 from .code_storage import Distribution, DistType
 
 
@@ -249,7 +249,7 @@ def _make_shifted_encode_table(encode_list):
 
 
 def get_distribution_tables(dist: Distribution):
-    """Return cached tables for a distribution, independent of its layout."""
+    """Return cached tables for a distribution, independent of noise level."""
     if not isinstance(dist, Distribution):
         raise TypeError("distribution must be a Distribution instance")
     return _get_distribution_tables(dist.family, dist.param)
@@ -257,8 +257,8 @@ def get_distribution_tables(dist: Distribution):
 
 @lru_cache(maxsize=None)
 def _get_distribution_tables(family: DistType, param: float):
-    if family == DistType.STANDARD:
-        probabilities = standard_probabilities(param)
+    if family == DistType.EMPIRICAL:
+        probabilities = empirical_probabilities(param)
     elif family == DistType.GAUSSIAN:
         probabilities = gaussian_probabilities(param)
     elif family == DistType.LAPLACE:

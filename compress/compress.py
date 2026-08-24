@@ -3,37 +3,47 @@ import triton
 
 from .trition_kernels import _estimate_center_kernel, _encode_kernel, _count_bad_streams_kernel, _compact_bad_streams_kernel, _compact_extra_kernel, \
     _scatter_fallback_kernel, _decode_kernel
-from .code_storage import CompressedTensor, CompressionLayout, Distribution
+from .code_storage import CompressedTensor, NoiseLevel, Distribution, DistType
 from .huffman_tables import FIRST_MASK, get_distribution_tables
 from .tensor_buffer import TensorBuffer
 
 
-BLOCK_SIZE = 32768              # Number of elements encoded per block
-LANES = 128                     # Number of streams processed in parallel
-STEPS = BLOCK_SIZE // LANES     # Number of symbols per stream
-
-FIXED_BITS = 832                # Size of stream. Excess bits go into fallback.
-FIXED_WORDS = FIXED_BITS // 32  # Number of 32-bit words in stream.
+BLOCK_SIZE = 65536              # CLEAN block size; MEDIUM/HIGH use half.
+LANES = 256                     # Parallel streams in every block.
+LANE_BITS = 800                 # Storage size per stream.
 
 CENTER_SAMPLE_SIZE = 4096       # Number of samples used to estimate mean
 
 
-def _geometry(layout: CompressionLayout):
-    """ Set the shape of the fixed size payload.
-        Average number of bits per symbol is lanes / (32*fixed_words) = lanes / fixed_bits
+def _geometry(distribution: Distribution):
+    """ Setup geometry used for compression.
+        Each lane is stored in fixed_bits bit budget (returned as 32 bit words).
+        Number of symbols in each lane is steps = block_size  / lanes.
+        Average number of bits per symbol is (fixed_bits * lanes) / block_size
+        Longer sequences use the fallback buffer.
     """
-    if layout == CompressionLayout.MEDIUM:
-        # 32768-element blocks, 256 lanes, 128 steps/stream, 19 words = 608
-        # bits/stream. Allowed average is
-        # 608 / 128 = 4.75 bits/symbol
-        return BLOCK_SIZE, LANES * 2, STEPS // 2, (FIXED_WORDS + 12) // 2
-    if layout == CompressionLayout.HIGH:
-        # 32768-element blocks, 256 lanes, 128 steps/stream, 22 words = 704
-        # bits/stream. Allowed average is 704 / 128 = 5.5 bits/symbol
-        return BLOCK_SIZE, LANES * 2, STEPS // 2, FIXED_WORDS // 2 + 9
-    # 65536-element blocks, 256 lanes, 256 steps/stream, 26 words = 832
-    # bits/stream. Allowed average is 832 / 256 = 3.25 bits/symbol
-    return BLOCK_SIZE * 2, LANES * 2, STEPS, FIXED_WORDS
+    noise_level = distribution.noise_level
+    clean_steps = BLOCK_SIZE // LANES
+    lanes = LANES
+    if noise_level == NoiseLevel.CLEAN:       # Low noise case
+        # Empirical and Laplace use 3.125 bits/symbol.
+        block_size = BLOCK_SIZE
+        # Gaussian uses one word fewer
+        lane_bits = LANE_BITS if distribution.family != DistType.GAUSSIAN else LANE_BITS - 32
+    elif noise_level == NoiseLevel.MEDIUM:      # Medium noise case
+        # 19 words = 608 bits = 4.75 bits/symbol.
+        block_size = BLOCK_SIZE // 2
+        clean_steps = clean_steps // 2
+        lane_bits = LANE_BITS - 6 * 32
+    elif noise_level == NoiseLevel.HIGH:        # High noise case
+        # 22 words = 704 bits = 5.5 bits/symbol.
+        block_size = BLOCK_SIZE // 2
+        clean_steps = clean_steps // 2
+        lane_bits = LANE_BITS - 3 * 32
+    else:
+        raise ValueError(f"Unknown noise level: {noise_level}")
+
+    return block_size, lanes, clean_steps, lane_bits // 32
 
 
 def _estimate_center(source_bits, size):
@@ -63,7 +73,6 @@ def compress(
     unbiased int8 representation and Huffman-coded by the baseline codec.
     """
 
-    layout = distribution.layout
     shape = tuple(data.shape)
     source = data.contiguous().view(-1)
     size = source.numel()
@@ -71,7 +80,7 @@ def compress(
     # The fixed exponent payload size depends only on the input size and
     # selected layout, so bypass the codec before allocating or launching it
     # when that payload alone exceeds the available one byte per element.
-    block_size, lanes, steps, fixed_words = _geometry(layout)
+    block_size, lanes, steps, fixed_words = _geometry(distribution)
     blocks = triton.cdiv(size, block_size)
     streams = blocks * lanes
     payload_words = streams * fixed_words
@@ -219,7 +228,7 @@ def decompress(data: CompressedTensor) -> torch.Tensor:
         return data.data.reshape(data.shape)
 
     _, decode_table, rare_length = get_distribution_tables(data.distribution)
-    block_size, lanes, steps, fixed_words = _geometry(data.distribution.layout)
+    block_size, lanes, steps, fixed_words = _geometry(data.distribution)
     blocks = triton.cdiv(data.size, block_size)
     out_bits = torch.empty(data.size, dtype=torch.int16, device=data.data.device)
     _decode_kernel[(blocks,)](

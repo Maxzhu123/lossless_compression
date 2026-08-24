@@ -7,7 +7,7 @@ import torch
 
 from compress.compress import compress, decompress
 from compress.tensor_buffer import Allocation, TensorBuffer
-from compress.code_storage import CompressedTensor, CompressionLayout, Distribution, DistType
+from compress.code_storage import CompressedTensor, NoiseLevel, Distribution, DistType
 
 
 SHAPE_OPTIONS = [50_000_000, 200_000_000]
@@ -51,7 +51,7 @@ def free_compressed(
     buffer.free(Allocation(data.fallback_descriptor, buffer))
 
 
-def make_standard(n: int, scale: float = 0.5, seed: int = 0) -> torch.Tensor:
+def make_empirical(n: int, scale: float = 0.5, seed: int = 0) -> torch.Tensor:
     """Sample signed values with an exponential body and power-law tail."""
     G = torch.Generator(device="cuda").manual_seed(seed)
     tail_probability = 0.05
@@ -115,36 +115,36 @@ def _bf16_ratio(exponent_ratio: float) -> float:
 
 
 # Each case: (name, distribution, max_total_bf16_ratio, weight)
-DIST_STANDARD_CLEAN = Distribution(DistType.STANDARD)
-DIST_STANDARD_MEDIUM = Distribution(
-    DistType.STANDARD, layout=CompressionLayout.MEDIUM
+DIST_EMPIRICAL_CLEAN = Distribution(DistType.EMPIRICAL)
+DIST_EMPIRICAL_MEDIUM = Distribution(
+    DistType.EMPIRICAL, noise_level=NoiseLevel.MEDIUM
 )
-DIST_STANDARD_HIGH = Distribution(
-    DistType.STANDARD, layout=CompressionLayout.HIGH
+DIST_EMPIRICAL_HIGH = Distribution(
+    DistType.EMPIRICAL, noise_level=NoiseLevel.HIGH
 )
 DIST_GAUSSIAN_CLEAN = Distribution(DistType.GAUSSIAN)
 DIST_GAUSSIAN_MEDIUM = Distribution(
-    DistType.GAUSSIAN, layout=CompressionLayout.MEDIUM
+    DistType.GAUSSIAN, noise_level=NoiseLevel.MEDIUM
 )
 DIST_GAUSSIAN_HIGH = Distribution(
-    DistType.GAUSSIAN, layout=CompressionLayout.HIGH
+    DistType.GAUSSIAN, noise_level=NoiseLevel.HIGH
 )
 DIST_LAPLACE_CLEAN = Distribution(DistType.LAPLACE)
 
 
 CASES = [
-    ("standard/standard/clean", DIST_STANDARD_CLEAN, _bf16_ratio(0.42), 5),
-    ("standard/standard/medium", DIST_STANDARD_MEDIUM, _bf16_ratio(0.60), 5),
+    ("empirical/empirical/clean", DIST_EMPIRICAL_CLEAN, _bf16_ratio(0.42), 5),
+    ("empirical/empirical/medium", DIST_EMPIRICAL_MEDIUM, _bf16_ratio(0.60), 5),
     ("gaussian/gaussian/clean", DIST_GAUSSIAN_CLEAN, _bf16_ratio(0.42), 5),
-    ("gaussian/standard/clean", DIST_STANDARD_CLEAN, _bf16_ratio(0.65), 1),
+    ("gaussian/empirical/clean", DIST_EMPIRICAL_CLEAN, _bf16_ratio(0.65), 1),
     ("laplace/laplace/clean", DIST_LAPLACE_CLEAN, _bf16_ratio(0.43), 5),
     ("laplace/gaussian/clean", DIST_GAUSSIAN_CLEAN, _bf16_ratio(0.55), 1),
     ("shifted_gaussian/gaussian/clean", DIST_GAUSSIAN_CLEAN, _bf16_ratio(0.42), 5),
-    ("shifted_gaussian/standard/clean", DIST_STANDARD_CLEAN, _bf16_ratio(0.65), 1),
+    ("shifted_gaussian/empirical/clean", DIST_EMPIRICAL_CLEAN, _bf16_ratio(0.65), 1),
     ("localized/gaussian/high", DIST_GAUSSIAN_HIGH, _bf16_ratio(0.83), 5),
-    ("localized/standard/high", DIST_STANDARD_HIGH, _bf16_ratio(0.84), 1),
+    ("localized/empirical/high", DIST_EMPIRICAL_HIGH, _bf16_ratio(0.84), 1),
     ("localized/gaussian/medium", DIST_GAUSSIAN_MEDIUM, _bf16_ratio(0.76), 5),
-    ("localized/standard/medium", DIST_STANDARD_MEDIUM, _bf16_ratio(0.76), 1),
+    ("localized/empirical/medium", DIST_EMPIRICAL_MEDIUM, _bf16_ratio(0.76), 1),
 ]
 
 
@@ -153,23 +153,23 @@ def make_data(
     n: int,
     distribution: Distribution | None = None,
 ) -> torch.Tensor:
-    if name in {"standard/standard/clean", "standard/standard/medium"}:
+    if name in {"empirical/empirical/clean", "empirical/empirical/medium"}:
         scale = distribution.param if distribution is not None else 0.5
-        return make_standard(n, scale)
-    if name in {"gaussian/gaussian/clean", "gaussian/standard/clean"}:
+        return make_empirical(n, scale)
+    if name in {"gaussian/gaussian/clean", "gaussian/empirical/clean"}:
         return make_gaussian(n)
     if name in {"laplace/laplace/clean", "laplace/gaussian/clean"}:
         return make_laplace(n)
     if name in {
         "shifted_gaussian/gaussian/clean",
-        "shifted_gaussian/standard/clean",
+        "shifted_gaussian/empirical/clean",
     }:
         return make_gaussian(n, mean=50.0)
     if name in {
         "localized/gaussian/high",
-        "localized/standard/high",
+        "localized/empirical/high",
         "localized/gaussian/medium",
-        "localized/standard/medium",
+        "localized/empirical/medium",
     }:
         return make_localized_noise(n)
     raise ValueError(f"unknown case: {name}")
