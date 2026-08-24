@@ -2,11 +2,10 @@
 import math
 import time
 from random import Random
-from dataclasses import fields
 import torch
 
 from compress.compress import compress, decompress
-from compress.tensor_buffer import Allocation, TensorBuffer
+from compress.tensor_buffer import TensorBuffer
 from compress.code_storage import CompressedTensor, NoiseLevel, Distribution, DistType
 
 
@@ -17,38 +16,8 @@ ITERS = 15
 
 
 def get_compressed_size(data: CompressedTensor) -> int:
-    """Return GPU allocation bytes owned by one compressed tensor.
-
-    A descriptor-backed tensor counts its reserved region, rather than the
-    entire shared arena that may also serve other compressed tensors.
-    """
-    allocations: dict[tuple[torch.device, int], int] = {}
-    for f in fields(data):
-        tensor = getattr(data, f.name)
-        if isinstance(tensor, torch.Tensor):
-            if f.name == "fallback_buffer" and data.fallback_descriptor is not None:
-                continue
-            storage = tensor.untyped_storage()
-            key = (tensor.device, storage.data_ptr())
-            allocations[key] = storage.nbytes()
-    total = sum(allocations.values())
-    if data.fallback_descriptor is not None:
-        total += int(data.fallback_descriptor[1].item())
-    return total
-
-
-def free_compressed(
-    data: CompressedTensor,
-    buffer: TensorBuffer,
-) -> None:
-    """Release every buffer-backed allocation held by a compressed tensor."""
-    if (
-        data.fallback_descriptor is None
-        or data.fallback_buffer is None
-        or data.fallback_buffer is not buffer.data
-    ):
-        return
-    buffer.free(Allocation(data.fallback_descriptor, buffer))
+    """Return GPU allocation bytes owned by one compressed tensor."""
+    return data.memory_size()
 
 
 def make_empirical(n: int, scale: float = 0.5, seed: int = 0) -> torch.Tensor:
@@ -184,14 +153,14 @@ def run_case(name, n, distribution, max_ratio, buffer):
     )
     restored = decompress(compressed)
     assert torch.equal(x, restored), f"roundtrip mismatch: {name}"
-    free_compressed(compressed, buffer)
+    compressed.free()
 
     for _ in range(WARMUP):
         compressed = compress(
             x, distribution=distribution, buffer=buffer
         )
         restored = decompress(compressed)
-        free_compressed(compressed, buffer)
+        compressed.free()
     torch.cuda.synchronize()
 
     start = time.perf_counter()
@@ -203,7 +172,7 @@ def run_case(name, n, distribution, max_ratio, buffer):
         # Keep the final compressed object live so ratio can be measured after
         # the timed loop.  Every earlier iteration is released and reused.
         if i != ITERS - 1:
-            free_compressed(compressed, buffer)
+            compressed.free()
     torch.cuda.synchronize()
     elapsed_ms = (time.perf_counter() - start) / ITERS * 1000.0
 
@@ -216,7 +185,7 @@ def run_case(name, n, distribution, max_ratio, buffer):
         f"{name:32s} n={n / 1e6:6.0f}M  "
         f"time={elapsed_ms:7.3f} ms  ratio={ratio:.4f}"
     )
-    free_compressed(compressed, buffer)
+    compressed.free()
     del x, compressed, restored
     torch.cuda.empty_cache()
     return elapsed_ms

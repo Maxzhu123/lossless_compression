@@ -133,6 +133,7 @@ def compress_components(
             encoded, size, sign_mantissa,
             fallback_buffer=buffer.data,
             fallback_descriptor=allocation.descriptor,
+            buffer=buffer,
             fallback_count=counts[:1], fallback_used=counts[1:2],
             distribution=distribution, center=center, shape=shape,
         )
@@ -169,6 +170,7 @@ def compress_components(
         encoded, size, sign_mantissa,
         bad_streams, bad_starts, fallback_offsets,
         fallback_buffer=fallback_data, fallback_base=0,
+        buffer=buffer,
         fallback_count=bad_count, fallback_used=fallback_total,
         distribution=distribution, center=center, shape=shape,
     )
@@ -181,7 +183,7 @@ def compress_dense(data, distribution, buffer: TensorBuffer | None = None):
     size = source.numel()
     if uses_raw_source(size, distribution):
         return CompressedTensor(
-            source, size, distribution=distribution, shape=shape,
+            source, size, buffer=buffer, distribution=distribution, shape=shape,
         )
     sign_mantissa = torch.empty(
         size, dtype=torch.uint8, device=source.device
