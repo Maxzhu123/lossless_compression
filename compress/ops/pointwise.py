@@ -9,14 +9,15 @@ from ..huffman_tables import FIRST_MASK, get_distribution_tables
 from ..kernels.pointwise import (
     COMPRESSED_OUTPUT,
     DENSE_OUTPUT,
-    binary_compressed_dense_kernel,
-    binary_fallback_kernel,
+    pointwise_compressed_dense_fallback_kernel,
+    pointwise_compressed_dense_kernel,
 )
 from ..tensor_buffer import TensorBuffer
 from .registry import ADD, MULTIPLY, PointwiseOp
 
 
-def _launch_binary(data, other, operation, output_policy):
+def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
+    """Launch the fixed-stream operation, then correct sparse fallback tails."""
     other = other.contiguous().view(-1)
     _, decode_table, rare_length = get_distribution_tables(data.distribution)
     block_size, lanes, steps, fixed_words = geometry(data.distribution)
@@ -32,7 +33,7 @@ def _launch_binary(data, other, operation, output_policy):
         )
         auxiliary = torch.empty_like(output)
 
-    binary_compressed_dense_kernel[(blocks,)](
+    pointwise_compressed_dense_kernel[(blocks,)](
         data.data, data.sign_mantissa, other, output, auxiliary, decode_table,
         data.size, blocks * lanes, data.center,
         OP=operation.triton_fn, OUTPUT_POLICY=output_policy,
@@ -42,7 +43,7 @@ def _launch_binary(data, other, operation, output_policy):
     )
     if data.fallback_descriptor is not None:
         metadata = data.fallback_buffer.view(torch.int32)
-        binary_fallback_kernel[(triton.cdiv(blocks * lanes, 64),)](
+        pointwise_compressed_dense_fallback_kernel[(triton.cdiv(blocks * lanes, 64),)](
             metadata, data.fallback_buffer, metadata, data.fallback_buffer, 0,
             metadata, data.fallback_descriptor, data.fallback_count,
             data.sign_mantissa, other, output, auxiliary, data.size,
@@ -51,7 +52,7 @@ def _launch_binary(data, other, operation, output_policy):
             N_LANES=lanes, N_STEPS=steps,
         )
     elif data.offsets.numel():
-        binary_fallback_kernel[(triton.cdiv(data.offsets.numel(), 64),)](
+        pointwise_compressed_dense_fallback_kernel[(triton.cdiv(data.offsets.numel(), 64),)](
             data.offsets, data.fallback_starts, data.fallback_offsets,
             data.fallback_buffer, data.fallback_base, data.offsets,
             data.offsets, data.fallback_count, data.sign_mantissa,
@@ -63,7 +64,7 @@ def _launch_binary(data, other, operation, output_policy):
     return output, auxiliary
 
 
-def binary_pointwise(
+def pointwise_compressed_dense(
     data: CompressedTensor,
     other: torch.Tensor,
     operation: PointwiseOp,
@@ -72,7 +73,10 @@ def binary_pointwise(
     buffer: TensorBuffer | None = None,
     distribution=None,
 ) -> torch.Tensor | CompressedTensor:
-    """Apply a registered compressed+dense binary operation."""
+    """Apply a registered compressed+dense operation.
+
+    Dense results return directly; component results reuse the shared encoder.
+    """
     if operation.arity != 2:
         raise ValueError(f"{operation.name} is not a binary operation")
     if tuple(other.shape) != data.shape:
@@ -87,7 +91,9 @@ def binary_pointwise(
         return compress_dense(result, distribution or data.distribution, buffer)
 
     policy = DENSE_OUTPUT if output == "dense" else COMPRESSED_OUTPUT
-    values, auxiliary = _launch_binary(data, other, operation, policy)
+    values, auxiliary = _launch_pointwise_compressed_dense(
+        data, other, operation, policy,
+    )
     if output == "dense":
         return values.reshape(data.shape)
     return compress_components(
@@ -105,7 +111,7 @@ def compressed_add(
     distribution=None,
 ) -> torch.Tensor | CompressedTensor:
     """Add dense BF16 values to a compressed tensor."""
-    return binary_pointwise(
+    return pointwise_compressed_dense(
         data, other, ADD, output=output,
         buffer=buffer, distribution=distribution,
     )
@@ -120,7 +126,7 @@ def compressed_multiply(
     distribution=None,
 ) -> torch.Tensor | CompressedTensor:
     """Multiply compressed values by dense BF16 values."""
-    return binary_pointwise(
+    return pointwise_compressed_dense(
         data, other, MULTIPLY, output=output,
         buffer=buffer, distribution=distribution,
     )

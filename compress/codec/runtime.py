@@ -48,12 +48,14 @@ def geometry(distribution: Distribution):
 
 
 def uses_raw_source(size: int, distribution: Distribution) -> bool:
+    """Return whether fixed Huffman storage would exceed the raw exponent byte."""
     block_size, lanes, _, fixed_words = geometry(distribution)
     streams = triton.cdiv(size, block_size) * lanes
     return (streams * fixed_words + 4) * 4 > size
 
 
 def _estimate_center(source, size, *, precomputed):
+    """Estimate the exponent center from strided samples on the GPU."""
     sample_size = min(size, CENTER_SAMPLE_SIZE)
     stride = size // sample_size
     center = torch.empty(1, dtype=torch.int32, device=source.device)
@@ -69,16 +71,27 @@ def compress_components(
     sign_mantissa,
     size,
     distribution,
-    buffer,
+    buffer: TensorBuffer | None,
     shape,
     *,
     precomputed,
 ):
-    """Encode BF16 bits or precomputed exponent/sign-mantissa components."""
+    """Encode BF16 bits or split components into a ``CompressedTensor``.
+
+    Args:
+        source_values: Int16 BF16 bits, or raw uint8 exponents if ``precomputed``.
+        sign_mantissa: Output side-byte stream, or precomputed side bytes.
+        size: Logical element count; distribution: codebook and stream geometry.
+        buffer: Optional shared fallback arena; shape: original tensor shape.
+        precomputed: ``False`` extracts both fields from BF16 bits; ``True``
+            consumes raw exponent bytes plus existing side bytes from a fused op.
+    """
+    # Geometry fixes the independent stream count and per-stream bit budget.
     block_size, lanes, steps, fixed_words = geometry(distribution)
     blocks = triton.cdiv(size, block_size)
     streams = blocks * lanes
     encode_table, _, _ = get_distribution_tables(distribution)
+    # Encode and decode share this sampled center through the result metadata.
     center = _estimate_center(source_values, size, precomputed=precomputed)
     encoded = torch.empty(
         streams * fixed_words + 4,
@@ -96,6 +109,7 @@ def compress_components(
     )
 
     if buffer is not None:
+        # Keep fallback metadata and bytes inside one descriptor-backed arena region.
         if buffer.capacity_bytes % 4:
             raise ValueError("TensorBuffer capacity must be divisible by 4")
         counts = torch.zeros(4, dtype=torch.int32, device=source_values.device)
@@ -123,6 +137,7 @@ def compress_components(
             distribution=distribution, center=center, shape=shape,
         )
 
+    # Private fallback storage synchronizes once to allocate exact-size tensors.
     counts = torch.zeros(2, dtype=torch.int32, device=source_values.device)
     bad_count, fallback_total = counts[:1], counts[1:]
     _count_bad_streams_kernel[(triton.cdiv(streams, 1024),)](
@@ -159,8 +174,8 @@ def compress_components(
     )
 
 
-def compress_dense(data, distribution, buffer=None):
-    """Compress a dense BF16 tensor through the shared codec runtime."""
+def compress_dense(data, distribution, buffer: TensorBuffer | None = None):
+    """Compress dense BF16 values, using raw storage when fixed streams are larger."""
     shape = tuple(data.shape)
     source = data.contiguous().view(-1)
     size = source.numel()
@@ -178,7 +193,7 @@ def compress_dense(data, distribution, buffer=None):
 
 
 def decode(data: CompressedTensor) -> torch.Tensor:
-    """Decode a compressed tensor through the dedicated codec kernels."""
+    """Decode fixed streams, then overwrite overflowing tails from fallback storage."""
     if data.offsets is None and data.fallback_descriptor is None:
         return data.data.reshape(data.shape)
 

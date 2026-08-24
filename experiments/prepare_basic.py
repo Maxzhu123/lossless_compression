@@ -22,13 +22,13 @@ from prepare import (
 )
 
 
-def run_case(name, n, distribution, max_ratio):
-    x = make_data(name, n, distribution)
+def run_case(name, n, distribution, layout, max_ratio):
+    x = make_data(name, n)
 
     # Warmup + correctness pass using the bufferless path.
     for _ in range(WARMUP):
         compressed = compress(
-            x, distribution=distribution
+            x, layout=layout, distribution=distribution
         )
         restored = decompress(compressed)
         assert torch.equal(x, restored), f"roundtrip mismatch: {name}"
@@ -38,7 +38,7 @@ def run_case(name, n, distribution, max_ratio):
     start = time.perf_counter()
     for _ in range(ITERS):
         compressed = compress(
-            x, distribution=distribution
+            x, layout=layout, distribution=distribution
         )
         restored = decompress(compressed)
     torch.cuda.synchronize()
@@ -66,17 +66,17 @@ def main():
     scheduled_cases = [
         (*case, size) for case, size in zip(CASES, sizes)
     ]
-    weights = [weight for _, _, _, weight, _ in scheduled_cases]
+    weights = [weight for _, _, _, _, weight, _ in scheduled_cases]
     total_weight = sum(weights)
     weights = [weight / total_weight for weight in weights]
     print(f"WEIGHTINGS = {[round(weight, 4) for weight in weights]}")
     print(f"SHAPES = {[shape for *_, shape in scheduled_cases]}")
 
     total_time = 0.0
-    for weight, (name, distribution, max_ratio, _, n) in zip(
+    for weight, (name, distribution, layout, max_ratio, _, n) in zip(
         weights, scheduled_cases
     ):
-        elapsed_ms = run_case(name, n, distribution, max_ratio)
+        elapsed_ms = run_case(name, n, distribution, layout, max_ratio)
         total_time += weight * elapsed_ms
 
     print("passed")

@@ -221,6 +221,7 @@ class TensorBuffer:
         max_free_regions: int = 256,
         device: torch.device | str | None = None,
     ) -> None:
+        """ max_free_regions: Maximum number of free regions to track in the allocator"""
         if capacity_bytes <= 0:
             raise ValueError("capacity_bytes must be positive")
         if capacity_bytes > torch.iinfo(torch.int32).max:

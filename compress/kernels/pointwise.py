@@ -19,6 +19,7 @@ def _store_result(
     result, output, auxiliary, offset, mask,
     OUTPUT_POLICY: tl.constexpr,
 ):
+    """Round an operation result to BF16 and emit dense or component output."""
     result = result.to(tl.bfloat16)
     if OUTPUT_POLICY == DENSE_OUTPUT:
         tl.store(output + offset, result, mask=mask)
@@ -35,7 +36,7 @@ def _store_result(
     key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS"],
 )
 @triton.jit
-def binary_compressed_dense_kernel(
+def pointwise_compressed_dense_kernel(
     encoded, sign_mantissa, other, output, auxiliary, decode_table,
     n_elements, n_streams, center,
     OP: tl.constexpr, OUTPUT_POLICY: tl.constexpr,
@@ -43,6 +44,19 @@ def binary_compressed_dense_kernel(
     BLOCK: tl.constexpr, N_LANES: tl.constexpr,
     N_STEPS: tl.constexpr, FIXED_WORDS: tl.constexpr,
 ):
+    """ Main fused pointwise kernel for compressed-tensor operations.
+            Compressed tensor + dense tensor → dense result or compression components.
+
+    Args:
+        encoded: Word-major fixed Huffman payload for the compressed operand.
+        sign_mantissa: Raw side-byte stream paired with ``encoded``.
+        other: Dense BF16 operand with one value per logical input element.
+        output: Dense BF16 result, or sign/mantissa bytes for compressed output.
+        auxiliary: Raw result exponent bytes for compressed output.
+        decode_table: Distribution-specific lookup table; center: exponent shift.
+        n_elements: Logical element count; n_streams: fixed-stream count.
+        OP: Inlined binary operation; OUTPUT_POLICY: dense or component output.
+    """
     block = tl.program_id(0)
     lanes = tl.arange(0, N_LANES)
     lane_index = block * N_LANES + lanes
@@ -105,7 +119,7 @@ def binary_compressed_dense_kernel(
     key=["n_elements", "N_LANES", "N_STEPS", "BLOCK"],
 )
 @triton.jit
-def binary_fallback_kernel(
+def pointwise_compressed_dense_fallback_kernel(
     bad_streams, bad_starts, fallback_offsets,
     fallback_buffer, fallback_base, metadata, descriptor, fallback_count,
     sign_mantissa, other, output, auxiliary, n_elements,
@@ -113,6 +127,7 @@ def binary_fallback_kernel(
     TILE: tl.constexpr, BLOCK: tl.constexpr,
     N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
 ):
+    """Recompute pointwise results for stream tails stored in fallback storage."""
     pid = tl.program_id(0)
     tile = pid * TILE + tl.arange(0, TILE)
     count = tl.load(fallback_count).to(tl.int32)

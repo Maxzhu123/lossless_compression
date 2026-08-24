@@ -6,6 +6,7 @@ from triton import language as tl
 
 @triton.jit
 def pack_bf16(value, sign_mantissa):
+    """Reassemble BF16 bits from an unbiased exponent and raw side byte."""
     return (
         (((value.to(tl.int32) + 127) & 255) << 7)
         | (sign_mantissa.to(tl.int32) & 0x7F)
@@ -18,6 +19,7 @@ def decode_symbol(
     current, decode_table, center, FIRST_MASK: tl.constexpr,
     RARE_LENGTH: tl.constexpr,
 ):
+    """Decode one Huffman symbol and return its exponent and consumed bit count."""
     first = tl.load(decode_table + (current & FIRST_MASK).to(tl.int32))
     first_length = first & 255
     continuation = first_length == 0

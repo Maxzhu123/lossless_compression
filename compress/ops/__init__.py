@@ -1,11 +1,15 @@
 """Operations consuming compressed tensors."""
 
-from .pointwise import binary_pointwise, compressed_add, compressed_multiply
+from .pointwise import (
+    compressed_add,
+    compressed_multiply,
+    pointwise_compressed_dense,
+)
 from .registry import POINTWISE_OPS
 
 __all__ = [
     "POINTWISE_OPS",
-    "binary_pointwise",
+    "pointwise_compressed_dense",
     "compressed_add",
     "compressed_multiply",
 ]

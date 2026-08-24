@@ -6,21 +6,24 @@ import torch
 
 from compress.code_storage import Distribution, DistType, NoiseLevel
 from compress.compress import compress, decompress
-from compress.ops import POINTWISE_OPS, binary_pointwise
+from compress.ops import POINTWISE_OPS, pointwise_compressed_dense
 from compress.tensor_buffer import Allocation, TensorBuffer
 
 
 def _buffer(size: int) -> TensorBuffer:
+    """Create an aligned fallback arena with room for one operation result."""
     capacity = (size + 64 * 1024 * 1024 + 15) // 16 * 16
     return TensorBuffer(capacity, device="cuda")
 
 
 def _free(encoded, buffer: TensorBuffer | None) -> None:
+    """Release a result's descriptor-backed fallback allocation when present."""
     if buffer is not None and encoded.fallback_descriptor is not None:
         buffer.free(Allocation(encoded.fallback_descriptor, buffer))
 
 
 def _assert_bits_equal(left: torch.Tensor, right: torch.Tensor) -> None:
+    """Compare BF16 tensors by representation so matching NaNs remain equal."""
     assert left.shape == right.shape
     assert torch.equal(
         left.contiguous().view(torch.int16),
@@ -30,13 +33,14 @@ def _assert_bits_equal(left: torch.Tensor, right: torch.Tensor) -> None:
 
 @torch.no_grad()
 def _check(source, other, distribution, operation, *, buffered=True) -> None:
+    """Check dense and compressed outputs against the registered PyTorch op."""
     buffer = _buffer(source.numel()) if buffered else None
     output_buffer = _buffer(source.numel()) if buffered else None
     encoded = compress(source, distribution, buffer)
     restored = decompress(encoded)
     expected = operation.torch_fn(restored, other)
-    actual = binary_pointwise(encoded, other, operation)
-    compressed = binary_pointwise(
+    actual = pointwise_compressed_dense(encoded, other, operation)
+    compressed = pointwise_compressed_dense(
         encoded, other, operation,
         output="compressed", buffer=output_buffer,
     )
@@ -48,6 +52,7 @@ def _check(source, other, distribution, operation, *, buffered=True) -> None:
 
 
 def _time(function, iterations: int, release=None) -> float:
+    """Return median-friendly CUDA event timing after warming the operation."""
     for _ in range(3):
         output = function()
         if release:
@@ -66,6 +71,7 @@ def _time(function, iterations: int, release=None) -> float:
 
 
 def _compare(baseline, fused, iterations, release=None):
+    """Measure baseline and fused paths in alternating order over three trials."""
     baseline_times, fused_times = [], []
     for trial in range(3):
         first, second = (baseline, fused) if trial % 2 == 0 else (fused, baseline)
@@ -79,17 +85,18 @@ def _compare(baseline, fused, iterations, release=None):
 
 @torch.no_grad()
 def _benchmark(size: int, operation) -> None:
+    """Benchmark dense and compressed output modes for one size and operation."""
     source = torch.randn(size, device="cuda").to(torch.bfloat16)
     other = torch.randn_like(source)
     buffer = _buffer(size)
     output_buffer = _buffer(size)
     encoded = compress(source, Distribution(DistType.GAUSSIAN), buffer)
     expected = operation.torch_fn(decompress(encoded), other)
-    actual = binary_pointwise(encoded, other, operation)
+    actual = pointwise_compressed_dense(encoded, other, operation)
     _assert_bits_equal(expected, actual)
 
     baseline = lambda: operation.torch_fn(decompress(encoded), other)
-    fused = lambda: binary_pointwise(encoded, other, operation)
+    fused = lambda: pointwise_compressed_dense(encoded, other, operation)
     iterations = 50 if size <= 10_000_003 else 20 if size <= 50_000_003 else 10
     baseline_ms, fused_ms = _compare(baseline, fused, iterations)
     print(
@@ -99,7 +106,7 @@ def _benchmark(size: int, operation) -> None:
     )
 
     dense_then_compress = lambda: compress(fused(), encoded.distribution, output_buffer)
-    compressed = lambda: binary_pointwise(
+    compressed = lambda: pointwise_compressed_dense(
         encoded, other, operation,
         output="compressed", buffer=output_buffer,
     )
@@ -118,6 +125,7 @@ def _benchmark(size: int, operation) -> None:
 
 
 def main() -> None:
+    """Run edge-case correctness checks followed by multi-size benchmarks."""
     generator = torch.Generator(device="cuda").manual_seed(17)
 
     # Raw fallback and a non-contiguous dense operand.
