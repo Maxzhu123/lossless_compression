@@ -1,89 +1,63 @@
+"""Exponent probabilities induced by the benchmark value distributions."""
+
 import math
+
 import numpy as np
 
 
-def _normal_cdf(x):
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+def _exponent_probabilities(magnitude_cdf):
+    """Map a value-magnitude CDF onto the codec's centered exponent symbols."""
+    raw = np.zeros(256, dtype=np.float64)
+    for exponent in range(-127, 129):
+        low = 0.0 if exponent == -127 else math.ldexp(1.0, exponent)
+        high = math.inf if exponent == 128 else math.ldexp(1.0, exponent + 1)
+        raw[exponent & 255] = magnitude_cdf(high) - magnitude_cdf(low)
+    raw /= raw.sum()
+
+    exponents = np.arange(-127, 129)
+    mean = float(np.dot(exponents, raw[exponents & 255]))
+    center = math.floor(mean + 0.5) if mean >= 0.0 else -math.floor(-mean + 0.5)
+    if abs(center) <= 1:
+        center = 0
+    probabilities = np.zeros(256, dtype=np.float64)
+    for exponent in exponents:
+        probabilities[(exponent - center) & 255] = raw[exponent & 255]
+    return probabilities
 
 
-def _probabilities_from_frequency(frequency):
-    """Expand a frequency dict into a 256-entry probability table."""
-    frequency = dict(frequency)
-    if "tail" not in frequency:
-        frequency["tail"] = 1_500_000
-    total = sum(frequency.values())
-    common = [v for v in frequency if v != "tail"]
-    tail = frequency["tail"]
-    rare = [v for v in range(-128, 128) if v not in common]
-    probs = np.zeros(256, dtype=np.float64)
-    for v in common:
-        probs[v & 255] = frequency[v] / total
-    if rare:
-        probs[[v & 255 for v in rare]] = tail / total / len(rare)
-    return probs
+def gaussian_probabilities(std: float = 2.0):
+    """BF16 exponent probabilities for values sampled from ``N(0, std²)``."""
+    scale = std * math.sqrt(2.0)
+
+    def magnitude_cdf(value):
+        return 1.0 if math.isinf(value) else math.erf(value / scale)
+
+    return _exponent_probabilities(magnitude_cdf)
 
 
-def _make_standard_frequency():
-    """Default static Huffman codebook for the benchmark body."""
-    return {
-        -9: 97_300,
-        -8: 193_000,
-        -7: 386_000,
-        -6: 762_000,
-        -5: 1_488_000,
-        -4: 2_850_000,
-        -3: 5_186_000,
-        -2: 8_623_000,
-        -1: 11_866_000,
-        0: 11_812_000,
-        1: 5_271_000,
-        2: 976_000,
-        3: 390_000,
-    }
+def laplace_probabilities(scale: float = 1.5):
+    """BF16 exponent probabilities for values from symmetric Laplace(scale)."""
+
+    def magnitude_cdf(value):
+        return 1.0 if math.isinf(value) else -math.expm1(-value / scale)
+
+    return _exponent_probabilities(magnitude_cdf)
 
 
-def standard_probabilities():
-    """Probability table for the standard benchmark distribution."""
-    return _probabilities_from_frequency(_make_standard_frequency())
+def standard_probabilities(scale: float = 0.5):
+    """BF16 exponent probabilities for the standard body-and-tail values."""
+    tail_probability = 0.05
+    tail_alpha = 2.8
+    tail_start = -scale * math.log(tail_probability)
 
+    def magnitude_cdf(value):
+        if math.isinf(value):
+            return 1.0
+        if value <= tail_start:
+            return -math.expm1(-value / scale)
+        survival = tail_probability * (
+            tail_start / value
+        ) ** (tail_alpha - 1.0)
+        return 1.0 - survival
 
-def gaussian_probabilities(std=2.0, uniform_mix=0.01):
-    """Rounded/clamped Gaussian int8 probability table.
-
-    A small uniform mixture is included so the designed codebook remains
-    robust to the localized uniform-noise cases in the benchmark.
-    """
-    p = np.zeros(256, dtype=np.float64)
-    for v in range(-128, 128):
-        lo = _normal_cdf((v - 0.5) / std)
-        hi = _normal_cdf((v + 0.5) / std)
-        if v == -128:
-            lo = 0.0
-        if v == 127:
-            hi = 1.0
-        p[v & 255] = hi - lo
-    p /= p.sum()
-    uniform = np.full(256, 1.0 / 256.0, dtype=np.float64)
-    p = (1.0 - uniform_mix) * p + uniform_mix * uniform
-    return p
-
-
-def laplace_probabilities(scale=1.5):
-    """Rounded/clamped Laplace int8 probability table."""
-    p = np.zeros(256, dtype=np.float64)
-
-    def cdf(x):
-        if x < 0:
-            return 0.5 * math.exp(x / scale)
-        return 1.0 - 0.5 * math.exp(-x / scale)
-
-    for v in range(-128, 128):
-        lo = cdf(v - 0.5)
-        hi = cdf(v + 0.5)
-        if v == -128:
-            lo = 0.0
-        if v == 127:
-            hi = 1.0
-        p[v & 255] = hi - lo
-    p /= p.sum()
-    return p
+    return _exponent_probabilities(magnitude_cdf)

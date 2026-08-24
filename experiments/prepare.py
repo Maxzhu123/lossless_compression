@@ -1,4 +1,5 @@
 """Distribution-aware BF16 exponent-compression benchmark."""
+import math
 import time
 from random import Random
 from dataclasses import fields
@@ -50,83 +51,62 @@ def free_compressed(
     buffer.free(Allocation(data.fallback_descriptor, buffer))
 
 
-def _pack_exponents(exponents: torch.Tensor, G: torch.Generator) -> torch.Tensor:
-    """Build BF16 values with these unbiased int8 exponents.
-
-    The raw BF16 exponent byte is biased by 127. Sign and mantissa are random
-    to ensure the raw side stream is also exercised, but do not affect the
-    distribution presented to the entropy codec.
-    """
-    exponent_bits = (exponents.to(torch.int16) + 127) & 0xFF
-    sign = torch.randint(
-        0, 2, exponents.shape, device=exponents.device, dtype=torch.int16,
-        generator=G,
-    )
-    mantissa = torch.randint(
-        0, 128, exponents.shape, device=exponents.device, dtype=torch.int16,
-        generator=G,
-    )
-    bits = (sign << 15) | (exponent_bits << 7) | mantissa
-    return bits.view(torch.bfloat16)
-
-
-def make_standard_exponents(n: int, G: torch.Generator) -> torch.Tensor:
-    """Exponential body / power-law tail matching the int8 benchmark."""
-    scale = torch.as_tensor(0.5, device="cuda", dtype=torch.bfloat16)
-    alpha = torch.as_tensor(2.8, device="cuda", dtype=torch.bfloat16)
-    p_tail = torch.as_tensor(0.05, device="cuda", dtype=torch.bfloat16)
-
-    x_tail = -scale * torch.log(p_tail)
-    u = torch.rand(n, device="cuda", dtype=torch.bfloat16, generator=G)
-    eps = torch.finfo(torch.bfloat16).eps
-    u = torch.clamp(u, max=1.0 - eps)
-
-    body = u < (1.0 - p_tail)
+def make_standard(n: int, scale: float = 0.5, seed: int = 0) -> torch.Tensor:
+    """Sample signed values with an exponential body and power-law tail."""
+    G = torch.Generator(device="cuda").manual_seed(seed)
+    tail_probability = 0.05
+    tail_alpha = 2.8
+    tail_start = -scale * math.log(tail_probability)
+    u = torch.rand(n, device="cuda", dtype=torch.float32, generator=G)
+    body = u < (1.0 - tail_probability)
     values = torch.empty_like(u)
     values[body] = -scale * torch.log1p(-u[body])
-    values[~body] = x_tail * (p_tail / (1.0 - u[~body])) ** (
-        1.0 / (alpha - 1.0)
-    )
-    _, exponents = torch.frexp(values)
-    return exponents.to(torch.int8)
+    values[~body] = tail_start * (
+        tail_probability / (1.0 - u[~body])
+    ) ** (1.0 / (tail_alpha - 1.0))
+    signs = torch.randint(
+        0, 2, (n,), device="cuda", dtype=torch.int8, generator=G
+    ).to(torch.float32)
+    return (values * (signs * 2.0 - 1.0)).to(torch.bfloat16)
 
 
-def make_gaussian_exponents(
+def make_gaussian_values(
     n: int, mean: float = 0.0, std: float = 2.0, seed: int = 0,
 ) -> torch.Tensor:
     G = torch.Generator(device="cuda").manual_seed(seed)
     values = torch.randn(n, device="cuda", dtype=torch.float32, generator=G)
-    return (values * std + mean).round().clamp(-127, 127).to(torch.int8)
+    return values * std + mean
 
 
 def make_gaussian(
     n: int, mean: float = 0.0, std: float = 2.0, seed: int = 0,
 ) -> torch.Tensor:
-    exponents = make_gaussian_exponents(n, mean=mean, std=std, seed=seed)
-    G = torch.Generator(device="cuda").manual_seed(seed + 10)
-    return _pack_exponents(exponents, G)
+    return make_gaussian_values(n, mean=mean, std=std, seed=seed).to(
+        torch.bfloat16
+    )
 
 
-def make_laplace_exponents(
+def make_laplace(
     n: int, scale: float = 1.5, seed: int = 0,
 ) -> torch.Tensor:
     G = torch.Generator(device="cuda").manual_seed(seed)
     u = torch.rand(n, device="cuda", dtype=torch.float32, generator=G) - 0.5
     values = -scale * torch.sign(u) * torch.log1p(-2.0 * u.abs())
-    return values.round().clamp(-127, 127).to(torch.int8)
+    return values.to(torch.bfloat16)
 
 
 def make_localized_noise(n: int, noise_fraction: float = 0.2, seed: int = 0):
-    """Gaussian-like exponent data with a contiguous uniform-noise region."""
-    exponents = make_gaussian_exponents(n, mean=0.0, std=2.0, seed=seed)
+    """Gaussian values with a contiguous uniform-value noise region."""
+    values = make_gaussian_values(n, mean=0.0, std=2.0, seed=seed)
     start = n // 2
     end = min(n, start + int(n * noise_fraction))
     G = torch.Generator(device="cuda").manual_seed(seed + 1)
-    exponents[start:end] = torch.randint(
-        -126, 127, (end - start,), device="cuda", dtype=torch.int8, generator=G,
+    values[start:end] = torch.empty(
+        end - start, device="cuda", dtype=torch.float32
+    ).uniform_(
+        -32.0, 32.0, generator=G
     )
-    G = torch.Generator(device="cuda").manual_seed(seed + 10)
-    return _pack_exponents(exponents, G)
+    return values.to(torch.bfloat16)
 
 
 def _bf16_ratio(exponent_ratio: float) -> float:
@@ -156,16 +136,18 @@ CASES = [
 ]
 
 
-def make_data(name: str, n: int) -> torch.Tensor:
+def make_data(
+    name: str,
+    n: int,
+    distribution: Distribution | None = None,
+) -> torch.Tensor:
     if name in {"standard/standard/clean", "standard/standard/medium"}:
-        G = torch.Generator(device="cuda").manual_seed(0)
-        return _pack_exponents(make_standard_exponents(n, G), G)
+        scale = distribution.param if distribution is not None else 0.5
+        return make_standard(n, scale)
     if name in {"gaussian/gaussian/clean", "gaussian/standard/clean"}:
         return make_gaussian(n)
     if name in {"laplace/laplace/clean", "laplace/gaussian/clean"}:
-        exponents = make_laplace_exponents(n)
-        G = torch.Generator(device="cuda").manual_seed(10)
-        return _pack_exponents(exponents, G)
+        return make_laplace(n)
     if name in {
         "shifted_gaussian/gaussian/clean",
         "shifted_gaussian/standard/clean",
@@ -182,7 +164,7 @@ def make_data(name: str, n: int) -> torch.Tensor:
 
 
 def run_case(name, n, distribution, layout, max_ratio, buffer):
-    x = make_data(name, n)
+    x = make_data(name, n, distribution)
 
     # Correctness pass: allocate, decode, then release the buffer regions.
     compressed = compress(

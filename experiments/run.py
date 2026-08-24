@@ -11,7 +11,7 @@ compressed_x = compress(x, distribution=dist)
 
 print(f"Compressed size: {compressed_x.memory_size() // 1024} KB")
 
-dist = Distribution(DistType.GAUSSIAN, param=2.)
+dist = Distribution(DistType.GAUSSIAN, param=1.)
 compressed_x = compress(x, distribution=dist)
 
 print(f"Compressed size: {compressed_x.memory_size() // 1024} KB")

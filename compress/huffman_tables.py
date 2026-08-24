@@ -254,7 +254,7 @@ def get_distribution_tables(dist: Distribution):
     if not isinstance(dist, Distribution):
         raise TypeError("distribution must be a Distribution instance")
     if dist.family == DistType.STANDARD:
-        probabilities = standard_probabilities()
+        probabilities = standard_probabilities(dist.param)
     elif dist.family == DistType.GAUSSIAN:
         probabilities = gaussian_probabilities(dist.param)
     elif dist.family == DistType.LAPLACE:

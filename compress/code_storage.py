@@ -19,9 +19,10 @@ class DistType(Enum):
 class Distribution:
     """Codec distribution selector.
 
-    ``family`` is a :class:`DistributionFamily` enum member.  The optional
-    ``param`` is the Gaussian standard deviation or Laplace scale.  Parameters
-    are rounded to the nearest 0.25 so the table cache stays small.
+    ``family`` is a :class:`DistType` enum member. ``param`` is the source
+    value scale: standard-distribution scale, Gaussian standard deviation, or
+    Laplace scale. Parameters are rounded to the nearest 0.25 so the table
+    cache stays small.
     """
 
     family: DistType = DistType.STANDARD
@@ -29,29 +30,25 @@ class Distribution:
 
     def __post_init__(self):
         if not isinstance(self.family, DistType):
-            raise TypeError("family must be a DistributionFamily member")
-        if self.family == DistType.STANDARD:
-            if self.param is not None:
-                raise ValueError("standard distribution takes no parameter")
+            raise TypeError("family must be a DistType member")
+        if self.param is None:
+            default = (
+                0.5
+                if self.family == DistType.STANDARD
+                else 2.0
+                if self.family == DistType.GAUSSIAN
+                else 1.5
+            )
+            object.__setattr__(self, "param", default)
         else:
-            if self.param is None:
-                default = (
-                    2.0
-                    if self.family == DistType.GAUSSIAN
-                    else 1.5
-                )
-                object.__setattr__(self, "param", default)
-            else:
-                param = float(self.param)
-                if param <= 0.0:
-                    raise ValueError("distribution parameter must be positive")
-                param = max(0.25, round(param / 0.25) * 0.25)
-                object.__setattr__(self, "param", float(param))
+            param = float(self.param)
+            if param <= 0.0:
+                raise ValueError("distribution parameter must be positive")
+            param = max(0.25, round(param / 0.25) * 0.25)
+            object.__setattr__(self, "param", float(param))
 
 
     def __str__(self) -> str:
-        if self.family == DistType.STANDARD:
-            return self.family.value
         label = "std" if self.family == DistType.GAUSSIAN else "scale"
         return f"{self.family.value}/{label}={self.param}"
 
