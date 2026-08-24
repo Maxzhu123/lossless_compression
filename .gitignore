@@ -20,3 +20,4 @@ nanogpt/data/fineweb10B/
 /experiments/results/
 *.csv
 *.txt
+/program.md
