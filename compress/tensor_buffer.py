@@ -48,6 +48,7 @@ def _reset_kernel(
 @triton.jit
 def _allocate_kernel(
     requested_bytes,
+    item_count,
     descriptor,
     free_starts,
     free_sizes,
@@ -55,11 +56,14 @@ def _allocate_kernel(
     lock,
     generation,
     ALIGNMENT: tl.constexpr,
+    ITEM_BYTES: tl.constexpr,
     MAX_FREE_REGIONS: tl.constexpr,
 ):
     _lock(lock)
 
     request = tl.load(requested_bytes).to(tl.int32)
+    if ITEM_BYTES:
+        request += tl.load(item_count).to(tl.int32) * ITEM_BYTES
     current_generation = tl.load(generation).to(tl.int32)
     size = ((request + ALIGNMENT - 1) // ALIGNMENT) * ALIGNMENT
     count = tl.load(free_count).to(tl.int32)
@@ -266,9 +270,28 @@ class TensorBuffer:
         """Reserve a one-element CUDA integer request without host sync."""
         descriptor = torch.empty(4, dtype=torch.int32, device=self.device)
         _allocate_kernel[(1,)](
-            nbytes, descriptor,
-            self._free_starts, self._free_sizes, self._free_count, self._lock, self._generation,
-            ALIGNMENT=_ALIGNMENT, MAX_FREE_REGIONS=self.max_free_regions,
+            nbytes, nbytes, descriptor,
+            self._free_starts, self._free_sizes, self._free_count,
+            self._lock, self._generation, ALIGNMENT=_ALIGNMENT,
+            ITEM_BYTES=0, MAX_FREE_REGIONS=self.max_free_regions,
+        )
+        return Allocation(descriptor, self)
+
+    def allocate_with_items(
+        self,
+        payload_bytes: torch.Tensor,
+        item_count: torch.Tensor,
+        item_bytes: int,
+    ) -> Allocation:
+        """Reserve ``payload_bytes + item_count * item_bytes`` asynchronously."""
+        if item_bytes <= 0:
+            raise ValueError("item_bytes must be positive")
+        descriptor = torch.empty(4, dtype=torch.int32, device=self.device)
+        _allocate_kernel[(1,)](
+            payload_bytes, item_count, descriptor,
+            self._free_starts, self._free_sizes, self._free_count,
+            self._lock, self._generation, ALIGNMENT=_ALIGNMENT,
+            ITEM_BYTES=int(item_bytes), MAX_FREE_REGIONS=self.max_free_regions,
         )
         return Allocation(descriptor, self)
 

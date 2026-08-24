@@ -42,12 +42,12 @@ DECODE_AUTOTUNE_CONFIGS = [
 
 @triton.autotune(
     configs=ESTIMATE_CENTER_AUTOTUNE_CONFIGS,
-    key=["SAMPLE_SIZE", "STRIDE"],
+    key=["SAMPLE_SIZE"],
 )
 @triton.jit
 def _estimate_center_kernel(
     source_bits, center_out, size,
-    SAMPLE_SIZE: tl.constexpr, STRIDE: tl.constexpr, BLOCK: tl.constexpr,
+    SAMPLE_SIZE: tl.constexpr, STRIDE, BLOCK: tl.constexpr,
 ):
     offsets = tl.arange(0, BLOCK)
     total = tl.zeros((BLOCK,), tl.int32)
@@ -91,7 +91,6 @@ def _encode_kernel(
     extra_start = tl.full((N_LANES,), N_STEPS, tl.int32)
     has_data = block * BLOCK + lanes < n_elements
     center_value = tl.load(center).to(tl.int32)
-    table_row = (center_value + 128) * 256
 
     for step in tl.range(0, N_STEPS, 2, loop_unroll_factor=4):
         source_offset = block * BLOCK + step * N_LANES + lanes
@@ -118,10 +117,10 @@ def _encode_kernel(
             mask=valid1,
         )
         packed0 = tl.load(
-            encode_table + table_row + (exp0 & 255)
+            encode_table + ((exp0 - center_value) & 255)
         ).to(tl.uint32)
         packed1 = tl.load(
-            encode_table + table_row + (exp1 & 255)
+            encode_table + ((exp1 - center_value) & 255)
         ).to(tl.uint32)
         length0 = (packed0 >> 20).to(tl.int32)
         length1 = (packed1 >> 20).to(tl.int32)
@@ -155,7 +154,7 @@ def _encode_kernel(
     )
     tl.store(
         extra_starts + lane_index,
-        tl.where(has_data & overflow, extra_start, N_STEPS),
+        tl.where(has_data & overflow, extra_start, 255),
     )
 
 
@@ -173,11 +172,13 @@ def _count_bad_streams_kernel(
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n_streams
-    start = tl.load(extra_starts + offs, mask=mask, other=steps)
-    bad = mask & (start < steps)
+    start = tl.load(extra_starts + offs, mask=mask, other=255)
+    bad = mask & (start != 255)
     lengths = tl.where(bad, steps - start, 0)
-    tl.atomic_add(bad_count, tl.sum(bad.to(tl.int32), axis=0))
-    tl.atomic_add(fallback_total, tl.sum(lengths, axis=0))
+    cnt = tl.sum(bad.to(tl.int32), axis=0)
+    total_len = tl.sum(lengths, axis=0)
+    tl.atomic_add(bad_count, cnt, mask=cnt != 0)
+    tl.atomic_add(fallback_total, total_len, mask=total_len != 0)
 
 
 @triton.autotune(
@@ -196,26 +197,29 @@ def _compact_bad_streams_kernel(
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n_streams
-    start = tl.load(extra_starts + offs, mask=mask, other=steps)
-    bad = mask & (start < steps)
+    start = tl.load(extra_starts + offs, mask=mask, other=255)
+    bad = mask & (start != 255)
     lengths = tl.where(bad, steps - start, 0)
     cnt = tl.sum(bad.to(tl.int32), axis=0)
     total_len = tl.sum(lengths, axis=0)
-    block_start = tl.atomic_add(bad_count, cnt)
-    fallback_block_start = tl.atomic_add(fallback_total, total_len)
+    block_start = tl.atomic_add(bad_count, cnt, mask=cnt != 0)
+    fallback_block_start = tl.atomic_add(
+        fallback_total, total_len, mask=total_len != 0
+    )
     prefix = tl.cumsum(bad.to(tl.int32), axis=0) - bad.to(tl.int32)
     offset_prefix = tl.cumsum(lengths, axis=0) - lengths
     pos = block_start + prefix
     if BUFFERED:
         count = tl.load(final_counts).to(tl.int32)
-        base_words = tl.load(allocation_descriptor).to(tl.int32) // 4
+        base = tl.load(allocation_descriptor).to(tl.int32)
+        base_words = base // 4
         tl.store(metadata_buffer + base_words + pos, offs.to(tl.int32), mask=bad)
-        tl.store(metadata_buffer + base_words + count + pos, start, mask=bad)
         tl.store(
-            metadata_buffer + base_words + 2 * count + pos,
+            metadata_buffer + base_words + count + pos,
             fallback_block_start + offset_prefix,
             mask=bad,
         )
+        tl.store(bad_starts_out + base + 8 * count + pos, start, mask=bad)
     else:
         tl.store(bad_streams_out + pos, offs.to(tl.int32), mask=bad)
         tl.store(bad_starts_out + pos, start, mask=bad)
@@ -254,16 +258,16 @@ def _compact_extra_kernel(
         base_words = base // 4
         stream = tl.load(metadata_buffer + base_words + tile, mask=valid, other=0).to(tl.int32)
         start = tl.load(
-            metadata_buffer + base_words + count + tile,
+            extra_starts + base + 8 * count + tile,
             mask=valid,
             other=N_STEPS,
         ).to(tl.int32)
         fallback_offset = tl.load(
-            metadata_buffer + base_words + 2 * count + tile,
+            metadata_buffer + base_words + count + tile,
             mask=valid,
             other=0,
         ).to(tl.int32)
-        fallback_base = base + 12 * count
+        fallback_base = base + 9 * count
     else:
         stream = tl.load(extra_streams + tile, mask=valid, other=0).to(tl.int32)
         start = tl.load(extra_starts + tile, mask=valid, other=N_STEPS).to(tl.int32)
@@ -310,16 +314,16 @@ def _scatter_fallback_kernel(
         base_words = base // 4
         stream = tl.load(metadata_buffer + base_words + tile, mask=valid, other=0).to(tl.int32)
         start = tl.load(
-            metadata_buffer + base_words + count + tile,
+            bad_starts + base + 8 * count + tile,
             mask=valid,
             other=N_STEPS,
         ).to(tl.int32)
         fallback_offset = tl.load(
-            metadata_buffer + base_words + 2 * count + tile,
+            metadata_buffer + base_words + count + tile,
             mask=valid,
             other=0,
         ).to(tl.int32)
-        fallback_base = base + 12 * count
+        fallback_base = base + 9 * count
     else:
         stream = tl.load(bad_streams + tile, mask=valid, other=0).to(tl.int32)
         start = tl.load(bad_starts + tile, mask=valid, other=N_STEPS).to(tl.int32)
@@ -380,7 +384,7 @@ def _decode_kernel(
     window = word0 | (word1 << 32)
     center_value = tl.load(center).to(tl.int32)
 
-    for step in tl.range(0, N_STEPS, 4):
+    for step in tl.range(0, N_STEPS, 2):
         output_offset = block * BLOCK + step * N_LANES + lanes
         valid = output_offset < n_elements
 
@@ -391,9 +395,7 @@ def _decode_kernel(
         length = tl.where(continuation, RARE_LENGTH + 8, first_length)
         tail = ((current >> RARE_LENGTH) & 255).to(tl.int32)
         tail = tl.where(tail >= 128, tail - 256, tail)
-        value = (
-            (tl.where(continuation, tail, first >> 8) + center_value) & 255
-        ).to(tl.int8)
+        value = tl.where(continuation, tail, first >> 8) + center_value
         sm = tl.load(sign_mantissa + output_offset, mask=valid, other=0)
         packed = _pack_bf16(value, sm)
         tl.store(output + output_offset, packed.to(tl.int16), mask=valid)
@@ -406,9 +408,7 @@ def _decode_kernel(
         length1 = tl.where(continuation1, RARE_LENGTH + 8, first_length1)
         tail1 = ((current1 >> RARE_LENGTH) & 255).to(tl.int32)
         tail1 = tl.where(tail1 >= 128, tail1 - 256, tail1)
-        value1 = (
-            (tl.where(continuation1, tail1, first1 >> 8) + center_value) & 255
-        ).to(tl.int8)
+        value1 = tl.where(continuation1, tail1, first1 >> 8) + center_value
         valid1 = output_offset + N_LANES < n_elements
         sm1 = tl.load(
             sign_mantissa + output_offset + N_LANES, mask=valid1, other=0
@@ -418,85 +418,22 @@ def _decode_kernel(
             output + output_offset + N_LANES, packed1.to(tl.int16), mask=valid1
         )
 
-        shift2 = shift1 + tl.where(valid1, length1, 0)
-        mid_crosses_word = shift2 >= 32
-        if SKIP_FALLBACK:
-            mid_word2 = tl.load(
-                encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams
-                + lane_index,
-                mask=mid_crosses_word,
-                other=0,
-            ).to(tl.uint32).to(tl.uint64)
-        else:
-            mid_word2 = tl.load(
-                encoded + (word + 2) * n_streams + lane_index,
-                mask=mid_crosses_word,
-                other=0,
-            ).to(tl.uint32).to(tl.uint64)
-        mid_window = (window >> 32) | (mid_word2 << 32)
-        mid_window = tl.where(mid_crosses_word, mid_window, window)
-        mid_word = word + mid_crosses_word
-        mid_shift = tl.where(mid_crosses_word, shift2 - 32, shift2)
-
-        current2 = mid_window >> mid_shift
-        first2 = tl.load(decode_table + (current2 & FIRST_MASK).to(tl.int32))
-        first_length2 = first2 & 255
-        continuation2 = first_length2 == 0
-        length2 = tl.where(continuation2, RARE_LENGTH + 8, first_length2)
-        tail2 = ((current2 >> RARE_LENGTH) & 255).to(tl.int32)
-        tail2 = tl.where(tail2 >= 128, tail2 - 256, tail2)
-        value2 = (
-            (tl.where(continuation2, tail2, first2 >> 8) + center_value) & 255
-        ).to(tl.int8)
-        valid2 = output_offset + 2 * N_LANES < n_elements
-        sm2 = tl.load(
-            sign_mantissa + output_offset + 2 * N_LANES, mask=valid2, other=0
-        )
-        packed2 = _pack_bf16(value2, sm2)
-        tl.store(
-            output + output_offset + 2 * N_LANES,
-            packed2.to(tl.int16),
-            mask=valid2,
-        )
-
-        shift3 = mid_shift + tl.where(valid2, length2, 0)
-        current3 = mid_window >> shift3
-        first3 = tl.load(decode_table + (current3 & FIRST_MASK).to(tl.int32))
-        first_length3 = first3 & 255
-        continuation3 = first_length3 == 0
-        length3 = tl.where(continuation3, RARE_LENGTH + 8, first_length3)
-        tail3 = ((current3 >> RARE_LENGTH) & 255).to(tl.int32)
-        tail3 = tl.where(tail3 >= 128, tail3 - 256, tail3)
-        value3 = (
-            (tl.where(continuation3, tail3, first3 >> 8) + center_value) & 255
-        ).to(tl.int8)
-        valid3 = output_offset + 3 * N_LANES < n_elements
-        sm3 = tl.load(
-            sign_mantissa + output_offset + 3 * N_LANES, mask=valid3, other=0
-        )
-        packed3 = _pack_bf16(value3, sm3)
-        tl.store(
-            output + output_offset + 3 * N_LANES,
-            packed3.to(tl.int16),
-            mask=valid3,
-        )
-
-        next_shift = shift3 + tl.where(valid3, length3, 0)
+        next_shift = shift1 + tl.where(valid1, length1, 0)
         crosses_word = next_shift >= 32
         if SKIP_FALLBACK:
             word2 = tl.load(
-                encoded + tl.minimum(mid_word + 2, FIXED_WORDS - 1) * n_streams
+                encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams
                 + lane_index,
                 mask=crosses_word,
                 other=0,
             ).to(tl.uint32).to(tl.uint64)
         else:
             word2 = tl.load(
-                encoded + (mid_word + 2) * n_streams + lane_index,
+                encoded + (word + 2) * n_streams + lane_index,
                 mask=crosses_word,
                 other=0,
             ).to(tl.uint32).to(tl.uint64)
-        next_window = (mid_window >> 32) | (word2 << 32)
-        window = tl.where(crosses_word, next_window, mid_window)
-        word = mid_word + crosses_word
+        next_window = (window >> 32) | (word2 << 32)
+        window = tl.where(crosses_word, next_window, window)
+        word += crosses_word
         shift = tl.where(crosses_word, next_shift - 32, next_shift)

@@ -109,7 +109,10 @@ def compress(
     encoded = torch.empty(
         payload_words + 4, dtype=torch.int32, device=source.device
     )
-    extra_starts = torch.empty(streams, dtype=torch.int32, device=source.device)
+    # Starts are emitted in pairs, so 254 is the largest possible overflow
+    # start.  Use 255 as the no-overflow sentinel instead of spending four
+    # bytes per stream on this transient array.
+    extra_starts = torch.empty(streams, dtype=torch.uint8, device=source.device)
     _encode_kernel[(blocks,)](
         source_bits, sign_mantissa, encoded,
         encode_table, center, extra_starts,
@@ -122,49 +125,28 @@ def compress(
 
         # Count overflow on the GPU, reserve one compact device-buffer region,
         # then write metadata and fallback bytes directly through its descriptor.
-        counts = torch.zeros(2, dtype=torch.int32, device=source.device)
+        # The first pair holds final counts; the second is compaction scratch,
+        # avoiding another allocation and zero-fill.  allocate_with_items also
+        # computes fallback_bytes + 9 * bad_count inside the allocator kernel,
+        # avoiding separate device multiplication and addition launches.
+        counts = torch.zeros(4, dtype=torch.int32, device=source.device)
         _count_bad_streams_kernel[(triton.cdiv(streams, 1024),)](
-            extra_starts,
-            counts[:1],
-            counts[1:],
-            streams,
-            steps,
-            BLOCK=1024,
+            extra_starts, counts[:1], counts[1:2], streams, steps, BLOCK=1024,
         )
-        allocation = buffer.allocate(counts[0] * 12 + counts[1])
-        write_counts = torch.zeros(2, dtype=torch.int32, device=source.device)
+        allocation = buffer.allocate_with_items(counts[1:2], counts[:1], 9)
         metadata_buffer = buffer.data.view(torch.int32)
         _compact_bad_streams_kernel[(triton.cdiv(streams, 1024),)](
-            extra_starts,
-            metadata_buffer,
-            metadata_buffer,
-            metadata_buffer,
-            metadata_buffer,
-            allocation.descriptor,
-            counts[:1],
-            write_counts[:1],
-            write_counts[1:],
-            streams,
-            steps,
-            BUFFERED=True,
-            BLOCK=1024,
+            extra_starts, metadata_buffer, buffer.data, metadata_buffer,
+            metadata_buffer, allocation.descriptor, counts[:1],
+            counts[2:3], counts[3:], streams, steps,
+            BUFFERED=True, BLOCK=1024,
         )
         _compact_extra_kernel[(triton.cdiv(streams, 32),)](
-            source_bits,
-            metadata_buffer,
-            metadata_buffer,
-            metadata_buffer,
-            buffer.data,
-            metadata_buffer,
-            allocation.descriptor,
-            counts[:1],
-            write_counts[:1],
-            size,
-            BUFFERED=True,
-            BLOCK=block_size,
-            N_LANES=lanes,
-            N_STEPS=steps,
-            TILE=32,
+            source_bits, metadata_buffer, buffer.data, metadata_buffer,
+            buffer.data, metadata_buffer, allocation.descriptor,
+            counts[:1], counts[2:3], size,
+            BUFFERED=True, BLOCK=block_size, N_LANES=lanes,
+            N_STEPS=steps, TILE=32,
         )
         return CompressedTensor(
             encoded,
@@ -173,7 +155,7 @@ def compress(
             fallback_buffer=buffer.data,
             fallback_descriptor=allocation.descriptor,
             fallback_count=counts[:1],
-            fallback_used=counts[1:],
+            fallback_used=counts[1:2],
             distribution=distribution,
             center=center,
             shape=shape,
@@ -190,7 +172,7 @@ def compress(
     )
     bad_count, fallback_size = (int(value) for value in counts.tolist())
     bad_streams = torch.empty(bad_count, dtype=torch.int32, device=source.device)
-    bad_starts = torch.empty(bad_count, dtype=torch.int32, device=source.device)
+    bad_starts = torch.empty(bad_count, dtype=torch.uint8, device=source.device)
     fallback_offsets = torch.empty(bad_count, dtype=torch.int32, device=source.device)
     fallback_data = torch.empty(fallback_size, dtype=torch.int8, device=source.device)
     fallback_base = 0
@@ -241,10 +223,9 @@ def decompress(data: CompressedTensor) -> torch.Tensor:
     if data.fallback_descriptor is not None:
         metadata_buffer = data.fallback_buffer.view(torch.int32)
         _scatter_fallback_kernel[(triton.cdiv(blocks * lanes, 64),)](
-            metadata_buffer, metadata_buffer, metadata_buffer, data.fallback_buffer,
-            0,
-            metadata_buffer,
-            data.fallback_descriptor, data.fallback_count, data.sign_mantissa,
+            metadata_buffer, data.fallback_buffer, metadata_buffer, data.fallback_buffer,
+            0, metadata_buffer, data.fallback_descriptor,
+            data.fallback_count, data.sign_mantissa,
             out_bits, data.size,
             BUFFERED=True, TILE=64, BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
         )

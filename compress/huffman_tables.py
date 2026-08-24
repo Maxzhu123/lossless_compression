@@ -238,16 +238,6 @@ def _build_huffman_tables_from_lengths(probabilities, max_length=FIRST_BITS, max
     return encode, decode, esc_length
 
 
-def _make_shifted_encode_table(encode_list):
-    encode_tensor = torch.tensor(encode_list, dtype=torch.int32, device="cuda")
-    centers = torch.arange(-128, 128, device="cuda", dtype=torch.int64).view(
-        256, 1
-    )
-    symbols = torch.arange(256, device="cuda", dtype=torch.int64).view(1, 256)
-    indices = (symbols - centers) % 256
-    return encode_tensor[indices]
-
-
 def get_distribution_tables(dist: Distribution):
     """Return cached tables for a distribution, independent of noise level."""
     if not isinstance(dist, Distribution):
@@ -256,7 +246,10 @@ def get_distribution_tables(dist: Distribution):
 
 
 @lru_cache(maxsize=None)
-def _get_distribution_tables(family: DistType, param: float):
+def _get_distribution_tables(
+    family: DistType,
+    param: float,
+):
     if family == DistType.EMPIRICAL:
         probabilities = empirical_probabilities(param)
     elif family == DistType.GAUSSIAN:
@@ -270,5 +263,5 @@ def _get_distribution_tables(family: DistType, param: float):
         probabilities, max_length=FIRST_BITS, max_esc_length=8
     )
     decode_tensor = torch.tensor(decode, dtype=torch.int32, device="cuda")
-    shifted = _make_shifted_encode_table(encode)
-    return shifted, decode_tensor, rare_length
+    encode_tensor = torch.tensor(encode, dtype=torch.int32, device="cuda")
+    return encode_tensor, decode_tensor, rare_length
