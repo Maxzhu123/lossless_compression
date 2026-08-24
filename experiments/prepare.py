@@ -114,25 +114,37 @@ def _bf16_ratio(exponent_ratio: float) -> float:
     return (1.0 + exponent_ratio) / 2.0
 
 
-# Each case: (name, distribution, layout, max_total_bf16_ratio, weight)
-DIST_STANDARD = Distribution(DistType.STANDARD)
-DIST_GAUSSIAN = Distribution(DistType.GAUSSIAN)
-DIST_LAPLACE = Distribution(DistType.LAPLACE)
+# Each case: (name, distribution, max_total_bf16_ratio, weight)
+DIST_STANDARD_CLEAN = Distribution(DistType.STANDARD)
+DIST_STANDARD_MEDIUM = Distribution(
+    DistType.STANDARD, layout=CompressionLayout.MEDIUM
+)
+DIST_STANDARD_HIGH = Distribution(
+    DistType.STANDARD, layout=CompressionLayout.HIGH
+)
+DIST_GAUSSIAN_CLEAN = Distribution(DistType.GAUSSIAN)
+DIST_GAUSSIAN_MEDIUM = Distribution(
+    DistType.GAUSSIAN, layout=CompressionLayout.MEDIUM
+)
+DIST_GAUSSIAN_HIGH = Distribution(
+    DistType.GAUSSIAN, layout=CompressionLayout.HIGH
+)
+DIST_LAPLACE_CLEAN = Distribution(DistType.LAPLACE)
 
 
 CASES = [
-    ("standard/standard/clean", DIST_STANDARD, CompressionLayout.CLEAN, _bf16_ratio(0.42), 5),
-    ("standard/standard/medium", DIST_STANDARD, CompressionLayout.MEDIUM, _bf16_ratio(0.60), 5),
-    ("gaussian/gaussian/clean", DIST_GAUSSIAN, CompressionLayout.CLEAN, _bf16_ratio(0.42), 5),
-    ("gaussian/standard/clean", DIST_STANDARD, CompressionLayout.CLEAN, _bf16_ratio(0.65), 1),
-    ("laplace/laplace/clean", DIST_LAPLACE, CompressionLayout.CLEAN, _bf16_ratio(0.43), 5),
-    ("laplace/gaussian/clean", DIST_GAUSSIAN, CompressionLayout.CLEAN, _bf16_ratio(0.55), 1),
-    ("shifted_gaussian/gaussian/clean", DIST_GAUSSIAN, CompressionLayout.CLEAN, _bf16_ratio(0.42), 5),
-    ("shifted_gaussian/standard/clean", DIST_STANDARD, CompressionLayout.CLEAN, _bf16_ratio(0.65), 1),
-    ("localized/gaussian/high", DIST_GAUSSIAN, CompressionLayout.HIGH, _bf16_ratio(0.83), 5),
-    ("localized/standard/high", DIST_STANDARD, CompressionLayout.HIGH, _bf16_ratio(0.84), 1),
-    ("localized/gaussian/medium", DIST_GAUSSIAN, CompressionLayout.MEDIUM, _bf16_ratio(0.76), 5),
-    ("localized/standard/medium", DIST_STANDARD, CompressionLayout.MEDIUM, _bf16_ratio(0.76), 1),
+    ("standard/standard/clean", DIST_STANDARD_CLEAN, _bf16_ratio(0.42), 5),
+    ("standard/standard/medium", DIST_STANDARD_MEDIUM, _bf16_ratio(0.60), 5),
+    ("gaussian/gaussian/clean", DIST_GAUSSIAN_CLEAN, _bf16_ratio(0.42), 5),
+    ("gaussian/standard/clean", DIST_STANDARD_CLEAN, _bf16_ratio(0.65), 1),
+    ("laplace/laplace/clean", DIST_LAPLACE_CLEAN, _bf16_ratio(0.43), 5),
+    ("laplace/gaussian/clean", DIST_GAUSSIAN_CLEAN, _bf16_ratio(0.55), 1),
+    ("shifted_gaussian/gaussian/clean", DIST_GAUSSIAN_CLEAN, _bf16_ratio(0.42), 5),
+    ("shifted_gaussian/standard/clean", DIST_STANDARD_CLEAN, _bf16_ratio(0.65), 1),
+    ("localized/gaussian/high", DIST_GAUSSIAN_HIGH, _bf16_ratio(0.83), 5),
+    ("localized/standard/high", DIST_STANDARD_HIGH, _bf16_ratio(0.84), 1),
+    ("localized/gaussian/medium", DIST_GAUSSIAN_MEDIUM, _bf16_ratio(0.76), 5),
+    ("localized/standard/medium", DIST_STANDARD_MEDIUM, _bf16_ratio(0.76), 1),
 ]
 
 
@@ -163,12 +175,12 @@ def make_data(
     raise ValueError(f"unknown case: {name}")
 
 
-def run_case(name, n, distribution, layout, max_ratio, buffer):
+def run_case(name, n, distribution, max_ratio, buffer):
     x = make_data(name, n, distribution)
 
     # Correctness pass: allocate, decode, then release the buffer regions.
     compressed = compress(
-        x, layout=layout, distribution=distribution, buffer=buffer
+        x, distribution=distribution, buffer=buffer
     )
     restored = decompress(compressed)
     assert torch.equal(x, restored), f"roundtrip mismatch: {name}"
@@ -176,7 +188,7 @@ def run_case(name, n, distribution, layout, max_ratio, buffer):
 
     for _ in range(WARMUP):
         compressed = compress(
-            x, layout=layout, distribution=distribution, buffer=buffer
+            x, distribution=distribution, buffer=buffer
         )
         restored = decompress(compressed)
         free_compressed(compressed, buffer)
@@ -185,7 +197,7 @@ def run_case(name, n, distribution, layout, max_ratio, buffer):
     start = time.perf_counter()
     for i in range(ITERS):
         compressed = compress(
-            x, layout=layout, distribution=distribution, buffer=buffer
+            x, distribution=distribution, buffer=buffer
         )
         restored = decompress(compressed)
         # Keep the final compressed object live so ratio can be measured after
@@ -221,7 +233,7 @@ def main():
     scheduled_cases = [
         (*case, size) for case, size in zip(CASES, sizes)
     ]
-    weights = [weight for _, _, _, _, weight, _ in scheduled_cases]
+    weights = [weight for _, _, _, weight, _ in scheduled_cases]
     total_weight = sum(weights)
     weights = [weight / total_weight for weight in weights]
     print(f"WEIGHTINGS = {[round(weight, 4) for weight in weights]}")
@@ -237,10 +249,10 @@ def main():
     )
 
     total_time = 0.0
-    for weight, (name, distribution, layout, max_ratio, _, n) in zip(
+    for weight, (name, distribution, max_ratio, _, n) in zip(
         weights, scheduled_cases
     ):
-        elapsed_ms = run_case(name, n, distribution, layout, max_ratio, buffer)
+        elapsed_ms = run_case(name, n, distribution, max_ratio, buffer)
         total_time += weight * elapsed_ms
 
     # Individual buffer-backed regions are freed inside run_case.  Reset the

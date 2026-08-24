@@ -248,19 +248,23 @@ def _make_shifted_encode_table(encode_list):
     return encode_tensor[indices]
 
 
-@lru_cache(maxsize=None)
 def get_distribution_tables(dist: Distribution):
-    """Return cached CUDA encode, decode, and rare-length tables for ``dist``."""
+    """Return cached tables for a distribution, independent of its layout."""
     if not isinstance(dist, Distribution):
         raise TypeError("distribution must be a Distribution instance")
-    if dist.family == DistType.STANDARD:
-        probabilities = standard_probabilities(dist.param)
-    elif dist.family == DistType.GAUSSIAN:
-        probabilities = gaussian_probabilities(dist.param)
-    elif dist.family == DistType.LAPLACE:
-        probabilities = laplace_probabilities(dist.param)
+    return _get_distribution_tables(dist.family, dist.param)
+
+
+@lru_cache(maxsize=None)
+def _get_distribution_tables(family: DistType, param: float):
+    if family == DistType.STANDARD:
+        probabilities = standard_probabilities(param)
+    elif family == DistType.GAUSSIAN:
+        probabilities = gaussian_probabilities(param)
+    elif family == DistType.LAPLACE:
+        probabilities = laplace_probabilities(param)
     else:  # pragma: no cover - guarded by Distribution validation
-        raise ValueError(f"unknown distribution family: {dist.family!r}")
+        raise ValueError(f"unknown distribution family: {family!r}")
 
     encode, decode, rare_length = _build_huffman_tables_from_lengths(
         probabilities, max_length=FIRST_BITS, max_esc_length=8

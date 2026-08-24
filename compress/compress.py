@@ -53,7 +53,6 @@ def _estimate_center(source_bits, size):
 
 def compress(
     data: torch.Tensor,
-    layout: CompressionLayout = CompressionLayout.CLEAN,
     distribution: Distribution = Distribution(),
     buffer: TensorBuffer | None = None,
 ) -> CompressedTensor:
@@ -64,6 +63,7 @@ def compress(
     unbiased int8 representation and Huffman-coded by the baseline codec.
     """
 
+    layout = distribution.layout
     shape = tuple(data.shape)
     source = data.contiguous().view(-1)
     size = source.numel()
@@ -78,7 +78,7 @@ def compress(
     if (payload_words + 4) * 4 > size:
         return CompressedTensor(
             source, size,
-            layout=layout, distribution=distribution, shape=shape,
+            distribution=distribution, shape=shape,
         )
 
     # A bfloat16 layout is [sign:1 | exponent:8 | mantissa:7]. Keep the
@@ -165,7 +165,6 @@ def compress(
             fallback_descriptor=allocation.descriptor,
             fallback_count=counts[:1],
             fallback_used=counts[1:],
-            layout=layout,
             distribution=distribution,
             center=center,
             shape=shape,
@@ -210,7 +209,7 @@ def compress(
         bad_streams, bad_starts, fallback_offsets,
         fallback_buffer=fallback_data, fallback_base=fallback_base,
         fallback_count=bad_count_tensor, fallback_used=fallback_total,
-        layout=layout, distribution=distribution, center=center, shape=shape,
+        distribution=distribution, center=center, shape=shape,
     )
 
 
@@ -220,7 +219,7 @@ def decompress(data: CompressedTensor) -> torch.Tensor:
         return data.data.reshape(data.shape)
 
     _, decode_table, rare_length = get_distribution_tables(data.distribution)
-    block_size, lanes, steps, fixed_words = _geometry(data.layout)
+    block_size, lanes, steps, fixed_words = _geometry(data.distribution.layout)
     blocks = triton.cdiv(data.size, block_size)
     out_bits = torch.empty(data.size, dtype=torch.int16, device=data.data.device)
     _decode_kernel[(blocks,)](

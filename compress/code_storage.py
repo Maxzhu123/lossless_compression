@@ -27,10 +27,13 @@ class Distribution:
 
     family: DistType = DistType.STANDARD
     param: float | None = None
+    layout: CompressionLayout = CompressionLayout.CLEAN
 
     def __post_init__(self):
         if not isinstance(self.family, DistType):
             raise TypeError("family must be a DistType member")
+        if not isinstance(self.layout, CompressionLayout):
+            raise TypeError("layout must be a CompressionLayout member")
         if self.param is None:
             default = (
                 0.5
@@ -50,7 +53,7 @@ class Distribution:
 
     def __str__(self) -> str:
         label = "std" if self.family == DistType.GAUSSIAN else "scale"
-        return f"{self.family.value}/{label}={self.param}"
+        return f"{self.family.value}/{label}={self.param}/{self.layout.name.lower()}"
 
 
 @dataclass(frozen=True)
@@ -66,7 +69,6 @@ class CompressedTensor:
     fallback_base: int = 0  # Byte offset of this tensor's region in fallback_buffer.
     fallback_count: torch.Tensor | None = None  # Device scalar with the number of fallback streams.
     fallback_used: torch.Tensor | None = None  # Device scalar with actual fallback bytes used.
-    layout: CompressionLayout = CompressionLayout.CLEAN  # Encoding geometry.
     distribution: Distribution = Distribution(DistType.STANDARD)  # Huffman table selector.
     center: torch.Tensor | int = 0  # CUDA center scalar used by encode/decode.
     shape: tuple[int, ...] = ()  # Original tensor shape.
