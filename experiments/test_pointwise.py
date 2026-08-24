@@ -6,7 +6,7 @@ import torch
 
 from compress.code_storage import Distribution, DistType, NoiseLevel
 from compress.compress import compress, decompress
-from compress.ops import compressed_add
+from compress.ops import POINTWISE_OPS, binary_pointwise
 from compress.tensor_buffer import Allocation, TensorBuffer
 
 
@@ -29,18 +29,20 @@ def _assert_bits_equal(left: torch.Tensor, right: torch.Tensor) -> None:
 
 
 @torch.no_grad()
-def _check(source, other, distribution, *, buffered=True) -> None:
+def _check(source, other, distribution, operation, *, buffered=True) -> None:
     buffer = _buffer(source.numel()) if buffered else None
     output_buffer = _buffer(source.numel()) if buffered else None
     encoded = compress(source, distribution, buffer)
     restored = decompress(encoded)
-    actual = compressed_add(encoded, other)
-    compressed = compressed_add(
-        encoded, other, output="compressed", buffer=output_buffer,
+    expected = operation.torch_fn(restored, other)
+    actual = binary_pointwise(encoded, other, operation)
+    compressed = binary_pointwise(
+        encoded, other, operation,
+        output="compressed", buffer=output_buffer,
     )
     _assert_bits_equal(source, restored)
-    _assert_bits_equal(restored + other, actual)
-    _assert_bits_equal(restored + other, decompress(compressed))
+    _assert_bits_equal(expected, actual)
+    _assert_bits_equal(expected, decompress(compressed))
     _free(encoded, buffer)
     _free(compressed, output_buffer)
 
@@ -76,16 +78,18 @@ def _compare(baseline, fused, iterations, release=None):
 
 
 @torch.no_grad()
-def _benchmark(size: int) -> None:
+def _benchmark(size: int, operation) -> None:
     source = torch.randn(size, device="cuda").to(torch.bfloat16)
     other = torch.randn_like(source)
     buffer = _buffer(size)
     output_buffer = _buffer(size)
     encoded = compress(source, Distribution(DistType.GAUSSIAN), buffer)
-    _assert_bits_equal(decompress(encoded) + other, compressed_add(encoded, other))
+    expected = operation.torch_fn(decompress(encoded), other)
+    actual = binary_pointwise(encoded, other, operation)
+    _assert_bits_equal(expected, actual)
 
-    baseline = lambda: decompress(encoded) + other
-    fused = lambda: compressed_add(encoded, other)
+    baseline = lambda: operation.torch_fn(decompress(encoded), other)
+    fused = lambda: binary_pointwise(encoded, other, operation)
     iterations = 50 if size <= 10_000_003 else 20 if size <= 50_000_003 else 10
     baseline_ms, fused_ms = _compare(baseline, fused, iterations)
     print(
@@ -95,8 +99,9 @@ def _benchmark(size: int) -> None:
     )
 
     dense_then_compress = lambda: compress(fused(), encoded.distribution, output_buffer)
-    compressed = lambda: compressed_add(
-        encoded, other, output="compressed", buffer=output_buffer,
+    compressed = lambda: binary_pointwise(
+        encoded, other, operation,
+        output="compressed", buffer=output_buffer,
     )
     release = lambda value: _free(value, output_buffer)
     baseline_ms, fused_ms = _compare(
@@ -118,7 +123,8 @@ def main() -> None:
     # Raw fallback and a non-contiguous dense operand.
     source = torch.randn((17, 31), device="cuda", generator=generator).to(torch.bfloat16)
     other = torch.randn((31, 17), device="cuda", generator=generator).to(torch.bfloat16).T
-    _check(source, other, Distribution(DistType.GAUSSIAN))
+    for operation in POINTWISE_OPS.values():
+        _check(source, other, Distribution(DistType.GAUSSIAN), operation)
 
     # Arbitrary BF16 bits exercise NaNs, infinities and substantial overflow.
     bits = torch.randint(
@@ -128,12 +134,15 @@ def main() -> None:
     source = bits.view(torch.bfloat16)
     other = torch.randn(source.shape, device="cuda", generator=generator).to(torch.bfloat16)
     noisy = Distribution(DistType.EMPIRICAL, noise_level=NoiseLevel.HIGH)
-    _check(source, other, noisy)
-    _check(source, other, noisy, buffered=False)
+    for operation in POINTWISE_OPS.values():
+        _check(source, other, noisy, operation)
+        _check(source, other, noisy, operation, buffered=False)
     print("correctness checks passed")
 
-    for size in (1_000_003, 10_000_003, 50_000_003, 200_000_003):
-        _benchmark(size)
+    for operation in POINTWISE_OPS.values():
+        print(f"\n{operation.name}")
+        for size in (1_000_003, 10_000_003, 50_000_003, 200_000_003):
+            _benchmark(size, operation)
 
 
 if __name__ == "__main__":

@@ -1,43 +1,14 @@
 import triton
 from triton import language as tl
 
-# Autotune configurations
-
-# Keep the configs that were selected/strongest on the benchmark GPU.
-# Each list is deliberately small (<= 5) to keep the first-call autotune
-# cost low while still covering the distinct tuning keys used by the codec.
-ESTIMATE_CENTER_AUTOTUNE_CONFIGS = [
-    triton.Config({"BLOCK": 4096}, num_warps=4, num_stages=2),
-]
-ENCODE_AUTOTUNE_CONFIGS = [
-    triton.Config({}, num_warps=8, num_stages=2, maxnreg=64),
-    triton.Config({}, num_warps=4, num_stages=2, maxnreg=64),
-    triton.Config({}, num_warps=4, num_stages=3, maxnreg=64),
-    triton.Config({}, num_warps=4, num_stages=4, maxnreg=128),
-]
-COMPACT_BAD_STREAMS_AUTOTUNE_CONFIGS = [
-    triton.Config({}, num_warps=1, num_stages=2),
-    triton.Config({}, num_warps=2, num_stages=2),
-    triton.Config({}, num_warps=2, num_stages=3),
-]
-COMPACT_EXTRA_AUTOTUNE_CONFIGS = [
-    triton.Config({}, num_warps=1, num_stages=2),
-    triton.Config({}, num_warps=2, num_stages=2),
-    triton.Config({}, num_warps=4, num_stages=2),
-    triton.Config({}, num_warps=2, num_stages=3),
-]
-SCATTER_FALLBACK_AUTOTUNE_CONFIGS = [
-    triton.Config({}, num_warps=1, num_stages=2),
-    triton.Config({}, num_warps=2, num_stages=2),
-    triton.Config({}, num_warps=4, num_stages=2),
-    triton.Config({}, num_warps=2, num_stages=3),
-]
-DECODE_AUTOTUNE_CONFIGS = [
-    triton.Config({}, num_warps=2, num_stages=2, maxnreg=64),
-    triton.Config({}, num_warps=2, num_stages=3, maxnreg=64),
-    triton.Config({}, num_warps=1, num_stages=2, maxnreg=None),
-    triton.Config({}, num_warps=1, num_stages=3, maxnreg=None),
-]
+from .codec.autotune import (
+    COMPACT_BAD_STREAMS_AUTOTUNE_CONFIGS,
+    COMPACT_EXTRA_AUTOTUNE_CONFIGS,
+    DECODE_AUTOTUNE_CONFIGS,
+    ENCODE_AUTOTUNE_CONFIGS,
+    ESTIMATE_CENTER_AUTOTUNE_CONFIGS,
+    SCATTER_FALLBACK_AUTOTUNE_CONFIGS,
+)
 
 
 @triton.autotune(
@@ -47,7 +18,8 @@ DECODE_AUTOTUNE_CONFIGS = [
 @triton.jit
 def _estimate_center_kernel(
     source_bits, center_out, size,
-    SAMPLE_SIZE: tl.constexpr, STRIDE, BLOCK: tl.constexpr,
+    SAMPLE_SIZE: tl.constexpr, STRIDE, PRECOMPUTED: tl.constexpr,
+    BLOCK: tl.constexpr,
 ):
     offsets = tl.arange(0, BLOCK)
     total = tl.zeros((BLOCK,), tl.int32)
@@ -55,8 +27,11 @@ def _estimate_center_kernel(
         idx = i + offsets
         mask = idx < SAMPLE_SIZE
         pos = tl.minimum(idx * STRIDE, size - 1)
-        bits = tl.load(source_bits + pos, mask=mask, other=0).to(tl.int32)
-        exp = ((bits >> 7) & 0xFF) - 127
+        value = tl.load(source_bits + pos, mask=mask, other=0).to(tl.int32)
+        if PRECOMPUTED:
+            exp = value - 127
+        else:
+            exp = ((value >> 7) & 0xFF) - 127
         total += tl.where(mask, exp, 0)
     s = tl.sum(total, axis=0)
     # Round half away from zero, clamp, and suppress tiny sampling noise.
@@ -79,7 +54,8 @@ def _encode_kernel(
     source_bits, sign_mantissa, encoded, encode_table,
     center, extra_starts,
     n_elements, n_streams,
-    FIXED_WORDS: tl.constexpr, BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
+    PRECOMPUTED: tl.constexpr, FIXED_WORDS: tl.constexpr,
+    BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
 ):
     block = tl.program_id(0)
     lanes = tl.arange(0, N_LANES)
@@ -95,27 +71,28 @@ def _encode_kernel(
     for step in tl.range(0, N_STEPS, 2, loop_unroll_factor=4):
         source_offset = block * BLOCK + step * N_LANES + lanes
         valid0 = source_offset < n_elements
-        bits0 = tl.load(
-            source_bits + tl.minimum(source_offset, n_elements - 1),
-            mask=valid0,
-            other=0,
-        ).to(tl.int32)
         valid1 = source_offset + N_LANES < n_elements
-        bits1 = tl.load(
-            source_bits + tl.minimum(source_offset + N_LANES, n_elements - 1),
-            mask=valid1,
-            other=0,
+        value0 = tl.load(
+            source_bits + tl.minimum(source_offset, n_elements - 1),
+            mask=valid0, other=0,
         ).to(tl.int32)
-        exp0 = ((bits0 >> 7) & 0xFF) - 127
-        exp1 = ((bits1 >> 7) & 0xFF) - 127
-        sm0 = (bits0 & 0x7F) | ((bits0 >> 8) & 0x80)
-        sm1 = (bits1 & 0x7F) | ((bits1 >> 8) & 0x80)
-        tl.store(sign_mantissa + source_offset, sm0.to(tl.uint8), mask=valid0)
-        tl.store(
-            sign_mantissa + source_offset + N_LANES,
-            sm1.to(tl.uint8),
-            mask=valid1,
-        )
+        value1 = tl.load(
+            source_bits + tl.minimum(source_offset + N_LANES, n_elements - 1),
+            mask=valid1, other=0,
+        ).to(tl.int32)
+        if PRECOMPUTED:
+            exp0 = value0 - 127
+            exp1 = value1 - 127
+        else:
+            exp0 = ((value0 >> 7) & 0xFF) - 127
+            exp1 = ((value1 >> 7) & 0xFF) - 127
+            sm0 = (value0 & 0x7F) | ((value0 >> 8) & 0x80)
+            sm1 = (value1 & 0x7F) | ((value1 >> 8) & 0x80)
+            tl.store(sign_mantissa + source_offset, sm0.to(tl.uint8), mask=valid0)
+            tl.store(
+                sign_mantissa + source_offset + N_LANES,
+                sm1.to(tl.uint8), mask=valid1,
+            )
         packed0 = tl.load(
             encode_table + ((exp0 - center_value) & 255)
         ).to(tl.uint32)
@@ -241,7 +218,7 @@ def _compact_extra_kernel(
     fallback_offsets, fallback_data,
     metadata_buffer, allocation_descriptor, final_counts, bad_count,
     n_elements,
-    BUFFERED: tl.constexpr,
+    BUFFERED: tl.constexpr, PRECOMPUTED: tl.constexpr,
     BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr, TILE: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -277,8 +254,11 @@ def _compact_extra_kernel(
     for step in tl.range(0, N_STEPS):
         source_offset = block * BLOCK + (step + start) * N_LANES + lane
         active = valid & (step < (N_STEPS - start)) & (source_offset < n_elements)
-        bits = tl.load(source_bits + source_offset, mask=active, other=0).to(tl.int32)
-        values = (((bits >> 7) & 0xFF) - 127).to(tl.int8)
+        value = tl.load(source_bits + source_offset, mask=active, other=0).to(tl.int32)
+        if PRECOMPUTED:
+            values = (value - 127).to(tl.int8)
+        else:
+            values = (((value >> 7) & 0xFF) - 127).to(tl.int8)
         if BUFFERED:
             tl.store(
                 fallback_data + fallback_base + fallback_offset + step,
@@ -367,7 +347,8 @@ def _decode_kernel(
     encoded, sign_mantissa, output,
     decode_table, n_elements, n_streams,
     center,
-    SKIP_FALLBACK: tl.constexpr, FIRST_MASK: tl.constexpr, RARE_LENGTH: tl.constexpr,
+    SKIP_FALLBACK: tl.constexpr,
+    FIRST_MASK: tl.constexpr, RARE_LENGTH: tl.constexpr,
     BLOCK: tl.constexpr,N_LANES: tl.constexpr, N_STEPS: tl.constexpr, FIXED_WORDS: tl.constexpr,
 ):
     block = tl.program_id(0)
@@ -415,7 +396,8 @@ def _decode_kernel(
         )
         packed1 = _pack_bf16(value1, sm1)
         tl.store(
-            output + output_offset + N_LANES, packed1.to(tl.int16), mask=valid1
+            output + output_offset + N_LANES,
+            packed1.to(tl.int16), mask=valid1,
         )
 
         next_shift = shift1 + tl.where(valid1, length1, 0)
