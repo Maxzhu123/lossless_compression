@@ -1,5 +1,6 @@
 from dataclasses import dataclass, fields
 from enum import Enum, auto
+import math
 from typing import TYPE_CHECKING
 import torch
 
@@ -21,8 +22,8 @@ class DistType(Enum):
 
 class StorageLayout(Enum):
     """Logical ordering used by the values stored inside a compressed tensor."""
-    LINEAR = auto()
-    MATRIX_TILED = auto()
+    RAW = auto()
+    BLOCKED = auto()
 
 
 @dataclass(frozen=True)
@@ -69,7 +70,7 @@ class Distribution:
 @dataclass(frozen=True)
 class CompressedTensor:
     data: torch.Tensor  # Fixed exponent payload or source fallback.
-    size: int  # Logical number of input elements.
+    size: int  # Number of elements represented by codec storage, including padding.
     sign_mantissa: torch.Tensor | None = None  # Raw sign + 7-bit mantissa.
     offsets: torch.Tensor | None = None  # Overflowing stream IDs.
     fallback_starts: torch.Tensor | None = None  # First fallback step per stream.
@@ -83,10 +84,19 @@ class CompressedTensor:
     distribution: Distribution = Distribution(DistType.EMPIRICAL)  # Huffman table selector.
     center: torch.Tensor | int = 0  # CUDA center scalar used by encode/decode.
     shape: tuple[int, ...] = ()  # Original tensor shape.
-    layout: StorageLayout = StorageLayout.LINEAR  # Linear or matrix-tiled ordering.
+    layout: StorageLayout = StorageLayout.RAW
+    layout_shape: tuple[int, int] = ()  # Logical 2D mapping used by blocked storage.
     storage_shape: tuple[int, ...] = ()  # Padded codec shape for non-linear layouts.
-    matrix_fallback_starts: torch.Tensor | None = None  # Dense overflow-start map.
-    matrix_fallback_offsets: torch.Tensor | None = None  # Dense overflow-offset map.
+
+    @property
+    def logical_numel(self) -> int:
+        """Return the number of elements exposed by the logical tensor shape."""
+        return math.prod(self.shape)
+
+    @property
+    def storage_numel(self) -> int:
+        """Return the element count represented by compressed storage."""
+        return self.size
 
     def memory_size(self):
         """Return GPU allocation bytes owned by one compressed tensor.

@@ -16,30 +16,59 @@ COMPRESSED_OUTPUT = tl.constexpr(1)
 
 @triton.jit
 def _store_result(
-    result, output, auxiliary, offset, mask,
+    result, output, auxiliary, storage_offset, logical_offset,
+    logical_mask, storage_mask,
     OUTPUT_POLICY: tl.constexpr,
 ):
     """Round an operation result to BF16 and emit dense or component output."""
     result = result.to(tl.bfloat16)
     if OUTPUT_POLICY == DENSE_OUTPUT:
-        tl.store(output + offset, result, mask=mask)
+        tl.store(output + logical_offset, result, mask=logical_mask)
     else:
+        result = tl.where(logical_mask, result, 0.0).to(tl.bfloat16)
         bits = result.to(tl.int16, bitcast=True).to(tl.int32)
         sign_mantissa = (bits & 0x7F) | ((bits >> 8) & 0x80)
         exponent = (bits >> 7) & 0xFF
-        tl.store(output + offset, sign_mantissa.to(tl.uint8), mask=mask)
-        tl.store(auxiliary + offset, exponent.to(tl.uint8), mask=mask)
+        tl.store(
+            output + storage_offset, sign_mantissa.to(tl.uint8),
+            mask=storage_mask,
+        )
+        tl.store(
+            auxiliary + logical_offset, exponent.to(tl.uint8),
+            mask=logical_mask,
+        )
 
 
-@triton.autotune(
-    configs=DECODE_AUTOTUNE_CONFIGS,
-    key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS", "OUTPUT_POLICY"],
-)
 @triton.jit
-def pointwise_compressed_dense_kernel(
+def _pointwise_location(
+    block, step, lane, n_elements,
+    MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr, MATRIX_NUMEL: tl.constexpr,
+    K_TILE_BLOCKS: tl.constexpr,
+    BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
+):
+    """Map one storage-stream position to its dense logical offset."""
+    storage_offset = block * BLOCK + step * N_LANES + lane
+    storage_valid = storage_offset < n_elements
+    n_tile = block // K_TILE_BLOCKS
+    k_tile = block % K_TILE_BLOCKS
+    logical_n = n_tile * N_STEPS + step
+    logical_k = k_tile * N_LANES + lane
+    logical_offset = logical_n * MATRIX_K + logical_k
+    logical_valid = (
+        (logical_n < MATRIX_N) & (logical_k < MATRIX_K)
+        & (logical_offset < MATRIX_NUMEL)
+    )
+    return storage_offset, logical_offset, storage_valid, logical_valid
+
+
+@triton.jit
+def _pointwise_compressed_dense_impl(
     encoded, sign_mantissa, other, output, auxiliary, decode_table,
     n_elements, n_streams, center,
     OP: tl.constexpr, OUTPUT_POLICY: tl.constexpr,
+    MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
+    MATRIX_NUMEL: tl.constexpr,
+    K_TILE_BLOCKS: tl.constexpr,
     FIRST_MASK: tl.constexpr, RARE_LENGTH: tl.constexpr,
     BLOCK: tl.constexpr, N_LANES: tl.constexpr,
     N_STEPS: tl.constexpr, FIXED_WORDS: tl.constexpr,
@@ -69,39 +98,46 @@ def pointwise_compressed_dense_kernel(
     center_value = tl.load(center).to(tl.int32)
 
     for step in tl.range(0, N_STEPS, 2):
-        offset = block * BLOCK + step * N_LANES + lanes
-        valid = offset < n_elements
+        offset, logical_offset, storage_valid, valid = _pointwise_location(
+            block, step, lanes, n_elements, MATRIX_N, MATRIX_K,
+            MATRIX_NUMEL, K_TILE_BLOCKS,
+            BLOCK, N_LANES, N_STEPS,
+        )
         value, length = decode_symbol(
             window >> shift, decode_table, center_value,
             FIRST_MASK, RARE_LENGTH,
         )
-        sm = tl.load(sign_mantissa + offset, mask=valid, other=0)
+        sm = tl.load(sign_mantissa + offset, mask=storage_valid, other=0)
         left = pack_bf16(value, sm).to(tl.int16).to(
             tl.bfloat16, bitcast=True
         )
-        right = tl.load(other + offset, mask=valid, other=0.0)
+        right = tl.load(other + logical_offset, mask=valid, other=0.0)
         _store_result(
-            OP(left, right), output, auxiliary, offset, valid, OUTPUT_POLICY,
+            OP(left, right), output, auxiliary, offset, logical_offset,
+            valid, storage_valid, OUTPUT_POLICY,
         )
 
-        shift1 = shift + tl.where(valid, length, 0)
-        offset1 = offset + N_LANES
-        valid1 = offset1 < n_elements
+        shift1 = shift + tl.where(storage_valid, length, 0)
+        offset1, logical_offset1, storage_valid1, valid1 = _pointwise_location(
+            block, step + 1, lanes, n_elements, MATRIX_N, MATRIX_K,
+            MATRIX_NUMEL, K_TILE_BLOCKS,
+            BLOCK, N_LANES, N_STEPS,
+        )
         value1, length1 = decode_symbol(
             window >> shift1, decode_table, center_value,
             FIRST_MASK, RARE_LENGTH,
         )
-        sm1 = tl.load(sign_mantissa + offset1, mask=valid1, other=0)
+        sm1 = tl.load(sign_mantissa + offset1, mask=storage_valid1, other=0)
         left1 = pack_bf16(value1, sm1).to(tl.int16).to(
             tl.bfloat16, bitcast=True
         )
-        right1 = tl.load(other + offset1, mask=valid1, other=0.0)
+        right1 = tl.load(other + logical_offset1, mask=valid1, other=0.0)
         _store_result(
-            OP(left1, right1), output, auxiliary,
-            offset1, valid1, OUTPUT_POLICY,
+            OP(left1, right1), output, auxiliary, offset1, logical_offset1,
+            valid1, storage_valid1, OUTPUT_POLICY,
         )
 
-        next_shift = shift1 + tl.where(valid1, length1, 0)
+        next_shift = shift1 + tl.where(storage_valid1, length1, 0)
         crosses_word = next_shift >= 32
         word2 = tl.load(
             encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams
@@ -115,15 +151,38 @@ def pointwise_compressed_dense_kernel(
 
 
 @triton.autotune(
-    configs=SCATTER_FALLBACK_AUTOTUNE_CONFIGS,
-    key=["n_elements", "N_LANES", "N_STEPS", "BLOCK"],
+    configs=DECODE_AUTOTUNE_CONFIGS,
+    key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS", "OUTPUT_POLICY"],
 )
 @triton.jit
-def pointwise_compressed_dense_fallback_kernel(
+def pointwise_compressed_dense_matrix_kernel(
+    encoded, sign_mantissa, other, output, auxiliary, decode_table,
+    n_elements, n_streams, center,
+    OP: tl.constexpr, OUTPUT_POLICY: tl.constexpr,
+    MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
+    MATRIX_NUMEL: tl.constexpr, K_TILE_BLOCKS: tl.constexpr,
+    FIRST_MASK: tl.constexpr, RARE_LENGTH: tl.constexpr,
+    BLOCK: tl.constexpr, N_LANES: tl.constexpr,
+    N_STEPS: tl.constexpr, FIXED_WORDS: tl.constexpr,
+):
+    """Apply a pointwise policy to native matrix-tiled storage."""
+    _pointwise_compressed_dense_impl(
+        encoded, sign_mantissa, other, output, auxiliary, decode_table,
+        n_elements, n_streams, center, OP, OUTPUT_POLICY,
+        MATRIX_N, MATRIX_K, MATRIX_NUMEL, K_TILE_BLOCKS,
+        FIRST_MASK, RARE_LENGTH, BLOCK, N_LANES, N_STEPS, FIXED_WORDS,
+    )
+
+
+@triton.jit
+def _pointwise_compressed_dense_fallback_impl(
     bad_streams, bad_starts, fallback_offsets,
     fallback_buffer, fallback_base, metadata, descriptor, fallback_count,
     sign_mantissa, other, output, auxiliary, n_elements,
     OP: tl.constexpr, OUTPUT_POLICY: tl.constexpr, BUFFERED: tl.constexpr,
+    MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
+    MATRIX_NUMEL: tl.constexpr,
+    K_TILE_BLOCKS: tl.constexpr,
     TILE: tl.constexpr, BLOCK: tl.constexpr,
     N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
 ):
@@ -158,8 +217,13 @@ def pointwise_compressed_dense_fallback_kernel(
     block = stream // N_LANES
     lane = stream - block * N_LANES
     for step in tl.range(0, N_STEPS):
-        offset = block * BLOCK + step * N_LANES + lane
-        active = valid & (step >= start) & (offset < n_elements)
+        offset, logical_offset, storage_valid, logical_valid = _pointwise_location(
+            block, step, lane, n_elements, MATRIX_N, MATRIX_K,
+            MATRIX_NUMEL, K_TILE_BLOCKS,
+            BLOCK, N_LANES, N_STEPS,
+        )
+        active = valid & (step >= start) & storage_valid
+        logical_active = active & logical_valid
         exponent = tl.load(
             fallback_buffer + fallback_base + fallback_offset + step - start,
             mask=active, other=0,
@@ -168,8 +232,34 @@ def pointwise_compressed_dense_fallback_kernel(
         left = pack_bf16(exponent, sm).to(tl.int16).to(
             tl.bfloat16, bitcast=True
         )
-        right = tl.load(other + offset, mask=active, other=0.0)
+        right = tl.load(other + logical_offset, mask=logical_active, other=0.0)
         _store_result(
-            OP(left, right), output, auxiliary,
-            offset, active, OUTPUT_POLICY,
+            OP(left, right), output, auxiliary, offset, logical_offset,
+            logical_active, active, OUTPUT_POLICY,
         )
+
+
+@triton.autotune(
+    configs=SCATTER_FALLBACK_AUTOTUNE_CONFIGS,
+    key=["n_elements", "N_LANES", "N_STEPS", "BLOCK"],
+)
+@triton.jit
+def pointwise_compressed_dense_matrix_fallback_kernel(
+    bad_streams, bad_starts, fallback_offsets,
+    fallback_buffer, fallback_base, metadata, descriptor, fallback_count,
+    sign_mantissa, other, output, auxiliary, n_elements,
+    OP: tl.constexpr, OUTPUT_POLICY: tl.constexpr, BUFFERED: tl.constexpr,
+    MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
+    MATRIX_NUMEL: tl.constexpr, K_TILE_BLOCKS: tl.constexpr,
+    TILE: tl.constexpr, BLOCK: tl.constexpr,
+    N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
+):
+    """Correct matrix-storage pointwise results from fallback tails."""
+    _pointwise_compressed_dense_fallback_impl(
+        bad_streams, bad_starts, fallback_offsets, fallback_buffer,
+        fallback_base, metadata, descriptor, fallback_count,
+        sign_mantissa, other, output, auxiliary, n_elements,
+        OP, OUTPUT_POLICY, BUFFERED,
+        MATRIX_N, MATRIX_K, MATRIX_NUMEL, K_TILE_BLOCKS,
+        TILE, BLOCK, N_LANES, N_STEPS,
+    )

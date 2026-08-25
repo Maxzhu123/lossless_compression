@@ -1,7 +1,4 @@
-from .matmul import (
-    compress_matrix, compressed_linear, compressed_matmul, decode_matrix,
-)
+"""Compressed-tensor operation helpers.
 
-__all__ = [
-    "compress_matrix", "compressed_linear", "compressed_matmul", "decode_matrix",
-]
+The public user interface lives in :mod:`compress.compress`.
+"""

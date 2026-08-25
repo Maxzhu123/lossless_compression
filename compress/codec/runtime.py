@@ -11,13 +11,14 @@ from ..huffman_tables import FIRST_MASK, get_distribution_tables
 from ..tensor_buffer import TensorBuffer
 from ..trition_kernels import (
     _compact_bad_streams_kernel,
-    _compact_extra_kernel,
+    _compact_matrix_components_extra_kernel,
+    _compact_matrix_extra_kernel,
     _count_bad_streams_kernel,
-    _decode_kernel,
-    _encode_kernel,
+    _decode_matrix_kernel,
+    _encode_matrix_components_kernel,
+    _encode_matrix_kernel,
     _estimate_center_kernel,
-    _make_stream_offset_map_kernel,
-    _scatter_fallback_kernel,
+    _scatter_blocked_fallback_kernel,
 )
 
 
@@ -51,14 +52,7 @@ def geometry(distribution: Distribution):
     return block_size, lanes, clean_steps, lane_bits // 32
 
 
-def uses_raw_source(size: int, distribution: Distribution) -> bool:
-    """Return whether fixed Huffman storage would exceed the raw exponent byte."""
-    block_size, lanes, _, fixed_words = geometry(distribution)
-    streams = triton.cdiv(size, block_size) * lanes
-    return (streams * fixed_words + 4) * 4 > size
-
-
-def estimate_center(source, size, *, precomputed):
+def _estimate_center(source, size, *, precomputed):
     """Estimate the exponent center from strided samples on the GPU."""
     sample_size = min(size, CENTER_SAMPLE_SIZE)
     stride = size // sample_size
@@ -79,18 +73,21 @@ def compress_components(
     shape,
     *,
     precomputed,
-    preserve_stream_map=False,
     center=None,
+    matrix_shape,
 ):
     """Encode BF16 bits or split components into a ``CompressedTensor``.
 
     Args:
         source_values: Int16 BF16 bits, or raw uint8 exponents if ``precomputed``.
         sign_mantissa: Output side-byte stream, or precomputed side bytes.
-        size: Logical element count; distribution: codebook and stream geometry.
+        size: Padded codec element count (storage element count).
+        distribution: codebook and stream geometry.
         buffer: Optional shared fallback arena; shape: original tensor shape.
         precomputed: ``False`` extracts both fields from BF16 bits; ``True``
             consumes raw exponent bytes plus existing side bytes from a fused op.
+        matrix_shape: Logical ``(matrix_n, matrix_k, matrix_numel, k_tile_blocks)``
+            mapping used by the universal blocked codec.
     """
     # Geometry fixes the independent stream count and per-stream bit budget.
     block_size, lanes, steps, fixed_words = geometry(distribution)
@@ -98,8 +95,11 @@ def compress_components(
     streams = blocks * lanes
     encode_table, _, _ = get_distribution_tables(distribution)
     # Encode and decode share this sampled center through the result metadata.
+    matrix_n, matrix_k, matrix_numel, k_tile_blocks = matrix_shape
     if center is None:
-        center = estimate_center(source_values, size, precomputed=precomputed)
+        center = _estimate_center(
+            source_values, matrix_numel, precomputed=precomputed,
+        )
     encoded = torch.empty(
         streams * fixed_words + 4,
         dtype=torch.int32,
@@ -108,12 +108,24 @@ def compress_components(
     extra_starts = torch.empty(
         streams, dtype=torch.uint8, device=source_values.device
     )
-    _encode_kernel[(blocks,)](
-        source_values, sign_mantissa, encoded, encode_table, center,
-        extra_starts, size, streams, PRECOMPUTED=precomputed,
-        FIXED_WORDS=fixed_words, BLOCK=block_size,
-        N_LANES=lanes, N_STEPS=steps,
-    )
+    if precomputed:
+        _encode_matrix_components_kernel[(blocks,)](
+            source_values, sign_mantissa, encoded, encode_table, center,
+            extra_starts, size, streams, MATRIX_N=matrix_n,
+            MATRIX_K=matrix_k, MATRIX_NUMEL=matrix_numel,
+            K_TILE_BLOCKS=k_tile_blocks,
+            FIXED_WORDS=fixed_words, BLOCK=block_size,
+            N_LANES=lanes, N_STEPS=steps,
+        )
+    else:
+        _encode_matrix_kernel[(blocks,)](
+            source_values, sign_mantissa, encoded, encode_table, center,
+            extra_starts, size, streams, MATRIX_N=matrix_n,
+            MATRIX_K=matrix_k, MATRIX_NUMEL=matrix_numel,
+            K_TILE_BLOCKS=k_tile_blocks,
+            FIXED_WORDS=fixed_words, BLOCK=block_size,
+            N_LANES=lanes, N_STEPS=steps,
+        )
 
     if buffer is not None:
         # Keep fallback metadata and bytes inside one descriptor-backed arena region.
@@ -125,17 +137,32 @@ def compress_components(
         )
         allocation = buffer.allocate_with_items(counts[1:2], counts[:1], 9)
         metadata = buffer.data.view(torch.int32)
-        _compact_bad_streams_kernel[(triton.cdiv(streams, 1024),)](
+        compact_bad_grid = (triton.cdiv(streams, 1024),)
+        _compact_bad_streams_kernel[compact_bad_grid](
             extra_starts, metadata, buffer.data, metadata, metadata,
             allocation.descriptor, counts[:1], counts[2:3], counts[3:],
-            streams, steps, BUFFERED=True, BLOCK=1024,
+            streams, steps,
+            BUFFERED=True, BLOCK=1024,
         )
-        _compact_extra_kernel[(triton.cdiv(streams, 32),)](
-            source_values, metadata, buffer.data, metadata, buffer.data,
-            metadata, allocation.descriptor, counts[:1], counts[2:3], size,
-            BUFFERED=True, PRECOMPUTED=precomputed, BLOCK=block_size,
-            N_LANES=lanes, N_STEPS=steps, TILE=32,
-        )
+        compact_grid = (triton.cdiv(streams, 32),)
+        if precomputed:
+            _compact_matrix_components_extra_kernel[compact_grid](
+                source_values, metadata, buffer.data, metadata, buffer.data,
+                metadata, allocation.descriptor, counts[:1], counts[2:3], size,
+                BUFFERED=True, MATRIX_N=matrix_n, MATRIX_K=matrix_k,
+                MATRIX_NUMEL=matrix_numel, K_TILE_BLOCKS=k_tile_blocks,
+                BLOCK=block_size,
+                N_LANES=lanes, N_STEPS=steps, TILE=32,
+            )
+        else:
+            _compact_matrix_extra_kernel[compact_grid](
+                source_values, metadata, buffer.data, metadata, buffer.data,
+                metadata, allocation.descriptor, counts[:1], counts[2:3], size,
+                BUFFERED=True, MATRIX_N=matrix_n, MATRIX_K=matrix_k,
+                MATRIX_NUMEL=matrix_numel, K_TILE_BLOCKS=k_tile_blocks,
+                BLOCK=block_size,
+                N_LANES=lanes, N_STEPS=steps, TILE=32,
+            )
         result = CompressedTensor(
             encoded, size, sign_mantissa,
             fallback_buffer=buffer.data,
@@ -144,19 +171,6 @@ def compress_components(
             fallback_count=counts[:1], fallback_used=counts[1:2],
             distribution=distribution, center=center, shape=shape,
         )
-        if preserve_stream_map:
-            stream_offsets = torch.full(
-                (streams,), -1, dtype=torch.int32, device=source_values.device,
-            )
-            _make_stream_offset_map_kernel[(triton.cdiv(streams, 256),)](
-                metadata, metadata, metadata, allocation.descriptor,
-                counts[:1], stream_offsets, streams,
-                BUFFERED=True, BLOCK=256,
-            )
-            result = replace(
-                result, matrix_fallback_starts=extra_starts,
-                matrix_fallback_offsets=stream_offsets,
-            )
         return result
 
     # Private fallback storage synchronizes once to allocate exact-size tensors.
@@ -176,17 +190,32 @@ def compress_components(
     )
     bad_count.zero_()
     fallback_total.zero_()
-    _compact_bad_streams_kernel[(triton.cdiv(streams, 1024),)](
+    compact_bad_grid = (triton.cdiv(streams, 1024),)
+    _compact_bad_streams_kernel[compact_bad_grid](
         extra_starts, bad_streams, bad_starts, fallback_offsets,
         bad_streams, bad_count, bad_count, bad_count, fallback_total,
-        streams, steps, BUFFERED=False, BLOCK=1024,
+        streams, steps,
+        BUFFERED=False, BLOCK=1024,
     )
-    _compact_extra_kernel[(triton.cdiv(streams, 32),)](
-        source_values, bad_streams, bad_starts, fallback_offsets, fallback_data,
-        bad_streams, bad_count, bad_count, bad_count, size,
-        BUFFERED=False, PRECOMPUTED=precomputed, BLOCK=block_size,
-        N_LANES=lanes, N_STEPS=steps, TILE=32,
-    )
+    compact_grid = (triton.cdiv(streams, 32),)
+    if precomputed:
+        _compact_matrix_components_extra_kernel[compact_grid](
+            source_values, bad_streams, bad_starts, fallback_offsets,
+            fallback_data, bad_streams, bad_count, bad_count, bad_count, size,
+            BUFFERED=False, MATRIX_N=matrix_n, MATRIX_K=matrix_k,
+            MATRIX_NUMEL=matrix_numel, K_TILE_BLOCKS=k_tile_blocks,
+            BLOCK=block_size,
+            N_LANES=lanes, N_STEPS=steps, TILE=32,
+        )
+    else:
+        _compact_matrix_extra_kernel[compact_grid](
+            source_values, bad_streams, bad_starts, fallback_offsets,
+            fallback_data, bad_streams, bad_count, bad_count, bad_count, size,
+            BUFFERED=False, MATRIX_N=matrix_n, MATRIX_K=matrix_k,
+            MATRIX_NUMEL=matrix_numel, K_TILE_BLOCKS=k_tile_blocks,
+            BLOCK=block_size,
+            N_LANES=lanes, N_STEPS=steps, TILE=32,
+        )
     result = CompressedTensor(
         encoded, size, sign_mantissa,
         bad_streams, bad_starts, fallback_offsets,
@@ -195,91 +224,91 @@ def compress_components(
         fallback_count=bad_count, fallback_used=fallback_total,
         distribution=distribution, center=center, shape=shape,
     )
-    if preserve_stream_map:
-        stream_offsets = torch.full(
-            (streams,), -1, dtype=torch.int32, device=source_values.device,
-        )
-        if count:
-            _make_stream_offset_map_kernel[(triton.cdiv(count, 256),)](
-                bad_streams, fallback_offsets, bad_streams, bad_streams,
-                bad_count, stream_offsets, count,
-                BUFFERED=False, BLOCK=256,
-            )
-        result = replace(
-            result, matrix_fallback_starts=extra_starts,
-            matrix_fallback_offsets=stream_offsets,
-        )
     return result
 
 
 def compress_dense(
     data, distribution, buffer: TensorBuffer | None = None, *,
-    preserve_stream_map=False,
+    allow_raw=True,
 ):
-    """Compress dense BF16 values, using raw storage when fixed streams are larger."""
+    """Compress any tensor through the universal blocked storage mapping."""
     shape = tuple(data.shape)
     source = data.contiguous().view(-1)
-    size = source.numel()
-    if uses_raw_source(size, distribution):
+    logical_numel = source.numel()
+    block_size, lanes, steps, fixed_words = geometry(distribution)
+    if data.ndim == 2:
+        layout_n, layout_k = shape
+    else:
+        layout_n = triton.cdiv(logical_numel, lanes)
+        layout_k = lanes
+    n_tiles = triton.cdiv(layout_n, steps)
+    k_tiles = triton.cdiv(layout_k, lanes)
+    storage_shape = (n_tiles, k_tiles, steps, lanes)
+    storage_numel = n_tiles * k_tiles * block_size
+    streams = n_tiles * k_tiles * lanes
+    minimum_bytes = storage_numel + (streams * fixed_words + 4) * 4
+    if allow_raw and minimum_bytes > logical_numel * data.element_size():
         return CompressedTensor(
-            source, size, buffer=buffer, distribution=distribution, shape=shape,
+            source, logical_numel, buffer=buffer,
+            distribution=distribution, shape=shape, layout=StorageLayout.RAW,
         )
     sign_mantissa = torch.empty(
-        size, dtype=torch.uint8, device=source.device
+        storage_numel, dtype=torch.uint8, device=source.device
     )
-    return compress_components(
-        source.view(torch.int16), sign_mantissa, size,
-        distribution, buffer, shape, precomputed=False,
-        preserve_stream_map=preserve_stream_map,
+    result = compress_components(
+        source.view(torch.int16), sign_mantissa, storage_numel,
+        distribution, buffer, storage_shape, precomputed=False,
+        matrix_shape=(layout_n, layout_k, logical_numel, k_tiles),
+    )
+    return replace(
+        result, shape=shape, layout=StorageLayout.BLOCKED,
+        layout_shape=(layout_n, layout_k), storage_shape=storage_shape,
     )
 
 
 def decode(data: CompressedTensor) -> torch.Tensor:
-    """Decode fixed streams, then overwrite overflowing tails from fallback storage."""
-    if data.offsets is None and data.fallback_descriptor is None:
-        output = data.data.reshape(data.storage_shape or data.shape)
-        return _restore_layout(output, data)
+    """Decode universal blocked storage or return a raw fallback tensor."""
+    if data.layout == StorageLayout.BLOCKED:
+        return decode_matrix_dense(data)
+    return data.data.reshape(data.shape)
 
-    _, table, rare_length = get_distribution_tables(data.distribution)
+
+def decode_matrix_dense(data: CompressedTensor) -> torch.Tensor:
+    """Decode blocked storage directly into its original logical tensor shape."""
+    layout_n, layout_k = data.layout_shape
+    logical_numel = data.logical_numel
+    n_tiles, k_tiles, _, _ = data.storage_shape
+    _, decode_table, rare_length = get_distribution_tables(data.distribution)
     block_size, lanes, steps, fixed_words = geometry(data.distribution)
-    blocks = triton.cdiv(data.size, block_size)
-    output = torch.empty(data.size, dtype=torch.int16, device=data.data.device)
-    _decode_kernel[(blocks,)](
-        data.data, data.sign_mantissa, output, table,
-        data.size, blocks * lanes, data.center,
-        SKIP_FALLBACK=True, FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length,
+    streams = n_tiles * k_tiles * lanes
+    output = torch.empty(logical_numel, dtype=torch.int16, device=data.data.device)
+    _decode_matrix_kernel[(n_tiles * k_tiles,)](
+        data.data, data.sign_mantissa, output, decode_table,
+        data.size, streams, data.center,
+        MATRIX_N=layout_n, MATRIX_K=layout_k,
+        MATRIX_NUMEL=logical_numel, K_TILE_BLOCKS=k_tiles,
+        FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length,
         BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
         FIXED_WORDS=fixed_words,
     )
+    scatter_meta = dict(
+        MATRIX_N=layout_n, MATRIX_K=layout_k,
+        MATRIX_NUMEL=logical_numel, K_TILE_BLOCKS=k_tiles,
+        TILE=64, BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
+    )
     if data.fallback_descriptor is not None:
         metadata = data.fallback_buffer.view(torch.int32)
-        _scatter_fallback_kernel[(triton.cdiv(blocks * lanes, 64),)](
-            metadata, data.fallback_buffer, metadata, data.fallback_buffer,
-            0, metadata, data.fallback_descriptor, data.fallback_count,
+        _scatter_blocked_fallback_kernel[(triton.cdiv(streams, 64),)](
+            metadata, data.fallback_buffer, metadata, data.fallback_buffer, 0,
+            metadata, data.fallback_descriptor, data.fallback_count,
             data.sign_mantissa, output, data.size,
-            BUFFERED=True, TILE=64, BLOCK=block_size,
-            N_LANES=lanes, N_STEPS=steps,
+            BUFFERED=True, **scatter_meta,
         )
-    else:
-        count = data.offsets.numel()
-        if count:
-            _scatter_fallback_kernel[(triton.cdiv(count, 64),)](
-                data.offsets, data.fallback_starts, data.fallback_offsets,
-                data.fallback_buffer, data.fallback_base, data.offsets,
-                data.offsets, data.fallback_count, data.sign_mantissa,
-                output, data.size, BUFFERED=False, TILE=64,
-                BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
-            )
-    output = output.view(torch.bfloat16).reshape(data.storage_shape or data.shape)
-    return _restore_layout(output, data)
-
-
-def _restore_layout(output: torch.Tensor, data: CompressedTensor) -> torch.Tensor:
-    """Return linear tensors directly and untile matrix-oriented storage."""
-    if data.layout == StorageLayout.LINEAR:
-        return output.reshape(data.shape)
-    n_tiles, k_tiles, tile_n, tile_k = data.storage_shape
-    n, k = data.shape
-    matrix = output.reshape(n_tiles, k_tiles, tile_n, tile_k)
-    matrix = matrix.permute(0, 2, 1, 3).reshape(n_tiles * tile_n, k_tiles * tile_k)
-    return matrix[:n, :k].contiguous()
+    elif data.offsets.numel():
+        _scatter_blocked_fallback_kernel[(triton.cdiv(data.offsets.numel(), 64),)](
+            data.offsets, data.fallback_starts, data.fallback_offsets,
+            data.fallback_buffer, data.fallback_base, data.offsets,
+            data.offsets, data.fallback_count, data.sign_mantissa,
+            output, data.size, BUFFERED=False, **scatter_meta,
+        )
+    return output.view(torch.bfloat16).reshape(data.shape)

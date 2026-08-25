@@ -45,16 +45,15 @@ def _estimate_center_kernel(
     tl.store(center_out, center)
 
 
-@triton.autotune(
-    configs=ENCODE_AUTOTUNE_CONFIGS,
-    key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS"],
-)
 @triton.jit
-def _encode_kernel(
+def _encode_impl(
     source_bits, sign_mantissa, encoded, encode_table,
     center, extra_starts,
     n_elements, n_streams,
-    PRECOMPUTED: tl.constexpr, FIXED_WORDS: tl.constexpr,
+    PRECOMPUTED: tl.constexpr,
+    MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
+    MATRIX_NUMEL: tl.constexpr, K_TILE_BLOCKS: tl.constexpr,
+    FIXED_WORDS: tl.constexpr,
     BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
 ):
     block = tl.program_id(0)
@@ -72,13 +71,25 @@ def _encode_kernel(
         source_offset = block * BLOCK + step * N_LANES + lanes
         valid0 = source_offset < n_elements
         valid1 = source_offset + N_LANES < n_elements
+        n_tile = block // K_TILE_BLOCKS
+        k_tile = block % K_TILE_BLOCKS
+        logical_k = k_tile * N_LANES + lanes
+        logical_n = n_tile * N_STEPS + step
+        input_offset0 = logical_n * MATRIX_K + logical_k
+        input_offset1 = (logical_n + 1) * MATRIX_K + logical_k
+        input_valid0 = (
+            (logical_n < MATRIX_N) & (logical_k < MATRIX_K)
+            & (input_offset0 < MATRIX_NUMEL)
+        )
+        input_valid1 = (
+            (logical_n + 1 < MATRIX_N) & (logical_k < MATRIX_K)
+            & (input_offset1 < MATRIX_NUMEL)
+        )
         value0 = tl.load(
-            source_bits + tl.minimum(source_offset, n_elements - 1),
-            mask=valid0, other=0,
+            source_bits + input_offset0, mask=input_valid0, other=0,
         ).to(tl.int32)
         value1 = tl.load(
-            source_bits + tl.minimum(source_offset + N_LANES, n_elements - 1),
-            mask=valid1, other=0,
+            source_bits + input_offset1, mask=input_valid1, other=0,
         ).to(tl.int32)
         if PRECOMPUTED:
             exp0 = value0 - 127
@@ -136,6 +147,50 @@ def _encode_kernel(
 
 
 @triton.autotune(
+    configs=ENCODE_AUTOTUNE_CONFIGS,
+    key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS"],
+)
+@triton.jit
+def _encode_matrix_components_kernel(
+    source_bits, sign_mantissa, encoded, encode_table,
+    center, extra_starts, n_elements, n_streams,
+    MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
+    MATRIX_NUMEL: tl.constexpr, K_TILE_BLOCKS: tl.constexpr,
+    FIXED_WORDS: tl.constexpr,
+    BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
+):
+    """Encode logical-order precomputed exponent planes into matrix storage."""
+    _encode_impl(
+        source_bits, sign_mantissa, encoded, encode_table, center,
+        extra_starts, n_elements, n_streams, True,
+        MATRIX_N, MATRIX_K, MATRIX_NUMEL, K_TILE_BLOCKS,
+        FIXED_WORDS, BLOCK, N_LANES, N_STEPS,
+    )
+
+
+@triton.autotune(
+    configs=ENCODE_AUTOTUNE_CONFIGS,
+    key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS"],
+)
+@triton.jit
+def _encode_matrix_kernel(
+    source_bits, sign_mantissa, encoded, encode_table,
+    center, extra_starts, n_elements, n_streams,
+    MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
+    MATRIX_NUMEL: tl.constexpr, K_TILE_BLOCKS: tl.constexpr,
+    FIXED_WORDS: tl.constexpr,
+    BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
+):
+    """Encode a native matrix through compile-time logical source mapping."""
+    _encode_impl(
+        source_bits, sign_mantissa, encoded, encode_table, center,
+        extra_starts, n_elements, n_streams, False,
+        MATRIX_N, MATRIX_K, MATRIX_NUMEL, K_TILE_BLOCKS,
+        FIXED_WORDS, BLOCK, N_LANES, N_STEPS,
+    )
+
+
+@triton.autotune(
     configs=COMPACT_BAD_STREAMS_AUTOTUNE_CONFIGS,
     key=["n_streams", "steps"],
     restore_value=["bad_count", "fallback_total"],
@@ -158,13 +213,8 @@ def _count_bad_streams_kernel(
     tl.atomic_add(fallback_total, total_len, mask=total_len != 0)
 
 
-@triton.autotune(
-    configs=COMPACT_BAD_STREAMS_AUTOTUNE_CONFIGS,
-    key=["n_streams", "steps"],
-    restore_value=["bad_count", "fallback_total"],
-)
 @triton.jit
-def _compact_bad_streams_kernel(
+def _compact_bad_streams_impl(
     extra_starts,
     bad_streams_out, bad_starts_out, fallback_offsets_out,
     metadata_buffer, allocation_descriptor, final_counts,
@@ -185,6 +235,7 @@ def _compact_bad_streams_kernel(
     )
     prefix = tl.cumsum(bad.to(tl.int32), axis=0) - bad.to(tl.int32)
     offset_prefix = tl.cumsum(lengths, axis=0) - lengths
+    dense_offset = fallback_block_start + offset_prefix
     pos = block_start + prefix
     if BUFFERED:
         count = tl.load(final_counts).to(tl.int32)
@@ -193,7 +244,7 @@ def _compact_bad_streams_kernel(
         tl.store(metadata_buffer + base_words + pos, offs.to(tl.int32), mask=bad)
         tl.store(
             metadata_buffer + base_words + count + pos,
-            fallback_block_start + offset_prefix,
+            dense_offset,
             mask=bad,
         )
         tl.store(bad_starts_out + base + 8 * count + pos, start, mask=bad)
@@ -202,23 +253,43 @@ def _compact_bad_streams_kernel(
         tl.store(bad_starts_out + pos, start, mask=bad)
         tl.store(
             fallback_offsets_out + pos,
-            fallback_block_start + offset_prefix,
+            dense_offset,
             mask=bad,
         )
 
 
 @triton.autotune(
-    configs=COMPACT_EXTRA_AUTOTUNE_CONFIGS,
-    key=["n_elements", "N_LANES", "N_STEPS", "BLOCK"],
+    configs=COMPACT_BAD_STREAMS_AUTOTUNE_CONFIGS,
+    key=["n_streams", "steps"],
+    restore_value=["bad_count", "fallback_total"],
 )
 @triton.jit
-def _compact_extra_kernel(
+def _compact_bad_streams_kernel(
+    extra_starts, bad_streams_out, bad_starts_out, fallback_offsets_out,
+    metadata_buffer, allocation_descriptor, final_counts,
+    bad_count, fallback_total, n_streams, steps,
+    BUFFERED: tl.constexpr, BLOCK: tl.constexpr,
+):
+    """Compact fallback metadata for universal blocked storage."""
+    _compact_bad_streams_impl(
+        extra_starts, bad_streams_out, bad_starts_out, fallback_offsets_out,
+        metadata_buffer, allocation_descriptor, final_counts,
+        bad_count, fallback_total, n_streams, steps,
+        BUFFERED, BLOCK,
+    )
+
+
+@triton.jit
+def _compact_extra_impl(
     source_bits,
     extra_streams, extra_starts,
     fallback_offsets, fallback_data,
     metadata_buffer, allocation_descriptor, final_counts, bad_count,
     n_elements,
     BUFFERED: tl.constexpr, PRECOMPUTED: tl.constexpr,
+    MATRIX_N: tl.constexpr,
+    MATRIX_K: tl.constexpr, MATRIX_NUMEL: tl.constexpr,
+    K_TILE_BLOCKS: tl.constexpr,
     BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr, TILE: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -254,7 +325,18 @@ def _compact_extra_kernel(
     for step in tl.range(0, N_STEPS):
         source_offset = block * BLOCK + (step + start) * N_LANES + lane
         active = valid & (step < (N_STEPS - start)) & (source_offset < n_elements)
-        value = tl.load(source_bits + source_offset, mask=active, other=0).to(tl.int32)
+        n_tile = block // K_TILE_BLOCKS
+        k_tile = block % K_TILE_BLOCKS
+        logical_n = n_tile * N_STEPS + step + start
+        logical_k = k_tile * N_LANES + lane
+        input_offset = logical_n * MATRIX_K + logical_k
+        input_active = (
+            active & (logical_n < MATRIX_N) & (logical_k < MATRIX_K)
+            & (input_offset < MATRIX_NUMEL)
+        )
+        value = tl.load(
+            source_bits + input_offset, mask=input_active, other=0,
+        ).to(tl.int32)
         if PRECOMPUTED:
             values = (value - 127).to(tl.int8)
         else:
@@ -269,92 +351,54 @@ def _compact_extra_kernel(
             tl.store(fallback_data + fallback_offset + step, values, mask=active)
 
 
-@triton.jit
-def _make_stream_offset_map_kernel(
-    bad_streams, fallback_offsets, metadata_buffer, allocation_descriptor,
-    fallback_count, stream_offsets, n_streams,
-    BUFFERED: tl.constexpr, BLOCK: tl.constexpr,
-):
-    """Scatter compact fallback offsets into a dense per-stream lookup map."""
-    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    count = tl.load(fallback_count).to(tl.int32) if BUFFERED else n_streams
-    active = offsets < count
-    if BUFFERED:
-        base = tl.load(allocation_descriptor).to(tl.int32)
-        base_words = base // 4
-        stream = tl.load(
-            metadata_buffer + base_words + offsets, mask=active, other=0,
-        ).to(tl.int32)
-        fallback_offset = tl.load(
-            metadata_buffer + base_words + count + offsets,
-            mask=active, other=0,
-        ).to(tl.int32)
-    else:
-        stream = tl.load(bad_streams + offsets, mask=active, other=0).to(tl.int32)
-        fallback_offset = tl.load(
-            fallback_offsets + offsets, mask=active, other=0,
-        ).to(tl.int32)
-    tl.store(stream_offsets + stream, fallback_offset, mask=active)
-
-
 @triton.autotune(
-    configs=SCATTER_FALLBACK_AUTOTUNE_CONFIGS,
+    configs=COMPACT_EXTRA_AUTOTUNE_CONFIGS,
     key=["n_elements", "N_LANES", "N_STEPS", "BLOCK"],
 )
 @triton.jit
-def _scatter_fallback_kernel(
-    bad_streams, bad_starts,
-    fallback_offsets, fallback_buffer, fallback_base,
-    metadata_buffer, allocation_descriptor, fallback_count,
-    sign_mantissa,
-    output, n_elements,
-    BUFFERED: tl.constexpr,
-    TILE: tl.constexpr, BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
+def _compact_matrix_components_extra_kernel(
+    source_bits, extra_streams, extra_starts,
+    fallback_offsets, fallback_data, metadata_buffer,
+    allocation_descriptor, final_counts, bad_count, n_elements,
+    BUFFERED: tl.constexpr, MATRIX_N: tl.constexpr,
+    MATRIX_K: tl.constexpr, MATRIX_NUMEL: tl.constexpr,
+    K_TILE_BLOCKS: tl.constexpr,
+    BLOCK: tl.constexpr, N_LANES: tl.constexpr,
+    N_STEPS: tl.constexpr, TILE: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    tile = pid * TILE + tl.arange(0, TILE)
-    count = tl.load(fallback_count).to(tl.int32)
-    if pid * TILE >= count:
-        return
-    valid = tile < count
-    if BUFFERED:
-        base = tl.load(allocation_descriptor).to(tl.int32)
-        base_words = base // 4
-        stream = tl.load(metadata_buffer + base_words + tile, mask=valid, other=0).to(tl.int32)
-        start = tl.load(
-            bad_starts + base + 8 * count + tile,
-            mask=valid,
-            other=N_STEPS,
-        ).to(tl.int32)
-        fallback_offset = tl.load(
-            metadata_buffer + base_words + count + tile,
-            mask=valid,
-            other=0,
-        ).to(tl.int32)
-        fallback_base = base + 9 * count
-    else:
-        stream = tl.load(bad_streams + tile, mask=valid, other=0).to(tl.int32)
-        start = tl.load(bad_starts + tile, mask=valid, other=N_STEPS).to(tl.int32)
-        fallback_offset = tl.load(fallback_offsets + tile, mask=valid, other=0).to(tl.int32)
-    block = stream // N_LANES
-    lane = stream - block * N_LANES
-    for step in tl.range(0, N_STEPS):
-        output_offset = block * BLOCK + step * N_LANES + lane
-        active = valid & (step >= start) & (output_offset < n_elements)
-        values = tl.load(
-            fallback_buffer + fallback_base + fallback_offset + step - start,
-            mask=active,
-            other=0,
-        ).to(tl.int32)
-        sm = tl.load(
-            sign_mantissa + output_offset, mask=active, other=0
-        ).to(tl.int32)
-        packed = (
-            (((values + 127) & 255) << 7)
-            | (sm & 0x7F)
-            | ((sm & 0x80) << 8)
-        )
-        tl.store(output + output_offset, packed.to(tl.int16), mask=active)
+    """Compact overflow exponents from logical-order precomputed planes."""
+    _compact_extra_impl(
+        source_bits, extra_streams, extra_starts, fallback_offsets,
+        fallback_data, metadata_buffer, allocation_descriptor,
+        final_counts, bad_count, n_elements, BUFFERED, True,
+        MATRIX_N, MATRIX_K, MATRIX_NUMEL, K_TILE_BLOCKS,
+        BLOCK, N_LANES, N_STEPS, TILE,
+    )
+
+
+@triton.autotune(
+    configs=COMPACT_EXTRA_AUTOTUNE_CONFIGS,
+    key=["n_elements", "N_LANES", "N_STEPS", "BLOCK"],
+)
+@triton.jit
+def _compact_matrix_extra_kernel(
+    source_bits, extra_streams, extra_starts,
+    fallback_offsets, fallback_data, metadata_buffer,
+    allocation_descriptor, final_counts, bad_count, n_elements,
+    BUFFERED: tl.constexpr, MATRIX_N: tl.constexpr,
+    MATRIX_K: tl.constexpr, MATRIX_NUMEL: tl.constexpr,
+    K_TILE_BLOCKS: tl.constexpr,
+    BLOCK: tl.constexpr, N_LANES: tl.constexpr,
+    N_STEPS: tl.constexpr, TILE: tl.constexpr,
+):
+    """Compact matrix overflow values through compile-time source mapping."""
+    _compact_extra_impl(
+        source_bits, extra_streams, extra_starts, fallback_offsets,
+        fallback_data, metadata_buffer, allocation_descriptor,
+        final_counts, bad_count, n_elements, BUFFERED, False,
+        MATRIX_N, MATRIX_K, MATRIX_NUMEL, K_TILE_BLOCKS,
+        BLOCK, N_LANES, N_STEPS, TILE,
+    )
 
 
 @triton.jit
@@ -368,14 +412,14 @@ def _pack_bf16(value, sm):
 
 @triton.autotune(
     configs=DECODE_AUTOTUNE_CONFIGS,
-    key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS"],
+    key=["MATRIX_N", "MATRIX_K", "N_STEPS", "FIXED_WORDS"],
 )
 @triton.jit
-def _decode_kernel(
+def _decode_matrix_kernel(
     encoded, sign_mantissa, output,
-    decode_table, n_elements, n_streams,
-    center,
-    SKIP_FALLBACK: tl.constexpr,
+    decode_table, n_elements, n_streams, center,
+    MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
+    MATRIX_NUMEL: tl.constexpr, K_TILE_BLOCKS: tl.constexpr,
     FIRST_MASK: tl.constexpr, RARE_LENGTH: tl.constexpr,
     BLOCK: tl.constexpr,N_LANES: tl.constexpr, N_STEPS: tl.constexpr, FIXED_WORDS: tl.constexpr,
 ):
@@ -394,8 +438,17 @@ def _decode_kernel(
     center_value = tl.load(center).to(tl.int32)
 
     for step in tl.range(0, N_STEPS, 2):
-        output_offset = block * BLOCK + step * N_LANES + lanes
-        valid = output_offset < n_elements
+        storage_offset = block * BLOCK + step * N_LANES + lanes
+        storage_valid = storage_offset < n_elements
+        n_tile = block // K_TILE_BLOCKS
+        k_tile = block % K_TILE_BLOCKS
+        logical_n = n_tile * N_STEPS + step
+        logical_k = k_tile * N_LANES + lanes
+        output_offset = logical_n * MATRIX_K + logical_k
+        valid = (
+            (logical_n < MATRIX_N) & (logical_k < MATRIX_K)
+            & (output_offset < MATRIX_NUMEL)
+        )
 
         current = window >> shift
         first = tl.load(decode_table + (current & FIRST_MASK).to(tl.int32))
@@ -405,11 +458,11 @@ def _decode_kernel(
         tail = ((current >> RARE_LENGTH) & 255).to(tl.int32)
         tail = tl.where(tail >= 128, tail - 256, tail)
         value = tl.where(continuation, tail, first >> 8) + center_value
-        sm = tl.load(sign_mantissa + output_offset, mask=valid, other=0)
+        sm = tl.load(sign_mantissa + storage_offset, mask=storage_valid, other=0)
         packed = _pack_bf16(value, sm)
         tl.store(output + output_offset, packed.to(tl.int16), mask=valid)
 
-        shift1 = shift + tl.where(valid, length, 0)
+        shift1 = shift + tl.where(storage_valid, length, 0)
         current1 = window >> shift1
         first1 = tl.load(decode_table + (current1 & FIRST_MASK).to(tl.int32))
         first_length1 = first1 & 255
@@ -418,32 +471,95 @@ def _decode_kernel(
         tail1 = ((current1 >> RARE_LENGTH) & 255).to(tl.int32)
         tail1 = tl.where(tail1 >= 128, tail1 - 256, tail1)
         value1 = tl.where(continuation1, tail1, first1 >> 8) + center_value
-        valid1 = output_offset + N_LANES < n_elements
+        storage_offset1 = storage_offset + N_LANES
+        storage_valid1 = storage_offset1 < n_elements
+        output_offset1 = (logical_n + 1) * MATRIX_K + logical_k
+        valid1 = (
+            (logical_n + 1 < MATRIX_N) & (logical_k < MATRIX_K)
+            & (output_offset1 < MATRIX_NUMEL)
+        )
         sm1 = tl.load(
-            sign_mantissa + output_offset + N_LANES, mask=valid1, other=0
+            sign_mantissa + storage_offset1, mask=storage_valid1, other=0
         )
         packed1 = _pack_bf16(value1, sm1)
         tl.store(
-            output + output_offset + N_LANES,
+            output + output_offset1,
             packed1.to(tl.int16), mask=valid1,
         )
 
-        next_shift = shift1 + tl.where(valid1, length1, 0)
+        next_shift = shift1 + tl.where(storage_valid1, length1, 0)
         crosses_word = next_shift >= 32
-        if SKIP_FALLBACK:
-            word2 = tl.load(
-                encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams
-                + lane_index,
-                mask=crosses_word,
-                other=0,
-            ).to(tl.uint32).to(tl.uint64)
-        else:
-            word2 = tl.load(
-                encoded + (word + 2) * n_streams + lane_index,
-                mask=crosses_word,
-                other=0,
-            ).to(tl.uint32).to(tl.uint64)
+        word2 = tl.load(
+            encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams
+            + lane_index,
+            mask=crosses_word,
+            other=0,
+        ).to(tl.uint32).to(tl.uint64)
         next_window = (window >> 32) | (word2 << 32)
         window = tl.where(crosses_word, next_window, window)
         word += crosses_word
         shift = tl.where(crosses_word, next_shift - 32, next_shift)
+
+
+@triton.autotune(
+    configs=SCATTER_FALLBACK_AUTOTUNE_CONFIGS,
+    key=["n_elements", "N_LANES", "N_STEPS", "BLOCK"],
+)
+@triton.jit
+def _scatter_blocked_fallback_kernel(
+    bad_streams, bad_starts, fallback_offsets,
+    fallback_buffer, fallback_base, metadata, descriptor, fallback_count,
+    sign_mantissa, output, n_elements,
+    BUFFERED: tl.constexpr,
+    MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
+    MATRIX_NUMEL: tl.constexpr, K_TILE_BLOCKS: tl.constexpr,
+    TILE: tl.constexpr, BLOCK: tl.constexpr,
+    N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
+):
+    """Overwrite mapped decode output with compact fallback stream tails."""
+    pid = tl.program_id(0)
+    tile = pid * TILE + tl.arange(0, TILE)
+    count = tl.load(fallback_count).to(tl.int32)
+    if pid * TILE >= count:
+        return
+    valid = tile < count
+    if BUFFERED:
+        base = tl.load(descriptor).to(tl.int32)
+        base_words = base // 4
+        stream = tl.load(metadata + base_words + tile, mask=valid, other=0)
+        start = tl.load(
+            bad_starts + base + 8 * count + tile,
+            mask=valid, other=N_STEPS,
+        )
+        fallback_offset = tl.load(
+            metadata + base_words + count + tile, mask=valid, other=0,
+        )
+        fallback_base = base + 9 * count
+    else:
+        stream = tl.load(bad_streams + tile, mask=valid, other=0)
+        start = tl.load(bad_starts + tile, mask=valid, other=N_STEPS)
+        fallback_offset = tl.load(fallback_offsets + tile, mask=valid, other=0)
+    stream = stream.to(tl.int32)
+    start = start.to(tl.int32)
+    fallback_offset = fallback_offset.to(tl.int32)
+    block = stream // N_LANES
+    lane = stream % N_LANES
+    n_tile = block // K_TILE_BLOCKS
+    k_tile = block % K_TILE_BLOCKS
+    logical_k = k_tile * N_LANES + lane
+    for step in tl.range(0, N_STEPS):
+        storage_offset = block * BLOCK + step * N_LANES + lane
+        logical_n = n_tile * N_STEPS + step
+        logical_offset = logical_n * MATRIX_K + logical_k
+        active = (
+            valid & (step >= start) & (storage_offset < n_elements)
+            & (logical_n < MATRIX_N) & (logical_k < MATRIX_K)
+            & (logical_offset < MATRIX_NUMEL)
+        )
+        exponent = tl.load(
+            fallback_buffer + fallback_base + fallback_offset + step - start,
+            mask=active, other=0,
+        ).to(tl.int32)
+        sm = tl.load(sign_mantissa + storage_offset, mask=active, other=0)
+        packed = _pack_bf16(exponent, sm)
+        tl.store(output + logical_offset, packed.to(tl.int16), mask=active)
