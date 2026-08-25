@@ -33,7 +33,7 @@ def _store_result(
 
 @triton.autotune(
     configs=DECODE_AUTOTUNE_CONFIGS,
-    key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS"],
+    key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS", "OUTPUT_POLICY"],
 )
 @triton.jit
 def pointwise_compressed_dense_kernel(
