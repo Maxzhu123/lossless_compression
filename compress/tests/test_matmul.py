@@ -3,7 +3,9 @@
 import torch
 
 from compress.code_storage import Distribution, DistType, NoiseLevel
-from compress.compress import compress_matrix, compressed_linear, decompress
+from compress.compress import (
+    compress_matrix, compressed_linear, compressed_matmul, decompress,
+)
 from compress.tensor_buffer import TensorBuffer
 
 
@@ -30,10 +32,14 @@ def _check(n: int, k: int, m: int, *, buffer=None, arbitrary=False) -> None:
     activations = torch.randn(
         (m, k), dtype=torch.bfloat16, device="cuda", generator=generator,
     )
+    left = torch.randn(
+        (m, n), dtype=torch.bfloat16, device="cuda", generator=generator,
+    )
     encoded = compress_matrix(weight, distribution, buffer)
     assert torch.equal(weight.view(torch.int16), decompress(encoded).view(torch.int16))
     if not arbitrary:
         _assert_close(compressed_linear(activations, encoded), activations @ weight.T)
+        _assert_close(compressed_matmul(left, encoded), left @ weight)
     encoded.free()
 
 

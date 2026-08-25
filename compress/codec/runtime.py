@@ -58,7 +58,7 @@ def uses_raw_source(size: int, distribution: Distribution) -> bool:
     return (streams * fixed_words + 4) * 4 > size
 
 
-def _estimate_center(source, size, *, precomputed):
+def estimate_center(source, size, *, precomputed):
     """Estimate the exponent center from strided samples on the GPU."""
     sample_size = min(size, CENTER_SAMPLE_SIZE)
     stride = size // sample_size
@@ -80,6 +80,7 @@ def compress_components(
     *,
     precomputed,
     preserve_stream_map=False,
+    center=None,
 ):
     """Encode BF16 bits or split components into a ``CompressedTensor``.
 
@@ -97,7 +98,8 @@ def compress_components(
     streams = blocks * lanes
     encode_table, _, _ = get_distribution_tables(distribution)
     # Encode and decode share this sampled center through the result metadata.
-    center = _estimate_center(source_values, size, precomputed=precomputed)
+    if center is None:
+        center = estimate_center(source_values, size, precomputed=precomputed)
     encoded = torch.empty(
         streams * fixed_words + 4,
         dtype=torch.int32,
@@ -276,8 +278,8 @@ def _restore_layout(output: torch.Tensor, data: CompressedTensor) -> torch.Tenso
     """Return linear tensors directly and untile matrix-oriented storage."""
     if data.layout == StorageLayout.LINEAR:
         return output.reshape(data.shape)
-    n_tiles, k_tiles, tile_k, tile_n = data.storage_shape
+    n_tiles, k_tiles, tile_n, tile_k = data.storage_shape
     n, k = data.shape
-    matrix = output.reshape(n_tiles, k_tiles, tile_k, tile_n)
-    matrix = matrix.permute(1, 2, 0, 3).reshape(k_tiles * tile_k, n_tiles * tile_n)
-    return matrix[:k, :n].T.contiguous()
+    matrix = output.reshape(n_tiles, k_tiles, tile_n, tile_k)
+    matrix = matrix.permute(0, 2, 1, 3).reshape(n_tiles * tile_n, k_tiles * tile_k)
+    return matrix[:n, :k].contiguous()

@@ -5,7 +5,9 @@ import torch
 from .code_storage import CompressedTensor, Distribution
 from .codec.runtime import compress_dense, decode as _decode
 from .ops.pointwise import pointwise_compressed_dense
-from .ops.matmul import compress_matrix, compressed_linear
+from .ops.matmul import (
+    compress_matrix, compressed_linear, compressed_matmul, decode_matrix,
+)
 from .ops.registry import ADD, MULTIPLY
 from .tensor_buffer import TensorBuffer
 
