@@ -10,8 +10,8 @@ from compress.tensor_buffer import TensorBuffer, visualize_buffer
 from sparse_utils import MyCompressed, SparseSGDM
 from mlps import FFN
 
-COMPRESSED = True
-BUFFER = True
+COMPRESSED = False
+BUFFER = False
 c_print(f"Compressed: {COMPRESSED}", color="bright_blue")
 c_print(f"Buffer: {BUFFER}", color="bright_blue")
 
@@ -65,7 +65,7 @@ def main():
     else:
         buffer = None
 
-    model = Model(16, 2048, 8192, 2048, G, buffer=buffer)
+    model = Model(8, 2048, 24000, 2048, G, buffer=buffer)
     optimiser = SparseSGDM(model.sparse_parameters(), lr=0.001, momentum=0.9)
 
     x = torch.randn(1000, 2048, dtype=torch.bfloat16, device="cuda", generator=G)
