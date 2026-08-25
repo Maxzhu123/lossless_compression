@@ -70,7 +70,7 @@ class CompressedTensor:
     fallback_offsets: torch.Tensor | None = None  # Offsets into fallback storage.
     fallback_buffer: torch.Tensor | None = None  # Shared or private fallback storage.
     fallback_descriptor: torch.Tensor | None = None  # Device allocator descriptor.
-    buffer: "TensorBuffer | None" = None  # Allocator that owns fallback_descriptor.
+    buffer: TensorBuffer | None = None  # Allocator that owns fallback_descriptor.
     fallback_base: int = 0  # Byte offset of this tensor's region in fallback_buffer.
     fallback_count: torch.Tensor | None = None  # Device scalar with the number of fallback streams.
     fallback_used: torch.Tensor | None = None  # Device scalar with actual fallback bytes used.
@@ -94,6 +94,13 @@ class CompressedTensor:
         if self.fallback_descriptor is not None:
             total += int(self.fallback_descriptor[1].item())
         return total
+
+    def memory_buffer_size(self):
+        total = 0
+        if self.fallback_descriptor is not None:
+            total += int(self.fallback_descriptor[1].item())
+        return total
+
 
     def free(self) -> None:
         """Release this tensor's fallback allocation, if buffer-backed."""

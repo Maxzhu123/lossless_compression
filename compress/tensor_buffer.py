@@ -222,8 +222,6 @@ class TensorBuffer:
         device: torch.device | str | None = None,
     ) -> None:
         """ max_free_regions: Maximum number of free regions to track in the allocator"""
-        if capacity_bytes <= 0:
-            raise ValueError("capacity_bytes must be positive")
         if capacity_bytes > torch.iinfo(torch.int32).max:
             raise ValueError("capacity_bytes must fit in int32")
         if max_free_regions <= 0 or max_free_regions & (max_free_regions - 1):
@@ -356,6 +354,8 @@ def verify_buffer(buffer: TensorBuffer) -> None:
 
 def visualize_buffer(buffer: TensorBuffer, width: int = 80) -> str:
     """Synchronize and return an ASCII map of payload usage."""
+    if buffer is None:
+        return ""
     if width < 8:
         raise ValueError("width must be at least 8")
     free_regions = _free_regions_snapshot(buffer)

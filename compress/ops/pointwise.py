@@ -13,7 +13,7 @@ from ..kernels.pointwise import (
     pointwise_compressed_dense_kernel,
 )
 from ..tensor_buffer import TensorBuffer
-from .registry import ADD, MULTIPLY, PointwiseOp
+from .registry import PointwiseOp
 
 
 def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
@@ -69,7 +69,7 @@ def pointwise_compressed_dense(
     other: torch.Tensor,
     operation: PointwiseOp,
     *,
-    output: str = "dense",
+    dense_output: bool = True,
     buffer: TensorBuffer | None = None,
     distribution=None,
 ) -> torch.Tensor | CompressedTensor:
@@ -81,20 +81,18 @@ def pointwise_compressed_dense(
         raise ValueError(f"{operation.name} is not a binary operation")
     if tuple(other.shape) != data.shape:
         raise ValueError(f"{operation.name} expects tensors with the same shape")
-    if output not in {"dense", "compressed"}:
-        raise ValueError("output must be 'dense' or 'compressed'")
 
     if data.offsets is None and data.fallback_descriptor is None:
         result = operation.torch_fn(data.data.reshape(data.shape), other)
-        if output == "dense":
+        if dense_output:
             return result
         return compress_dense(result, distribution or data.distribution, buffer)
 
-    policy = DENSE_OUTPUT if output == "dense" else COMPRESSED_OUTPUT
+    policy = DENSE_OUTPUT if dense_output else COMPRESSED_OUTPUT
     values, auxiliary = _launch_pointwise_compressed_dense(
         data, other, operation, policy,
     )
-    if output == "dense":
+    if dense_output:
         return values.reshape(data.shape)
     return compress_components(
         auxiliary, values, data.size, distribution or data.distribution,
@@ -102,31 +100,3 @@ def pointwise_compressed_dense(
     )
 
 
-def compressed_add(
-    data: CompressedTensor,
-    other: torch.Tensor,
-    *,
-    output: str = "dense",
-    buffer: TensorBuffer | None = None,
-    distribution=None,
-) -> torch.Tensor | CompressedTensor:
-    """Add dense BF16 values to a compressed tensor."""
-    return pointwise_compressed_dense(
-        data, other, ADD, output=output,
-        buffer=buffer, distribution=distribution,
-    )
-
-
-def compressed_multiply(
-    data: CompressedTensor,
-    other: torch.Tensor,
-    *,
-    output: str = "dense",
-    buffer: TensorBuffer | None = None,
-    distribution=None,
-) -> torch.Tensor | CompressedTensor:
-    """Multiply compressed values by dense BF16 values."""
-    return pointwise_compressed_dense(
-        data, other, MULTIPLY, output=output,
-        buffer=buffer, distribution=distribution,
-    )

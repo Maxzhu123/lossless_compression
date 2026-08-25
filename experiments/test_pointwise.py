@@ -6,7 +6,8 @@ import torch
 
 from compress.code_storage import Distribution, DistType, NoiseLevel
 from compress.compress import compress, decompress
-from compress.ops import POINTWISE_OPS, pointwise_compressed_dense
+from compress.ops.pointwise import pointwise_compressed_dense
+from compress.ops.registry import POINTWISE_OPS
 from compress.tensor_buffer import Allocation, TensorBuffer
 
 
@@ -42,7 +43,7 @@ def _check(source, other, distribution, operation, *, buffered=True) -> None:
     actual = pointwise_compressed_dense(encoded, other, operation)
     compressed = pointwise_compressed_dense(
         encoded, other, operation,
-        output="compressed", buffer=output_buffer,
+        dense_output=False, buffer=output_buffer,
     )
     _assert_bits_equal(source, restored)
     _assert_bits_equal(expected, actual)
@@ -108,7 +109,7 @@ def _benchmark(size: int, operation) -> None:
     dense_then_compress = lambda: compress(fused(), encoded.distribution, output_buffer)
     compressed = lambda: pointwise_compressed_dense(
         encoded, other, operation,
-        output="compressed", buffer=output_buffer,
+        dense_output=False, buffer=output_buffer,
     )
     release = lambda value: _free(value, output_buffer)
     baseline_ms, fused_ms = _compare(
