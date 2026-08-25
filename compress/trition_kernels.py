@@ -269,6 +269,34 @@ def _compact_extra_kernel(
             tl.store(fallback_data + fallback_offset + step, values, mask=active)
 
 
+@triton.jit
+def _make_stream_offset_map_kernel(
+    bad_streams, fallback_offsets, metadata_buffer, allocation_descriptor,
+    fallback_count, stream_offsets, n_streams,
+    BUFFERED: tl.constexpr, BLOCK: tl.constexpr,
+):
+    """Scatter compact fallback offsets into a dense per-stream lookup map."""
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    count = tl.load(fallback_count).to(tl.int32) if BUFFERED else n_streams
+    active = offsets < count
+    if BUFFERED:
+        base = tl.load(allocation_descriptor).to(tl.int32)
+        base_words = base // 4
+        stream = tl.load(
+            metadata_buffer + base_words + offsets, mask=active, other=0,
+        ).to(tl.int32)
+        fallback_offset = tl.load(
+            metadata_buffer + base_words + count + offsets,
+            mask=active, other=0,
+        ).to(tl.int32)
+    else:
+        stream = tl.load(bad_streams + offsets, mask=active, other=0).to(tl.int32)
+        fallback_offset = tl.load(
+            fallback_offsets + offsets, mask=active, other=0,
+        ).to(tl.int32)
+    tl.store(stream_offsets + stream, fallback_offset, mask=active)
+
+
 @triton.autotune(
     configs=SCATTER_FALLBACK_AUTOTUNE_CONFIGS,
     key=["n_elements", "N_LANES", "N_STEPS", "BLOCK"],

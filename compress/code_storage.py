@@ -19,6 +19,12 @@ class DistType(Enum):
     LAPLACE = "laplace"
 
 
+class StorageLayout(Enum):
+    """Logical ordering used by the values stored inside a compressed tensor."""
+    LINEAR = auto()
+    MATRIX_TILED = auto()
+
+
 @dataclass(frozen=True)
 class Distribution:
     """Codec distribution selector.
@@ -77,6 +83,10 @@ class CompressedTensor:
     distribution: Distribution = Distribution(DistType.EMPIRICAL)  # Huffman table selector.
     center: torch.Tensor | int = 0  # CUDA center scalar used by encode/decode.
     shape: tuple[int, ...] = ()  # Original tensor shape.
+    layout: StorageLayout = StorageLayout.LINEAR  # Linear or matrix-tiled ordering.
+    storage_shape: tuple[int, ...] = ()  # Padded codec shape for non-linear layouts.
+    matrix_fallback_starts: torch.Tensor | None = None  # Dense overflow-start map.
+    matrix_fallback_offsets: torch.Tensor | None = None  # Dense overflow-offset map.
 
     def memory_size(self):
         """Return GPU allocation bytes owned by one compressed tensor.

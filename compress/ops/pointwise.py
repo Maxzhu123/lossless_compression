@@ -3,7 +3,7 @@
 import torch
 import triton
 
-from ..code_storage import CompressedTensor
+from ..code_storage import CompressedTensor, StorageLayout
 from ..codec.runtime import compress_components, compress_dense, geometry
 from ..huffman_tables import FIRST_MASK, get_distribution_tables
 from ..kernels.pointwise import (
@@ -77,6 +77,8 @@ def pointwise_compressed_dense(
 
     Dense results return directly; component results reuse the shared encoder.
     """
+    if data.layout != StorageLayout.LINEAR:
+        raise ValueError("pointwise operations require linear compressed storage")
     if operation.arity != 2:
         raise ValueError(f"{operation.name} is not a binary operation")
     if tuple(other.shape) != data.shape:
@@ -98,5 +100,4 @@ def pointwise_compressed_dense(
         auxiliary, values, data.size, distribution or data.distribution,
         buffer, data.shape, precomputed=True,
     )
-
 

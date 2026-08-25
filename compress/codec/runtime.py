@@ -1,9 +1,12 @@
 """Shared host-side compression and decompression pipeline."""
 
+from dataclasses import replace
 import torch
 import triton
 
-from ..code_storage import CompressedTensor, Distribution, DistType, NoiseLevel
+from ..code_storage import (
+    CompressedTensor, Distribution, DistType, NoiseLevel, StorageLayout,
+)
 from ..huffman_tables import FIRST_MASK, get_distribution_tables
 from ..tensor_buffer import TensorBuffer
 from ..trition_kernels import (
@@ -13,6 +16,7 @@ from ..trition_kernels import (
     _decode_kernel,
     _encode_kernel,
     _estimate_center_kernel,
+    _make_stream_offset_map_kernel,
     _scatter_fallback_kernel,
 )
 
@@ -75,6 +79,7 @@ def compress_components(
     shape,
     *,
     precomputed,
+    preserve_stream_map=False,
 ):
     """Encode BF16 bits or split components into a ``CompressedTensor``.
 
@@ -129,7 +134,7 @@ def compress_components(
             BUFFERED=True, PRECOMPUTED=precomputed, BLOCK=block_size,
             N_LANES=lanes, N_STEPS=steps, TILE=32,
         )
-        return CompressedTensor(
+        result = CompressedTensor(
             encoded, size, sign_mantissa,
             fallback_buffer=buffer.data,
             fallback_descriptor=allocation.descriptor,
@@ -137,6 +142,20 @@ def compress_components(
             fallback_count=counts[:1], fallback_used=counts[1:2],
             distribution=distribution, center=center, shape=shape,
         )
+        if preserve_stream_map:
+            stream_offsets = torch.full(
+                (streams,), -1, dtype=torch.int32, device=source_values.device,
+            )
+            _make_stream_offset_map_kernel[(triton.cdiv(streams, 256),)](
+                metadata, metadata, metadata, allocation.descriptor,
+                counts[:1], stream_offsets, streams,
+                BUFFERED=True, BLOCK=256,
+            )
+            result = replace(
+                result, matrix_fallback_starts=extra_starts,
+                matrix_fallback_offsets=stream_offsets,
+            )
+        return result
 
     # Private fallback storage synchronizes once to allocate exact-size tensors.
     counts = torch.zeros(2, dtype=torch.int32, device=source_values.device)
@@ -166,7 +185,7 @@ def compress_components(
         BUFFERED=False, PRECOMPUTED=precomputed, BLOCK=block_size,
         N_LANES=lanes, N_STEPS=steps, TILE=32,
     )
-    return CompressedTensor(
+    result = CompressedTensor(
         encoded, size, sign_mantissa,
         bad_streams, bad_starts, fallback_offsets,
         fallback_buffer=fallback_data, fallback_base=0,
@@ -174,9 +193,27 @@ def compress_components(
         fallback_count=bad_count, fallback_used=fallback_total,
         distribution=distribution, center=center, shape=shape,
     )
+    if preserve_stream_map:
+        stream_offsets = torch.full(
+            (streams,), -1, dtype=torch.int32, device=source_values.device,
+        )
+        if count:
+            _make_stream_offset_map_kernel[(triton.cdiv(count, 256),)](
+                bad_streams, fallback_offsets, bad_streams, bad_streams,
+                bad_count, stream_offsets, count,
+                BUFFERED=False, BLOCK=256,
+            )
+        result = replace(
+            result, matrix_fallback_starts=extra_starts,
+            matrix_fallback_offsets=stream_offsets,
+        )
+    return result
 
 
-def compress_dense(data, distribution, buffer: TensorBuffer | None = None):
+def compress_dense(
+    data, distribution, buffer: TensorBuffer | None = None, *,
+    preserve_stream_map=False,
+):
     """Compress dense BF16 values, using raw storage when fixed streams are larger."""
     shape = tuple(data.shape)
     source = data.contiguous().view(-1)
@@ -191,13 +228,15 @@ def compress_dense(data, distribution, buffer: TensorBuffer | None = None):
     return compress_components(
         source.view(torch.int16), sign_mantissa, size,
         distribution, buffer, shape, precomputed=False,
+        preserve_stream_map=preserve_stream_map,
     )
 
 
 def decode(data: CompressedTensor) -> torch.Tensor:
     """Decode fixed streams, then overwrite overflowing tails from fallback storage."""
     if data.offsets is None and data.fallback_descriptor is None:
-        return data.data.reshape(data.shape)
+        output = data.data.reshape(data.storage_shape or data.shape)
+        return _restore_layout(output, data)
 
     _, table, rare_length = get_distribution_tables(data.distribution)
     block_size, lanes, steps, fixed_words = geometry(data.distribution)
@@ -229,4 +268,16 @@ def decode(data: CompressedTensor) -> torch.Tensor:
                 output, data.size, BUFFERED=False, TILE=64,
                 BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
             )
-    return output.view(torch.bfloat16).reshape(data.shape)
+    output = output.view(torch.bfloat16).reshape(data.storage_shape or data.shape)
+    return _restore_layout(output, data)
+
+
+def _restore_layout(output: torch.Tensor, data: CompressedTensor) -> torch.Tensor:
+    """Return linear tensors directly and untile matrix-oriented storage."""
+    if data.layout == StorageLayout.LINEAR:
+        return output.reshape(data.shape)
+    n_tiles, k_tiles, tile_k, tile_n = data.storage_shape
+    n, k = data.shape
+    matrix = output.reshape(n_tiles, k_tiles, tile_k, tile_n)
+    matrix = matrix.permute(1, 2, 0, 3).reshape(k_tiles * tile_k, n_tiles * tile_n)
+    return matrix[:k, :n].T.contiguous()
