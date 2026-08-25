@@ -1,5 +1,6 @@
 import torch
 
+from compress.code_storage import Distribution, DistType
 from compress.tensor_buffer import TensorBuffer, visualize_buffer
 from compress.compress import compress
 
@@ -8,7 +9,7 @@ x = torch.randn([4096, 21504], dtype=torch.bfloat16, device="cuda", generator=G)
 
 buffer = TensorBuffer(10000000)
 
-compress(x, buffer=buffer)
+compress(x, buffer=buffer, distribution=Distribution(family=DistType.GAUSSIAN))
 
 
 print(visualize_buffer(buffer))

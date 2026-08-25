@@ -99,10 +99,13 @@ def _encode_impl(
             exp1 = ((value1 >> 7) & 0xFF) - 127
             sm0 = (value0 & 0x7F) | ((value0 >> 8) & 0x80)
             sm1 = (value1 & 0x7F) | ((value1 >> 8) & 0x80)
-            tl.store(sign_mantissa + source_offset, sm0.to(tl.uint8), mask=valid0)
+            tl.store(
+                sign_mantissa + source_offset, sm0.to(tl.uint8),
+                mask=valid0 & input_valid0,
+            )
             tl.store(
                 sign_mantissa + source_offset + N_LANES,
-                sm1.to(tl.uint8), mask=valid1,
+                sm1.to(tl.uint8), mask=valid1 & input_valid1,
             )
         packed0 = tl.load(
             encode_table + ((exp0 - center_value) & 255)
@@ -110,6 +113,8 @@ def _encode_impl(
         packed1 = tl.load(
             encode_table + ((exp1 - center_value) & 255)
         ).to(tl.uint32)
+        packed0 = tl.where(input_valid0, packed0, 0)
+        packed1 = tl.where(input_valid1, packed1, 0)
         length0 = (packed0 >> 20).to(tl.int32)
         length1 = (packed1 >> 20).to(tl.int32)
         length = length0 + length1

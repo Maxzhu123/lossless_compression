@@ -2,12 +2,8 @@
 
 import torch
 
-from .code_storage import CompressedTensor, Distribution
-from .codec.runtime import (
-    compress_dense,
-    decode as _decode,
-    decode_matrix_dense,
-)
+from .code_storage import CompressedTensor, Distribution, StorageLayout
+from .codec.runtime import compress_dense, decode_matrix_dense
 from .ops.pointwise import pointwise_compressed_dense
 from .ops.registry import ADD, MULTIPLY
 from .tensor_buffer import TensorBuffer
@@ -24,14 +20,9 @@ def compress(
 
 def decompress(data: CompressedTensor) -> torch.Tensor:
     """Decode a tensor produced by :func:`compress`."""
-    return _decode(data)
-
-
-def decode_matrix(weight: CompressedTensor) -> torch.Tensor:
-    """Decode a compressed matrix into contiguous logical ``[N, K]`` order."""
-    if len(weight.shape) != 2:
-        raise ValueError("decode_matrix expects a two-dimensional tensor")
-    return decode_matrix_dense(weight) if weight.layout_shape else _decode(weight)
+    if data.layout == StorageLayout.BLOCKED:
+        return decode_matrix_dense(data)
+    return data.data.reshape(data.shape)
 
 
 def compressed_linear(
@@ -40,7 +31,7 @@ def compressed_linear(
     """Compute ``activations @ weight.T`` after one matrix-aware decode."""
     if activations.ndim != 2 or activations.shape[1] != weight.shape[1]:
         raise ValueError("activation and weight inner dimensions must match")
-    return activations.contiguous() @ decode_matrix(weight).T
+    return activations.contiguous() @ decompress(weight).T
 
 
 def compressed_matmul(
@@ -49,7 +40,7 @@ def compressed_matmul(
     """Compute ``activations @ weight`` after one matrix-aware decode."""
     if activations.ndim != 2 or activations.shape[1] != weight.shape[0]:
         raise ValueError("activation and weight inner dimensions must match")
-    return activations.contiguous() @ decode_matrix(weight)
+    return activations.contiguous() @ decompress(weight)
 
 
 def compressed_add(
