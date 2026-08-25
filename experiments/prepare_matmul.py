@@ -85,16 +85,13 @@ def _benchmark(n: int) -> None:
     torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
 
     dense = lambda: activations @ weight
-    baseline = lambda: activations @ decompress(encoded)
-    fused = lambda: compressed_matmul(activations, encoded)
-    dense_ms, baseline_ms, fused_ms = _compare((dense, baseline, fused))
+    compressed = lambda: compressed_matmul(activations, encoded)
+    dense_ms, compressed_ms = _compare((dense, compressed))
 
-    overhead = (fused_ms - dense_ms) / dense_ms
+    overhead = (compressed_ms - dense_ms) / dense_ms
     print(
-        f"n={n:5d}  dense={dense_ms:7.4f} ms  baseline={baseline_ms:7.4f} ms  "
-        f"fused={fused_ms:7.4f} ms  overhead={overhead:6.2%}  "
-        f"fused-vs-baseline speedup={baseline_ms / fused_ms:5.3f}x  "
-        f"reduction={(baseline_ms - fused_ms) / baseline_ms:6.2%}"
+        f"n={n:5d}  dense={dense_ms:7.4f} ms  compressed={compressed_ms:7.4f} ms  "
+        f"overhead={overhead:6.2%}"
     )
 
     encoded.free()

@@ -22,14 +22,20 @@ from ..trition_kernels import (
 )
 
 
-BLOCK_SIZE = 65536
-LANES = 256
-LANE_BITS = 800
-CENTER_SAMPLE_SIZE = 4096
+BLOCK_SIZE = 65536              # CLEAN block size; MEDIUM/HIGH use half.
+LANES = 256                     # Parallel streams in every block.
+LANE_BITS = 800                 # Storage size per stream.
+
+CENTER_SAMPLE_SIZE = 4096       # Number of samples used to estimate mean
 
 
 def geometry(distribution: Distribution):
-    """Return block size, lanes, steps and fixed words for a codec layout."""
+    """Setup geometry used for compression.
+        Each lane is stored in fixed_bits bit budget (returned as 32 bit words).
+        Number of symbols in each lane is steps = block_size  / lanes.
+        Average number of bits per symbol is (fixed_bits * lanes) / block_size
+        Longer sequences use the fallback buffer.
+    """
     clean_steps = BLOCK_SIZE // LANES
     lanes = LANES
     if distribution.noise_level == NoiseLevel.CLEAN:
