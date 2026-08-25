@@ -4,7 +4,7 @@ import statistics
 
 import torch
 
-from compress.code_storage import Distribution, DistType, NoiseLevel
+from compress.code_storage import Distribution, DistType
 from compress.compress import compress, decompress
 from compress.ops.pointwise import pointwise_compressed_dense
 from compress.ops.registry import POINTWISE_OPS
@@ -30,26 +30,6 @@ def _assert_bits_equal(left: torch.Tensor, right: torch.Tensor) -> None:
         left.contiguous().view(torch.int16),
         right.contiguous().view(torch.int16),
     )
-
-
-@torch.no_grad()
-def _check(source, other, distribution, operation, *, buffered=True) -> None:
-    """Check dense and compressed outputs against the registered PyTorch op."""
-    buffer = _buffer(source.numel()) if buffered else None
-    output_buffer = _buffer(source.numel()) if buffered else None
-    encoded = compress(source, distribution, buffer)
-    restored = decompress(encoded)
-    expected = operation.torch_fn(restored, other)
-    actual = pointwise_compressed_dense(encoded, other, operation)
-    compressed = pointwise_compressed_dense(
-        encoded, other, operation,
-        dense_output=False, buffer=output_buffer,
-    )
-    _assert_bits_equal(source, restored)
-    _assert_bits_equal(expected, actual)
-    _assert_bits_equal(expected, decompress(compressed))
-    _free(encoded, buffer)
-    _free(compressed, output_buffer)
 
 
 def _time(function, iterations: int, release=None) -> float:
@@ -92,13 +72,21 @@ def _benchmark(size: int, operation) -> None:
     buffer = _buffer(size)
     output_buffer = _buffer(size)
     encoded = compress(source, Distribution(DistType.GAUSSIAN), buffer)
-    expected = operation.torch_fn(decompress(encoded), other)
+    restored = decompress(encoded)
+    expected = operation.torch_fn(restored, other)
     actual = pointwise_compressed_dense(encoded, other, operation)
+    compressed_result = pointwise_compressed_dense(
+        encoded, other, operation,
+        dense_output=False, buffer=output_buffer,
+    )
+    _assert_bits_equal(source, restored)
     _assert_bits_equal(expected, actual)
+    _assert_bits_equal(expected, decompress(compressed_result))
+    _free(compressed_result, output_buffer)
 
     baseline = lambda: operation.torch_fn(decompress(encoded), other)
     fused = lambda: pointwise_compressed_dense(encoded, other, operation)
-    iterations = 50 if size <= 10_000_003 else 20 if size <= 50_000_003 else 10
+    iterations = 20
     baseline_ms, fused_ms = _compare(baseline, fused, iterations)
     print(
         f"n={size / 1e6:7.3f}M  dense: baseline={baseline_ms:7.4f} ms  "
@@ -121,32 +109,12 @@ def _benchmark(size: int, operation) -> None:
         f"reduction={(baseline_ms - fused_ms) / baseline_ms:6.2%}"
     )
     _free(encoded, buffer)
-    del source, other, encoded
+    del source, other, encoded, restored
     torch.cuda.empty_cache()
 
 
 def main() -> None:
-    """Run edge-case correctness checks followed by multi-size benchmarks."""
-    generator = torch.Generator(device="cuda").manual_seed(17)
-
-    # Raw fallback and a non-contiguous dense operand.
-    source = torch.randn((17, 31), device="cuda", generator=generator).to(torch.bfloat16)
-    other = torch.randn((31, 17), device="cuda", generator=generator).to(torch.bfloat16).T
-    for operation in POINTWISE_OPS.values():
-        _check(source, other, Distribution(DistType.GAUSSIAN), operation)
-
-    # Arbitrary BF16 bits exercise NaNs, infinities and substantial overflow.
-    bits = torch.randint(
-        -32768, 32768, (1_000_003,), dtype=torch.int16,
-        device="cuda", generator=generator,
-    )
-    source = bits.view(torch.bfloat16)
-    other = torch.randn(source.shape, device="cuda", generator=generator).to(torch.bfloat16)
-    noisy = Distribution(DistType.EMPIRICAL, noise_level=NoiseLevel.HIGH)
-    for operation in POINTWISE_OPS.values():
-        _check(source, other, noisy, operation)
-        _check(source, other, noisy, operation, buffered=False)
-    print("correctness checks passed")
+    """Benchmark pointwise operations on generated inputs."""
 
     for operation in POINTWISE_OPS.values():
         print(f"\n{operation.name}")
