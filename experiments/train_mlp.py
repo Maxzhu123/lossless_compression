@@ -10,8 +10,8 @@ from compress.tensor_buffer import TensorBuffer, visualize_buffer
 from sparse_utils import MyCompressed, SparseSGDM
 from mlps import FFN
 
-COMPRESSED = False
-BUFFER = False
+COMPRESSED = True
+BUFFER = True
 c_print(f"Compressed: {COMPRESSED}", color="bright_blue")
 c_print(f"Buffer: {BUFFER}", color="bright_blue")
 
