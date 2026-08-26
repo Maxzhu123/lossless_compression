@@ -326,9 +326,11 @@ def _compact_extra_impl(
         fallback_offset = tl.load(fallback_offsets + tile, mask=valid, other=0).to(tl.int32)
     block = stream // N_LANES
     lane = stream - block * N_LANES
-    for step in tl.range(0, N_STEPS):
+    tail_steps = N_STEPS - start
+    max_tail = tl.max(tl.where(valid, tail_steps, 0), axis=0)
+    for step in tl.range(0, max_tail):
         source_offset = block * BLOCK + (step + start) * N_LANES + lane
-        active = valid & (step < (N_STEPS - start)) & (source_offset < n_elements)
+        active = valid & (step < tail_steps) & (source_offset < n_elements)
         n_tile = block // K_TILE_BLOCKS
         k_tile = block % K_TILE_BLOCKS
         logical_n = n_tile * N_STEPS + step + start

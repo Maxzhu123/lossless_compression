@@ -216,16 +216,19 @@ def _pointwise_compressed_dense_fallback_impl(
     fallback_offset = fallback_offset.to(tl.int32)
     block = stream // N_LANES
     lane = stream - block * N_LANES
-    for step in tl.range(0, N_STEPS):
+    tail_steps = N_STEPS - start
+    max_tail = tl.max(tl.where(valid, tail_steps, 0), axis=0)
+    for tail_step in tl.range(0, max_tail):
+        step = start + tail_step
         offset, logical_offset, storage_valid, logical_valid = _pointwise_location(
             block, step, lane, n_elements, MATRIX_N, MATRIX_K,
             MATRIX_NUMEL, K_TILE_BLOCKS,
             BLOCK, N_LANES, N_STEPS,
         )
-        active = valid & (step >= start) & storage_valid
+        active = valid & (tail_step < tail_steps) & storage_valid
         logical_active = active & logical_valid
         exponent = tl.load(
-            fallback_buffer + fallback_base + fallback_offset + step - start,
+            fallback_buffer + fallback_base + fallback_offset + tail_step,
             mask=active, other=0,
         ).to(tl.int32)
         sm = tl.load(sign_mantissa + offset, mask=active, other=0)

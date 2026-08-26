@@ -61,7 +61,7 @@ def _compare(functions: tuple) -> list[float]:
 
 
 @torch.no_grad()
-def _benchmark(n: int) -> None:
+def _benchmark(n: int) -> tuple[float, float]:
     """Benchmark one n @ 4n dense @ compressed matmul."""
     k = 4 * n
     generator = torch.Generator(device="cuda").manual_seed(n)
@@ -98,12 +98,20 @@ def _benchmark(n: int) -> None:
     buffer.reset()
     del activations, weight, restored, encoded
     torch.cuda.empty_cache()
+    return dense_ms, compressed_ms
 
 
 def main() -> None:
     """Benchmark dense @ compressed matmul for several n @ 4n sizes."""
+    total_baseline_ms = 0.0
+    total_time_ms = 0.0
     for n in SIZES:
-        _benchmark(n)
+        dense_ms, compressed_ms = _benchmark(n)
+        total_baseline_ms += dense_ms
+        total_time_ms += compressed_ms
+
+    print(f"Total baseline time: {total_baseline_ms:.5g}ms")
+    print(f"Total time: {total_time_ms:.5g}ms")
 
 
 if __name__ == "__main__":

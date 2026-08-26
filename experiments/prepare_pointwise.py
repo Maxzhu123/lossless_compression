@@ -65,7 +65,7 @@ def _compare(baseline, fused, iterations, release=None):
 
 
 @torch.no_grad()
-def _benchmark(size: int, operation) -> None:
+def _benchmark(size: int, operation) -> tuple[float, float]:
     """Benchmark dense and compressed output modes for one size and operation."""
     source = torch.randn(size, device="cuda").to(torch.bfloat16)
     other = torch.randn_like(source)
@@ -88,6 +88,8 @@ def _benchmark(size: int, operation) -> None:
     fused = lambda: pointwise_compressed_dense(encoded, other, operation)
     iterations = 20
     baseline_ms, fused_ms = _compare(baseline, fused, iterations)
+    total_baseline_ms = baseline_ms
+    total_fused_ms = fused_ms
     print(
         f"n={size / 1e6:7.3f}M  dense: baseline={baseline_ms:7.4f} ms  "
         f"fused={fused_ms:7.4f} ms  speedup={baseline_ms / fused_ms:5.3f}x  "
@@ -103,6 +105,8 @@ def _benchmark(size: int, operation) -> None:
     baseline_ms, fused_ms = _compare(
         dense_then_compress, compressed, iterations, release,
     )
+    total_baseline_ms += baseline_ms
+    total_fused_ms += fused_ms
     print(
         f"{'':12s} compressed: baseline={baseline_ms:7.4f} ms  "
         f"fused={fused_ms:7.4f} ms  speedup={baseline_ms / fused_ms:5.3f}x  "
@@ -111,15 +115,22 @@ def _benchmark(size: int, operation) -> None:
     _free(encoded, buffer)
     del source, other, encoded, restored
     torch.cuda.empty_cache()
+    return total_baseline_ms, total_fused_ms
 
 
 def main() -> None:
     """Benchmark pointwise operations on generated inputs."""
-
+    total_baseline_ms = 0.0
+    total_time_ms = 0.0
     for operation in POINTWISE_OPS.values():
         print(f"\n{operation.name}")
         for size in (1_000_003, 10_000_003, 50_000_003, 200_000_003):
-            _benchmark(size, operation)
+            baseline_ms, fused_ms = _benchmark(size, operation)
+            total_baseline_ms += baseline_ms
+            total_time_ms += fused_ms
+
+    print(f"Total baseline time: {total_baseline_ms:.5g}ms")
+    print(f"Total time: {total_time_ms:.5g}ms")
 
 
 if __name__ == "__main__":
