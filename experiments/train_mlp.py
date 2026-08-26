@@ -24,7 +24,6 @@ class FFNLayer(nn.Module):
         nn.init.xavier_uniform_(W1, generator=G)
         nn.init.xavier_uniform_(W2, generator=G)
 
-        print(f'{W1.std() = }, {W2.std() = }')
         if COMPRESSED:
             self.W1 = MyCompressed(W1, buffer=buffer)
             self.W2 = MyCompressed(W2, buffer=buffer)

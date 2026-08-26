@@ -242,20 +242,21 @@ def get_distribution_tables(dist: Distribution):
     """Return cached tables for a distribution, independent of noise level."""
     if not isinstance(dist, Distribution):
         raise TypeError("distribution must be a Distribution instance")
-    return _get_distribution_tables(dist.family, dist.param)
+    return _get_distribution_tables(dist.family, dist.param, dist.mean)
 
 
 @lru_cache(maxsize=None)
 def _get_distribution_tables(
     family: DistType,
     param: float,
+    mean: float,
 ):
     if family == DistType.EMPIRICAL:
-        probabilities = empirical_probabilities(param)
+        probabilities = empirical_probabilities(param, mean)
     elif family == DistType.GAUSSIAN:
-        probabilities = gaussian_probabilities(param)
+        probabilities = gaussian_probabilities(param, mean)
     elif family == DistType.LAPLACE:
-        probabilities = laplace_probabilities(param)
+        probabilities = laplace_probabilities(param, mean)
     else:  # pragma: no cover - guarded by Distribution validation
         raise ValueError(f"unknown distribution family: {family!r}")
 

@@ -11,10 +11,12 @@ from .tensor_buffer import TensorBuffer
 
 def compress(
     data: torch.Tensor,
-    distribution: Distribution = Distribution(),
+    distribution: Distribution | None = None,
     buffer: TensorBuffer | None = None,
 ) -> CompressedTensor:
     """Losslessly encode the exponent byte of a CUDA bfloat16 tensor."""
+    if distribution is None:
+        distribution = Distribution()
     return compress_dense(data, distribution, buffer)
 
 

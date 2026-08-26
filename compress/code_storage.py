@@ -1,4 +1,4 @@
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from enum import Enum, auto
 import math
 from typing import TYPE_CHECKING
@@ -26,18 +26,20 @@ class StorageLayout(Enum):
     BLOCKED = auto()
 
 
-@dataclass(frozen=True)
+@dataclass
 class Distribution:
     """Codec distribution selector.
 
     ``family`` is a :class:`DistType` enum member. ``param`` is the source
     value scale: empirical-distribution scale, Gaussian standard deviation, or
-    Laplace scale. Parameters are rounded to the nearest 0.25 so the table
-    cache stays small.
+    Laplace scale, and defaults to 1. ``mean`` is the source distribution's
+    location and defaults to 0. Both parameters are rounded to the nearest
+    0.25 so the table cache stays small.
     """
 
     family: DistType = DistType.EMPIRICAL
-    param: float | None = None
+    param: float = 1.0
+    mean: float = 0.0
     noise_level: NoiseLevel = NoiseLevel.CLEAN
 
     def __post_init__(self):
@@ -45,26 +47,22 @@ class Distribution:
             raise TypeError("family must be a DistType member")
         if not isinstance(self.noise_level, NoiseLevel):
             raise TypeError("noise_level must be a NoiseLevel member")
-        if self.param is None:
-            default = (
-                0.5
-                if self.family == DistType.EMPIRICAL
-                else 2.0
-                if self.family == DistType.GAUSSIAN
-                else 1.5
-            )
-            object.__setattr__(self, "param", default)
-        else:
-            param = float(self.param)
-            if param <= 0.0:
-                raise ValueError("distribution parameter must be positive")
-            param = max(0.25, round(param / 0.25) * 0.25)
-            object.__setattr__(self, "param", float(param))
+        param = float(self.param)
+        mean = float(self.mean)
+        if not math.isfinite(param) or param <= 0.0:
+            raise ValueError("distribution parameter must be finite and positive")
+        if not math.isfinite(mean):
+            raise ValueError("distribution mean must be finite")
+        self.param = float(max(0.25, round(param / 0.25) * 0.25))
+        self.mean = float(round(mean / 0.25) * 0.25)
 
 
     def __str__(self) -> str:
         label = "std" if self.family == DistType.GAUSSIAN else "scale"
-        return f"{self.family.value}/{label}={self.param}/{self.noise_level.name.lower()}"
+        return (
+            f"{self.family.value}/{label}={self.param}/mean={self.mean}/"
+            f"{self.noise_level.name.lower()}"
+        )
 
 
 @dataclass(frozen=True)
@@ -81,7 +79,9 @@ class CompressedTensor:
     fallback_base: int = 0  # Byte offset of this tensor's region in fallback_buffer.
     fallback_count: torch.Tensor | None = None  # Device scalar with the number of fallback streams.
     fallback_used: torch.Tensor | None = None  # Device scalar with actual fallback bytes used.
-    distribution: Distribution = Distribution(DistType.EMPIRICAL)  # Huffman table selector.
+    distribution: Distribution = field(
+        default_factory=Distribution
+    )  # Huffman table selector.
     center: torch.Tensor | int = 0  # CUDA center scalar used by encode/decode.
     shape: tuple[int, ...] = ()  # Original tensor shape.
     layout: StorageLayout = StorageLayout.RAW

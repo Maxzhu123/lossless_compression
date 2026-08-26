@@ -23,7 +23,7 @@ class MyCompressed(Tensor):
         )
 
     def __init__(self, values, buffer: TensorBuffer):
-        dist = Distribution(DistType.GAUSSIAN, 0.25)
+        dist = Distribution(DistType.GAUSSIAN, 0.5)
         self.x: CompressedTensor = compress(values, buffer=buffer, distribution=dist)
 
     @classmethod

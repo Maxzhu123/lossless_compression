@@ -107,7 +107,7 @@ CASES = [
     ("gaussian/gaussian/clean", DIST_GAUSSIAN_CLEAN, _bf16_ratio(0.42), 5),
     ("gaussian/empirical/clean", DIST_EMPIRICAL_CLEAN, _bf16_ratio(0.65), 1),
     ("laplace/laplace/clean", DIST_LAPLACE_CLEAN, _bf16_ratio(0.43), 5),
-    ("laplace/gaussian/clean", DIST_GAUSSIAN_CLEAN, _bf16_ratio(0.55), 1),
+    ("laplace/gaussian/clean", DIST_GAUSSIAN_CLEAN, _bf16_ratio(0.65), 1),
     ("shifted_gaussian/gaussian/clean", DIST_GAUSSIAN_CLEAN, _bf16_ratio(0.42), 5),
     ("shifted_gaussian/empirical/clean", DIST_EMPIRICAL_CLEAN, _bf16_ratio(0.65), 1),
     ("localized/gaussian/high", DIST_GAUSSIAN_HIGH, _bf16_ratio(0.83), 5),

@@ -34,14 +34,13 @@ def _estimate_center_kernel(
             exp = ((value >> 7) & 0xFF) - 127
         total += tl.where(mask, exp, 0)
     s = tl.sum(total, axis=0)
-    # Round half away from zero, clamp, and suppress tiny sampling noise.
+    # Round half away from zero and clamp to the exponent range.
     center = tl.where(
         s >= 0,
         (s + SAMPLE_SIZE // 2) // SAMPLE_SIZE,
         -((-s + SAMPLE_SIZE // 2) // SAMPLE_SIZE),
     )
     center = tl.minimum(tl.maximum(center, -128), 127)
-    center = tl.where(tl.abs(center) <= 1, 0, center)
     tl.store(center_out, center)
 
 
