@@ -20,7 +20,7 @@ def decode_symbol(
     RARE_LENGTH: tl.constexpr,
 ):
     """Decode one Huffman symbol and return its exponent and consumed bit count."""
-    first = tl.load(decode_table + (current & FIRST_MASK).to(tl.int32))
+    first = tl.load(decode_table + (current & FIRST_MASK).to(tl.int32), cache_modifier='.ca')
     first_length = first & 255
     continuation = first_length == 0
     length = tl.where(continuation, RARE_LENGTH + 8, first_length)

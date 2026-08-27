@@ -23,7 +23,7 @@ def _store_result(
     """Round an operation result to BF16 and emit dense or component output."""
     result = result.to(tl.bfloat16)
     if OUTPUT_POLICY == DENSE_OUTPUT:
-        tl.store(output + logical_offset, result, mask=logical_mask)
+        tl.store(output + logical_offset, result, mask=logical_mask, cache_modifier='.cs')
     else:
         result = tl.where(logical_mask, result, 0.0).to(tl.bfloat16)
         bits = result.to(tl.int16, bitcast=True).to(tl.int32)
@@ -106,11 +106,11 @@ def _pointwise_compressed_dense_impl(
                 current, decode_table, center_value,
                 FIRST_MASK, RARE_LENGTH,
             )
-            sm = tl.load(sign_mantissa + storage_offset)
+            sm = tl.load(sign_mantissa + storage_offset, cache_modifier='.cg')
             left = pack_bf16(value, sm).to(tl.int16).to(
                 tl.bfloat16, bitcast=True
             )
-            right = tl.load(other + storage_offset)
+            right = tl.load(other + storage_offset, cache_modifier='.cg')
             _store_result(
                 OP(left, right), output, auxiliary, storage_offset,
                 storage_offset, true_mask, true_mask, OUTPUT_POLICY,
@@ -122,11 +122,11 @@ def _pointwise_compressed_dense_impl(
                 current1, decode_table, center_value,
                 FIRST_MASK, RARE_LENGTH,
             )
-            sm1 = tl.load(sign_mantissa + storage_offset + N_LANES)
+            sm1 = tl.load(sign_mantissa + storage_offset + N_LANES, cache_modifier='.cg')
             left1 = pack_bf16(value1, sm1).to(tl.int16).to(
                 tl.bfloat16, bitcast=True
             )
-            right1 = tl.load(other + storage_offset + N_LANES)
+            right1 = tl.load(other + storage_offset + N_LANES, cache_modifier='.cg')
             _store_result(
                 OP(left1, right1), output, auxiliary,
                 storage_offset + N_LANES, storage_offset + N_LANES,
@@ -156,11 +156,11 @@ def _pointwise_compressed_dense_impl(
                 window >> shift, decode_table, center_value,
                 FIRST_MASK, RARE_LENGTH,
             )
-            sm = tl.load(sign_mantissa + offset, mask=storage_valid, other=0)
+            sm = tl.load(sign_mantissa + offset, mask=storage_valid, other=0, cache_modifier='.cg')
             left = pack_bf16(value, sm).to(tl.int16).to(
                 tl.bfloat16, bitcast=True
             )
-            right = tl.load(other + logical_offset, mask=valid, other=0.0)
+            right = tl.load(other + logical_offset, mask=valid, other=0.0, cache_modifier='.cg')
             _store_result(
                 OP(left, right), output, auxiliary, offset, logical_offset,
                 valid, storage_valid, OUTPUT_POLICY,
@@ -176,11 +176,11 @@ def _pointwise_compressed_dense_impl(
                 window >> shift1, decode_table, center_value,
                 FIRST_MASK, RARE_LENGTH,
             )
-            sm1 = tl.load(sign_mantissa + offset1, mask=storage_valid1, other=0)
+            sm1 = tl.load(sign_mantissa + offset1, mask=storage_valid1, other=0, cache_modifier='.cg')
             left1 = pack_bf16(value1, sm1).to(tl.int16).to(
                 tl.bfloat16, bitcast=True
             )
-            right1 = tl.load(other + logical_offset1, mask=valid1, other=0.0)
+            right1 = tl.load(other + logical_offset1, mask=valid1, other=0.0, cache_modifier='.cg')
             _store_result(
                 OP(left1, right1), output, auxiliary, offset1, logical_offset1,
                 valid1, storage_valid1, OUTPUT_POLICY,
@@ -280,11 +280,11 @@ def _pointwise_compressed_dense_fallback_impl(
             fallback_buffer + fallback_base + fallback_offset + tail_step,
             mask=active, other=0,
         ).to(tl.int32)
-        sm = tl.load(sign_mantissa + offset, mask=active, other=0)
+        sm = tl.load(sign_mantissa + offset, mask=active, other=0, cache_modifier='.cg')
         left = pack_bf16(exponent, sm).to(tl.int16).to(
             tl.bfloat16, bitcast=True
         )
-        right = tl.load(other + logical_offset, mask=logical_active, other=0.0)
+        right = tl.load(other + logical_offset, mask=logical_active, other=0.0, cache_modifier='.cg')
         _store_result(
             OP(left, right), output, auxiliary, offset, logical_offset,
             logical_active, active, OUTPUT_POLICY,
