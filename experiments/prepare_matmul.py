@@ -1,5 +1,4 @@
 """Correctness checks and benchmarks for dense @ compressed matmul."""
-
 import statistics
 
 import torch
@@ -12,10 +11,10 @@ from compress.tensor_buffer import TensorBuffer
 
 # Benchmark matrix sizes as (n, 4n): the dense activation is [n, 4n] and the
 # compressed weight is [4n, n], so the result is [n, n].
-SIZES = [512, 1024, 2048, 4096]
+SIZES = [512, 1024, 1500, 2048, 3000, 4000, 4096]
 WARMUP = 3
-ITERATIONS = 20
-TRIALS = 5
+ITERATIONS = 30
+TRIALS = 4
 
 
 def _buffer(weight_bytes: int) -> TensorBuffer:
@@ -110,8 +109,8 @@ def main() -> None:
         total_baseline_ms += dense_ms
         total_time_ms += compressed_ms
 
+    print(f"Total dense time: {total_baseline_ms:.5g}ms")
     print(f"Total compressed time: {total_time_ms:.5g}ms")
-    print(f"Total baseline (dense) time: {total_baseline_ms:.5g}ms")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,9 @@ from compress.ops.registry import POINTWISE_OPS
 from compress.tensor_buffer import Allocation, TensorBuffer
 
 
+SIZES = [512, 1024, 2048, 4096]
+
+
 def _buffer(size: int) -> TensorBuffer:
     """Create an aligned fallback arena with room for one operation result."""
     capacity = (size + 64 * 1024 * 1024 + 15) // 16 * 16
@@ -65,12 +68,13 @@ def _compare(first, second, iterations, release=None):
 
 
 @torch.no_grad()
-def _benchmark(size: int, operation) -> tuple[float, float]:
-    """Benchmark dense, unfused, and fused variants for one size and operation."""
-    source = torch.randn(size, device="cuda").to(torch.bfloat16)
+def _benchmark(n: int, operation) -> tuple[float, float]:
+    """Benchmark dense, unfused, and fused variants for one matrix size."""
+    shape = (n, 4 * n)
+    source = torch.randn(shape, device="cuda").to(torch.bfloat16)
     other = torch.randn_like(source)
-    buffer = _buffer(size)
-    output_buffer = _buffer(size)
+    buffer = _buffer(source.numel())
+    output_buffer = _buffer(source.numel())
     encoded = compress(source, Distribution(DistType.GAUSSIAN), buffer)
     restored = decompress(encoded)
     expected = operation.torch_fn(restored, other)
@@ -86,10 +90,10 @@ def _benchmark(size: int, operation) -> tuple[float, float]:
 
     dense = lambda: operation.torch_fn(decompress(encoded), other)
     fused = lambda: pointwise_compressed_dense(encoded, other, operation)
-    iterations = 20
+    iterations = 100
     dense_ms, fused_dense_ms = _compare(dense, fused, iterations)
     print(
-        f"n={size / 1e6:7.3f}M  dense_output: dense={dense_ms:7.4f} ms  "
+        f"shape={shape!s:>14s}  dense_output: dense={dense_ms:7.4f} ms  "
         f"fused={fused_dense_ms:7.4f} ms  reduction={(dense_ms - fused_dense_ms) / dense_ms:6.2%}"
     )
 
@@ -116,8 +120,8 @@ def main() -> None:
     total_fused_compressed_ms = 0.0
     for operation in POINTWISE_OPS.values():
         print(f"\n{operation.name}")
-        for size in (1_000_003, 10_000_003, 50_000_003, 200_000_003):
-            fused_dense_ms, fused_compressed_ms = _benchmark(size, operation)
+        for n in SIZES:
+            fused_dense_ms, fused_compressed_ms = _benchmark(n, operation)
             total_fused_dense_ms += fused_dense_ms
             total_fused_compressed_ms += fused_compressed_ms
 

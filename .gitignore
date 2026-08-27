@@ -21,3 +21,4 @@ nanogpt/data/fineweb10B/
 *.csv
 *.txt
 /program.md
+/.start
