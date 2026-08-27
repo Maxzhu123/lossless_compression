@@ -51,22 +51,22 @@ def _time(function, iterations: int, release=None) -> float:
     return start.elapsed_time(end) / iterations
 
 
-def _compare(baseline, fused, iterations, release=None):
-    """Measure baseline and fused paths in alternating order over three trials."""
-    baseline_times, fused_times = [], []
+def _compare(first, second, iterations, release=None):
+    """Measure two variants in alternating order over three trials."""
+    first_times, second_times = [], []
     for trial in range(3):
-        first, second = (baseline, fused) if trial % 2 == 0 else (fused, baseline)
-        first_time = _time(first, iterations, release)
-        second_time = _time(second, iterations, release)
-        target = (baseline_times, fused_times) if trial % 2 == 0 else (fused_times, baseline_times)
-        target[0].append(first_time)
-        target[1].append(second_time)
-    return statistics.median(baseline_times), statistics.median(fused_times)
+        ordered = (first, second) if trial % 2 == 0 else (second, first)
+        first_ms = _time(ordered[0], iterations, release)
+        second_ms = _time(ordered[1], iterations, release)
+        target = (first_times, second_times) if trial % 2 == 0 else (second_times, first_times)
+        target[0].append(first_ms)
+        target[1].append(second_ms)
+    return statistics.median(first_times), statistics.median(second_times)
 
 
 @torch.no_grad()
 def _benchmark(size: int, operation) -> tuple[float, float]:
-    """Benchmark dense and compressed output modes for one size and operation."""
+    """Benchmark dense, unfused, and fused variants for one size and operation."""
     source = torch.randn(size, device="cuda").to(torch.bfloat16)
     other = torch.randn_like(source)
     buffer = _buffer(size)
@@ -84,53 +84,45 @@ def _benchmark(size: int, operation) -> tuple[float, float]:
     _assert_bits_equal(expected, decompress(compressed_result))
     _free(compressed_result, output_buffer)
 
-    baseline = lambda: operation.torch_fn(decompress(encoded), other)
+    dense = lambda: operation.torch_fn(decompress(encoded), other)
     fused = lambda: pointwise_compressed_dense(encoded, other, operation)
     iterations = 20
-    baseline_ms, fused_ms = _compare(baseline, fused, iterations)
-    total_baseline_ms = baseline_ms
-    total_fused_ms = fused_ms
+    dense_ms, fused_dense_ms = _compare(dense, fused, iterations)
     print(
-        f"n={size / 1e6:7.3f}M  dense: baseline={baseline_ms:7.4f} ms  "
-        f"fused={fused_ms:7.4f} ms  speedup={baseline_ms / fused_ms:5.3f}x  "
-        f"reduction={(baseline_ms - fused_ms) / baseline_ms:6.2%}"
+        f"n={size / 1e6:7.3f}M  dense_output: dense={dense_ms:7.4f} ms  "
+        f"fused={fused_dense_ms:7.4f} ms  reduction={(dense_ms - fused_dense_ms) / dense_ms:6.2%}"
     )
 
-    dense_then_compress = lambda: compress(fused(), encoded.distribution, output_buffer)
-    compressed = lambda: pointwise_compressed_dense(
+    unfused = lambda: compress(fused(), encoded.distribution, output_buffer)
+    fused_compressed = lambda: pointwise_compressed_dense(
         encoded, other, operation,
         dense_output=False, buffer=output_buffer,
     )
     release = lambda value: _free(value, output_buffer)
-    baseline_ms, fused_ms = _compare(
-        dense_then_compress, compressed, iterations, release,
-    )
-    total_baseline_ms += baseline_ms
-    total_fused_ms += fused_ms
+    unfused_ms, fused_compressed_ms = _compare(unfused, fused_compressed, iterations, release)
     print(
-        f"{'':12s} compressed: baseline={baseline_ms:7.4f} ms  "
-        f"fused={fused_ms:7.4f} ms  speedup={baseline_ms / fused_ms:5.3f}x  "
-        f"reduction={(baseline_ms - fused_ms) / baseline_ms:6.2%}"
+        f"{'':12s} compressed_output: unfused={unfused_ms:7.4f} ms  "
+        f"fused={fused_compressed_ms:7.4f} ms  reduction={(unfused_ms - fused_compressed_ms) / unfused_ms:6.2%}"
     )
     _free(encoded, buffer)
     del source, other, encoded, restored
     torch.cuda.empty_cache()
-    return total_baseline_ms, total_fused_ms
+    return fused_dense_ms, fused_compressed_ms
 
 
 def main() -> None:
     """Benchmark pointwise operations on generated inputs."""
-    total_baseline_ms = 0.0
-    total_time_ms = 0.0
+    total_fused_dense_ms = 0.0
+    total_fused_compressed_ms = 0.0
     for operation in POINTWISE_OPS.values():
         print(f"\n{operation.name}")
         for size in (1_000_003, 10_000_003, 50_000_003, 200_000_003):
-            baseline_ms, fused_ms = _benchmark(size, operation)
-            total_baseline_ms += baseline_ms
-            total_time_ms += fused_ms
+            fused_dense_ms, fused_compressed_ms = _benchmark(size, operation)
+            total_fused_dense_ms += fused_dense_ms
+            total_fused_compressed_ms += fused_compressed_ms
 
-    print(f"Total baseline time: {total_baseline_ms:.5g}ms")
-    print(f"Total time: {total_time_ms:.5g}ms")
+    print(f"Total fused dense time: {total_fused_dense_ms:.5g}ms")
+    print(f"Total fused compressed time: {total_fused_compressed_ms:.5g}ms")
 
 
 if __name__ == "__main__":
