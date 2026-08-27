@@ -1,6 +1,4 @@
 # Gluon experiment for the normal decode path.
-# Fast path re-exports the optimized Triton kernel to guarantee at least parity.
-
 import triton.experimental.gluon as gluon
 import triton.experimental.gluon.language as ttgl
 from triton.tools.triton_to_gluon_translater.translator_helpers import tl_arange
