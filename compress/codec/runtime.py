@@ -21,14 +21,10 @@ from ..trition_kernels import (
     _scatter_blocked_fallback_kernel,
 )
 # Gluon normal decode path (split from pointwise path, see compress/kernels/pointwise.py)
-# gluon_decode_normal re-exports the optimized Triton kernel for at least parity;
-# _gluon_decode_experimental is the pure Gluon version for further tuning.
-try:
-    from ..kernels.decode_gluon import gluon_decode_normal as _decode_matrix_gluon_kernel
-    _has_gluon = True
-except Exception:
-    _decode_matrix_gluon_kernel = None
-    _has_gluon = False
+# Experimental: always use pure Gluon kernel _gluon_decode_experimental.
+from ..kernels.decode_gluon import _gluon_decode_experimental as _decode_matrix_gluon_kernel
+_has_gluon = _decode_matrix_gluon_kernel is not None
+assert _has_gluon and _decode_matrix_gluon_kernel is not None, "_gluon_decode_experimental must be available"
 
 
 BLOCK_SIZE = 65536              # CLEAN block size; MEDIUM/HIGH use half.
@@ -333,27 +329,16 @@ def decode_matrix_dense(data: CompressedTensor) -> torch.Tensor:
     block_size, lanes, steps, fixed_words = geometry(data.distribution)
     streams = n_tiles * k_tiles * lanes
     output = torch.empty(logical_numel, dtype=torch.int16, device=data.data.device)
-    # Normal vs pointwise split: pointwise uses kernels/pointwise.py, normal uses Gluon here
-    if _has_gluon and _decode_matrix_gluon_kernel is not None:
-        _decode_matrix_gluon_kernel[(n_tiles * k_tiles,)](
-            data.data, data.sign_mantissa, output, decode_table,
-            data.size, streams, data.center,
-            MATRIX_N=layout_n, MATRIX_K=layout_k,
-            MATRIX_NUMEL=logical_numel, K_TILE_BLOCKS=k_tiles,
-            FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length,
-            BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
-            FIXED_WORDS=fixed_words,
-        )
-    else:
-        _decode_matrix_kernel[(n_tiles * k_tiles,)](
-            data.data, data.sign_mantissa, output, decode_table,
-            data.size, streams, data.center,
-            MATRIX_N=layout_n, MATRIX_K=layout_k,
-            MATRIX_NUMEL=logical_numel, K_TILE_BLOCKS=k_tiles,
-            FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length,
-            BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
-            FIXED_WORDS=fixed_words,
-        )
+    # Always use Gluon experimental kernel for decode
+    _decode_matrix_gluon_kernel[(n_tiles * k_tiles,)](
+        data.data, data.sign_mantissa, output, decode_table,
+        data.size, streams, data.center,
+        MATRIX_N=layout_n, MATRIX_K=layout_k,
+        MATRIX_NUMEL=logical_numel, K_TILE_BLOCKS=k_tiles,
+        FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length,
+        BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
+        FIXED_WORDS=fixed_words,
+    )
     scatter_meta = dict(
         MATRIX_N=layout_n, MATRIX_K=layout_k,
         MATRIX_NUMEL=logical_numel, K_TILE_BLOCKS=k_tiles,
