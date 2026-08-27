@@ -20,13 +20,6 @@ from ..trition_kernels import (
     _estimate_center_kernel,
     _scatter_blocked_fallback_kernel,
 )
-# Gluon normal decode path (split from pointwise path, see compress/kernels/pointwise.py)
-# Experimental: always use pure Gluon kernel _gluon_decode_experimental.
-from ..kernels.decode_gluon import _gluon_decode_experimental as _decode_matrix_gluon_kernel
-_has_gluon = _decode_matrix_gluon_kernel is not None
-assert _has_gluon and _decode_matrix_gluon_kernel is not None, "_gluon_decode_experimental must be available"
-
-
 BLOCK_SIZE = 65536              # CLEAN block size; MEDIUM/HIGH use half.
 LANES = 256                     # Parallel streams in every block.
 LANE_BITS = 800                 # Storage size per stream.
@@ -329,8 +322,8 @@ def decode_matrix_dense(data: CompressedTensor) -> torch.Tensor:
     block_size, lanes, steps, fixed_words = geometry(data.distribution)
     streams = n_tiles * k_tiles * lanes
     output = torch.empty(logical_numel, dtype=torch.int16, device=data.data.device)
-    # Always use Gluon experimental kernel for decode
-    _decode_matrix_gluon_kernel[(n_tiles * k_tiles,)](
+    # Use the optimized normal-Triton decode kernel (no Gluon needed).
+    _decode_matrix_kernel[(n_tiles * k_tiles,)](
         data.data, data.sign_mantissa, output, decode_table,
         data.size, streams, data.center,
         MATRIX_N=layout_n, MATRIX_K=layout_k,
@@ -338,6 +331,7 @@ def decode_matrix_dense(data: CompressedTensor) -> torch.Tensor:
         FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length,
         BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
         FIXED_WORDS=fixed_words,
+        ON_DEMAND=logical_numel > 100_000_000,
     )
     scatter_meta = dict(
         MATRIX_N=layout_n, MATRIX_K=layout_k,

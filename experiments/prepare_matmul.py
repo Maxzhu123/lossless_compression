@@ -15,7 +15,7 @@ from compress.tensor_buffer import TensorBuffer
 SIZES = [512, 1024, 2048, 4096]
 WARMUP = 3
 ITERATIONS = 20
-TRIALS = 3
+TRIALS = 5
 
 
 def _buffer(weight_bytes: int) -> TensorBuffer:
@@ -110,8 +110,8 @@ def main() -> None:
         total_baseline_ms += dense_ms
         total_time_ms += compressed_ms
 
-    print(f"Total baseline time: {total_baseline_ms:.5g}ms")
-    print(f"Total time: {total_time_ms:.5g}ms")
+    print(f"Total compressed time: {total_time_ms:.5g}ms")
+    print(f"Total baseline (dense) time: {total_baseline_ms:.5g}ms")
 
 
 if __name__ == "__main__":

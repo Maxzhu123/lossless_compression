@@ -97,57 +97,106 @@ def _pointwise_compressed_dense_impl(
     window |= word1.to(tl.uint32).to(tl.uint64) << 32
     center_value = tl.load(center).to(tl.int32)
 
-    for step in tl.range(0, N_STEPS, 2):
-        offset, logical_offset, storage_valid, valid = _pointwise_location(
-            block, step, lanes, n_elements, MATRIX_N, MATRIX_K,
-            MATRIX_NUMEL, K_TILE_BLOCKS,
-            BLOCK, N_LANES, N_STEPS,
-        )
-        value, length = decode_symbol(
-            window >> shift, decode_table, center_value,
-            FIRST_MASK, RARE_LENGTH,
-        )
-        sm = tl.load(sign_mantissa + offset, mask=storage_valid, other=0)
-        left = pack_bf16(value, sm).to(tl.int16).to(
-            tl.bfloat16, bitcast=True
-        )
-        right = tl.load(other + logical_offset, mask=valid, other=0.0)
-        _store_result(
-            OP(left, right), output, auxiliary, offset, logical_offset,
-            valid, storage_valid, OUTPUT_POLICY,
-        )
+    if K_TILE_BLOCKS == 1 and MATRIX_K == N_LANES and (block + 1) * BLOCK <= MATRIX_NUMEL:
+        storage_offset = block * BLOCK + lanes
+        true_mask = tl.full((N_LANES,), True, tl.int1)
+        for step in tl.range(0, N_STEPS, 2, flatten=True, warp_specialize=True):
+            current = window >> shift
+            value, length = decode_symbol(
+                current, decode_table, center_value,
+                FIRST_MASK, RARE_LENGTH,
+            )
+            sm = tl.load(sign_mantissa + storage_offset)
+            left = pack_bf16(value, sm).to(tl.int16).to(
+                tl.bfloat16, bitcast=True
+            )
+            right = tl.load(other + storage_offset)
+            _store_result(
+                OP(left, right), output, auxiliary, storage_offset,
+                storage_offset, true_mask, true_mask, OUTPUT_POLICY,
+            )
 
-        shift1 = shift + tl.where(storage_valid, length, 0)
-        offset1, logical_offset1, storage_valid1, valid1 = _pointwise_location(
-            block, step + 1, lanes, n_elements, MATRIX_N, MATRIX_K,
-            MATRIX_NUMEL, K_TILE_BLOCKS,
-            BLOCK, N_LANES, N_STEPS,
-        )
-        value1, length1 = decode_symbol(
-            window >> shift1, decode_table, center_value,
-            FIRST_MASK, RARE_LENGTH,
-        )
-        sm1 = tl.load(sign_mantissa + offset1, mask=storage_valid1, other=0)
-        left1 = pack_bf16(value1, sm1).to(tl.int16).to(
-            tl.bfloat16, bitcast=True
-        )
-        right1 = tl.load(other + logical_offset1, mask=valid1, other=0.0)
-        _store_result(
-            OP(left1, right1), output, auxiliary, offset1, logical_offset1,
-            valid1, storage_valid1, OUTPUT_POLICY,
-        )
+            shift1 = shift + length
+            current1 = window >> shift1
+            value1, length1 = decode_symbol(
+                current1, decode_table, center_value,
+                FIRST_MASK, RARE_LENGTH,
+            )
+            sm1 = tl.load(sign_mantissa + storage_offset + N_LANES)
+            left1 = pack_bf16(value1, sm1).to(tl.int16).to(
+                tl.bfloat16, bitcast=True
+            )
+            right1 = tl.load(other + storage_offset + N_LANES)
+            _store_result(
+                OP(left1, right1), output, auxiliary,
+                storage_offset + N_LANES, storage_offset + N_LANES,
+                true_mask, true_mask, OUTPUT_POLICY,
+            )
 
-        next_shift = shift1 + tl.where(storage_valid1, length1, 0)
-        crosses_word = next_shift >= 32
-        word2 = tl.load(
-            encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams
-            + lane_index,
-            mask=crosses_word, other=0,
-        ).to(tl.uint32).to(tl.uint64)
-        next_window = (window >> 32) | (word2 << 32)
-        window = tl.where(crosses_word, next_window, window)
-        word += crosses_word
-        shift = tl.where(crosses_word, next_shift - 32, next_shift)
+            next_shift = shift1 + length1
+            crosses_word = next_shift >= 32
+            word2 = tl.load(
+                encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams
+                + lane_index,
+                mask=crosses_word, other=0,
+            ).to(tl.uint32).to(tl.uint64)
+            next_window = (window >> 32) | (word2 << 32)
+            window = tl.where(crosses_word, next_window, window)
+            word += crosses_word
+            shift = tl.where(crosses_word, next_shift - 32, next_shift)
+            storage_offset += 2 * N_LANES
+    else:
+        for step in tl.range(0, N_STEPS, 2):
+            offset, logical_offset, storage_valid, valid = _pointwise_location(
+                block, step, lanes, n_elements, MATRIX_N, MATRIX_K,
+                MATRIX_NUMEL, K_TILE_BLOCKS,
+                BLOCK, N_LANES, N_STEPS,
+            )
+            value, length = decode_symbol(
+                window >> shift, decode_table, center_value,
+                FIRST_MASK, RARE_LENGTH,
+            )
+            sm = tl.load(sign_mantissa + offset, mask=storage_valid, other=0)
+            left = pack_bf16(value, sm).to(tl.int16).to(
+                tl.bfloat16, bitcast=True
+            )
+            right = tl.load(other + logical_offset, mask=valid, other=0.0)
+            _store_result(
+                OP(left, right), output, auxiliary, offset, logical_offset,
+                valid, storage_valid, OUTPUT_POLICY,
+            )
+
+            shift1 = shift + tl.where(storage_valid, length, 0)
+            offset1, logical_offset1, storage_valid1, valid1 = _pointwise_location(
+                block, step + 1, lanes, n_elements, MATRIX_N, MATRIX_K,
+                MATRIX_NUMEL, K_TILE_BLOCKS,
+                BLOCK, N_LANES, N_STEPS,
+            )
+            value1, length1 = decode_symbol(
+                window >> shift1, decode_table, center_value,
+                FIRST_MASK, RARE_LENGTH,
+            )
+            sm1 = tl.load(sign_mantissa + offset1, mask=storage_valid1, other=0)
+            left1 = pack_bf16(value1, sm1).to(tl.int16).to(
+                tl.bfloat16, bitcast=True
+            )
+            right1 = tl.load(other + logical_offset1, mask=valid1, other=0.0)
+            _store_result(
+                OP(left1, right1), output, auxiliary, offset1, logical_offset1,
+                valid1, storage_valid1, OUTPUT_POLICY,
+            )
+
+            next_shift = shift1 + tl.where(storage_valid1, length1, 0)
+            crosses_word = next_shift >= 32
+            word2 = tl.load(
+                encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams
+                + lane_index,
+                mask=crosses_word, other=0,
+            ).to(tl.uint32).to(tl.uint64)
+            next_window = (window >> 32) | (word2 << 32)
+            window = tl.where(crosses_word, next_window, window)
+            word += crosses_word
+            shift = tl.where(crosses_word, next_shift - 32, next_shift)
 
 
 @triton.autotune(

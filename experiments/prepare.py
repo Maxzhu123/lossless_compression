@@ -12,7 +12,7 @@ from compress.code_storage import CompressedTensor, NoiseLevel, Distribution, Di
 SHAPE_OPTIONS = [50_000_000, 200_000_000]
 SHAPE_SEED = 0
 WARMUP = 3
-ITERS = 15
+ITERS = 50
 
 
 def get_compressed_size(data: CompressedTensor) -> int:
