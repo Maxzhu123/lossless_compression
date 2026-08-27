@@ -444,6 +444,13 @@ def _decode_matrix_kernel(
     center_value = tl.load(center).to(tl.int32)
 
     for step in tl.range(0, N_STEPS, 2):
+        # Prefetch the next 32-bit word before decoding this pair.  This lets
+        # the memory load overlap with symbol decoding and avoids a conditional
+        # load in the dependency chain after the pair is decoded.
+        word2_prefetch = tl.load(
+            encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams
+            + lane_index,
+        ).to(tl.uint32).to(tl.uint64)
         storage_offset = block * BLOCK + step * N_LANES + lanes
         storage_valid = storage_offset < n_elements
         n_tile = block // K_TILE_BLOCKS
@@ -495,13 +502,7 @@ def _decode_matrix_kernel(
 
         next_shift = shift1 + tl.where(storage_valid1, length1, 0)
         crosses_word = next_shift >= 32
-        word2 = tl.load(
-            encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams
-            + lane_index,
-            mask=crosses_word,
-            other=0,
-        ).to(tl.uint32).to(tl.uint64)
-        next_window = (window >> 32) | (word2 << 32)
+        next_window = (window >> 32) | (word2_prefetch << 32)
         window = tl.where(crosses_word, next_window, window)
         word += crosses_word
         shift = tl.where(crosses_word, next_shift - 32, next_shift)
