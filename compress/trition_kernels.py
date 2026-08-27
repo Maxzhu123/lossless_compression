@@ -443,41 +443,43 @@ def _decode_matrix_kernel(
     window = word0 | (word1 << 32)
     center_value = tl.load(center).to(tl.int32)
 
+    # Tile geometry is constant across all steps in this block.
+    n_tile = block // K_TILE_BLOCKS
+    k_tile = block % K_TILE_BLOCKS
+    logical_k = k_tile * N_LANES + lanes
+    storage_offset = block * BLOCK + lanes
+    output_offset = n_tile * N_STEPS * MATRIX_K + logical_k
+    logical_n = n_tile * N_STEPS
+
     for step in tl.range(0, N_STEPS, 2):
         # Prefetch the next 32-bit word before decoding this pair.  This lets
         # the memory load overlap with symbol decoding and avoids a conditional
         # load in the dependency chain after the pair is decoded.
         word2_prefetch = tl.load(
             encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams
-            + lane_index,
+            + lane_index
         ).to(tl.uint32).to(tl.uint64)
-        storage_offset = block * BLOCK + step * N_LANES + lanes
         storage_valid = storage_offset < n_elements
-        n_tile = block // K_TILE_BLOCKS
-        k_tile = block % K_TILE_BLOCKS
-        logical_n = n_tile * N_STEPS + step
-        logical_k = k_tile * N_LANES + lanes
-        output_offset = logical_n * MATRIX_K + logical_k
         valid = (
             (logical_n < MATRIX_N) & (logical_k < MATRIX_K)
             & (output_offset < MATRIX_NUMEL)
         )
 
         current = window >> shift
-        first = tl.load(decode_table + (current & FIRST_MASK).to(tl.int32))
+        first = tl.load(decode_table + (current & FIRST_MASK).to(tl.int32), cache_modifier='.ca')
         first_length = first & 255
         continuation = first_length == 0
         length = tl.where(continuation, RARE_LENGTH + 8, first_length)
         tail = ((current >> RARE_LENGTH) & 255).to(tl.int32)
         tail = tl.where(tail >= 128, tail - 256, tail)
         value = tl.where(continuation, tail, first >> 8) + center_value
-        sm = tl.load(sign_mantissa + storage_offset, mask=storage_valid, other=0)
+        sm = tl.load(sign_mantissa + storage_offset, mask=storage_valid, other=0, cache_modifier='.cg')
         packed = _pack_bf16(value, sm)
-        tl.store(output + output_offset, packed.to(tl.int16), mask=valid)
+        tl.store(output + output_offset, packed.to(tl.int16), mask=valid, cache_modifier='.cs')
 
         shift1 = shift + tl.where(storage_valid, length, 0)
         current1 = window >> shift1
-        first1 = tl.load(decode_table + (current1 & FIRST_MASK).to(tl.int32))
+        first1 = tl.load(decode_table + (current1 & FIRST_MASK).to(tl.int32), cache_modifier='.ca')
         first_length1 = first1 & 255
         continuation1 = first_length1 == 0
         length1 = tl.where(continuation1, RARE_LENGTH + 8, first_length1)
@@ -486,18 +488,19 @@ def _decode_matrix_kernel(
         value1 = tl.where(continuation1, tail1, first1 >> 8) + center_value
         storage_offset1 = storage_offset + N_LANES
         storage_valid1 = storage_offset1 < n_elements
-        output_offset1 = (logical_n + 1) * MATRIX_K + logical_k
+        output_offset1 = output_offset + MATRIX_K
         valid1 = (
             (logical_n + 1 < MATRIX_N) & (logical_k < MATRIX_K)
             & (output_offset1 < MATRIX_NUMEL)
         )
         sm1 = tl.load(
-            sign_mantissa + storage_offset1, mask=storage_valid1, other=0
+            sign_mantissa + storage_offset1, mask=storage_valid1, other=0,
+            cache_modifier='.cg',
         )
         packed1 = _pack_bf16(value1, sm1)
         tl.store(
             output + output_offset1,
-            packed1.to(tl.int16), mask=valid1,
+            packed1.to(tl.int16), mask=valid1, cache_modifier='.cs',
         )
 
         next_shift = shift1 + tl.where(storage_valid1, length1, 0)
@@ -506,6 +509,10 @@ def _decode_matrix_kernel(
         window = tl.where(crosses_word, next_window, window)
         word += crosses_word
         shift = tl.where(crosses_word, next_shift - 32, next_shift)
+
+        storage_offset += 2 * N_LANES
+        output_offset += 2 * MATRIX_K
+        logical_n += 2
 
 
 @triton.autotune(
