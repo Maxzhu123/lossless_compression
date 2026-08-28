@@ -86,9 +86,11 @@ def _pointwise_compressed_dense_impl(
         n_elements: Logical element count; n_streams: fixed-stream count.
         OP: Inlined binary operation; OUTPUT_POLICY: dense or component output.
     """
+    # One program handles one codec block; each lane decodes one fixed stream.
     block = tl.program_id(0)
     lanes = tl.arange(0, N_LANES)
     lane_index = block * N_LANES + lanes
+    # word/shift track the current position inside the 64-bit fixed-payload window.
     word = tl.zeros((N_LANES,), tl.int32)
     shift = tl.zeros((N_LANES,), tl.int32)
     word0 = tl.load(encoded + word * n_streams + lane_index)
@@ -97,10 +99,12 @@ def _pointwise_compressed_dense_impl(
     window |= word1.to(tl.uint32).to(tl.uint64) << 32
     center_value = tl.load(center).to(tl.int32)
 
+    # Fast 1D path: storage offsets are also logical offsets for fully-contained blocks.
     if K_TILE_BLOCKS == 1 and MATRIX_K == N_LANES and (block + 1) * BLOCK <= MATRIX_NUMEL:
         storage_offset = block * BLOCK + lanes
         true_mask = tl.full((N_LANES,), True, tl.int1)
         for step in tl.range(0, N_STEPS, 2, flatten=True, warp_specialize=True):
+            # Decode symbol 0, reconstruct its BF16 value, then apply the op.
             current = window >> shift
             value, length = decode_symbol(
                 current, decode_table, center_value,
@@ -116,6 +120,7 @@ def _pointwise_compressed_dense_impl(
                 storage_offset, true_mask, true_mask, OUTPUT_POLICY,
             )
 
+            # Decode symbol 1 at the next bit offset and process it the same way.
             shift1 = shift + length
             current1 = window >> shift1
             value1, length1 = decode_symbol(
@@ -133,6 +138,7 @@ def _pointwise_compressed_dense_impl(
                 true_mask, true_mask, OUTPUT_POLICY,
             )
 
+            # Advance the 64-bit window and storage offset after processing two symbols.
             next_shift = shift1 + length1
             crosses_word = next_shift >= 32
             word2 = tl.load(
@@ -146,18 +152,21 @@ def _pointwise_compressed_dense_impl(
             shift = tl.where(crosses_word, next_shift - 32, next_shift)
             storage_offset += 2 * N_LANES
     else:
+        # Matrix/general path: convert codec blocks to logical (n, k) coordinates.
         if K_TILE_BLOCKS > 1:
             n_tile = block // K_TILE_BLOCKS
             k_tile = block % K_TILE_BLOCKS
             logical_k = k_tile * N_LANES + lanes
             storage_offset = block * BLOCK + lanes
             logical_n_base = n_tile * N_STEPS
+            # Fully-valid matrix blocks skip the runtime masks in the hot loop.
             full_generic = (
-                ((block + 1) * BLOCK <= MATRIX_NUMEL)
+                ((n_tile + 1) * N_STEPS <= MATRIX_N)
                 & ((k_tile + 1) * N_LANES <= MATRIX_K)
             )
             if full_generic:
                 for step in tl.range(0, N_STEPS, 2, loop_unroll_factor=2):
+                    # Prefetch the next 32-bit Huffman word while decoding the pair.
                     word2_prefetch = tl.load(
                         encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams
                         + lane_index,
@@ -204,6 +213,7 @@ def _pointwise_compressed_dense_impl(
                     shift = tl.where(crosses_word, next_shift - 32, next_shift)
                     storage_offset += 2 * N_LANES
             else:
+                # Masked general path for partial/irregular matrix blocks.
                 for step in tl.range(0, N_STEPS, 2):
                     offset, logical_offset, storage_valid, valid = _pointwise_location(
                         block, step, lanes, n_elements, MATRIX_N, MATRIX_K,

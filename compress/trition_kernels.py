@@ -430,9 +430,11 @@ def _decode_matrix_kernel(
     BLOCK: tl.constexpr,N_LANES: tl.constexpr, N_STEPS: tl.constexpr, FIXED_WORDS: tl.constexpr,
     ON_DEMAND: tl.constexpr,
 ):
+    # One program decodes one codec block; each lane owns one fixed Huffman stream.
     block = tl.program_id(0)
     lanes = tl.arange(0, N_LANES)
     lane_index = block * N_LANES + lanes
+    # word/shift form the current 64-bit decoding window into the fixed payload.
     word = tl.zeros((N_LANES,), tl.int32)
     shift = tl.zeros((N_LANES,), tl.int32)
     word0 = tl.load(
@@ -443,6 +445,8 @@ def _decode_matrix_kernel(
     ).to(tl.uint32).to(tl.uint64)
     window = word0 | (word1 << 32)
     center_value = tl.load(center).to(tl.int32)
+    # Fast path: 1D layout with a single k-tile and a fully-contained block.
+    # Here storage offsets are also the logical offsets, so no matrix mapping is needed.
     if K_TILE_BLOCKS == 1 and MATRIX_K == N_LANES and (block + 1) * BLOCK <= MATRIX_NUMEL:
         storage_offset = block * BLOCK + lanes
         for step in tl.range(0, N_STEPS, 2, flatten=True, warp_specialize=True):
@@ -450,6 +454,7 @@ def _decode_matrix_kernel(
                 word2_prefetch = tl.load(
                     encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams + lane_index
                 ).to(tl.uint32).to(tl.uint64)
+            # Decode symbol 0 from the current prefix bits.
             current = window >> shift
             first = tl.load(
                 decode_table + (current & FIRST_MASK).to(tl.int32),
@@ -468,6 +473,7 @@ def _decode_matrix_kernel(
                 | ((sm.to(tl.int32) & 0x80) << 8)
             )
             tl.store(output + storage_offset, packed.to(tl.int16), cache_modifier='.cs')
+            # Decode symbol 1 at the bit offset after symbol 0.
             shift1 = shift + length
             current1 = window >> shift1
             first1 = tl.load(
@@ -491,6 +497,7 @@ def _decode_matrix_kernel(
                 packed1.to(tl.int16),
                 cache_modifier='.cs',
             )
+            # Advance the 64-bit window when both symbols cross a 32-bit word boundary.
             next_shift = shift1 + length1
             crosses_word = next_shift >= 32
             if ON_DEMAND:
@@ -506,6 +513,7 @@ def _decode_matrix_kernel(
             shift = tl.where(crosses_word, next_shift - 32, next_shift)
             storage_offset += 2 * N_LANES
     else:
+        # General path: map the codec storage block back to logical matrix coordinates.
         if K_TILE_BLOCKS == 1 and MATRIX_K == N_LANES:
             logical_k = lanes
             storage_offset = block * BLOCK + lanes
@@ -528,6 +536,7 @@ def _decode_matrix_kernel(
                 & (logical_k < MATRIX_K)
                 & (output_offset < MATRIX_NUMEL)
             )
+            # Decode symbol 0 from the current prefix bits.
             current = window >> shift
             first = tl.load(
                 decode_table + (current & FIRST_MASK).to(tl.int32),
