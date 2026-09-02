@@ -19,15 +19,9 @@ from ..tensor_buffer import TensorBuffer
 from .registry import PointwiseOp
 
 
-def _launch_pointwise_compressed_dense(
-    data, other, operation, output_policy, alpha=None,
-):
+def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
     """Launch the fixed-stream operation, then correct sparse fallback tails."""
     other = other.contiguous().view(-1)
-    if alpha is None:
-        alpha = torch.tensor([1.0], dtype=torch.float32, device=data.data.device)
-    elif not isinstance(alpha, torch.Tensor):
-        alpha = torch.tensor([float(alpha)], dtype=torch.float32, device=data.data.device)
     _, decode_table, rare_length = get_distribution_tables(data.distribution)
     shifted_decode = torch.empty(
         1 << FIRST_BITS, dtype=torch.int32, device=data.data.device,
@@ -54,7 +48,7 @@ def _launch_pointwise_compressed_dense(
 
     main_args = (
         data.data, data.sign_mantissa, other, output, auxiliary,
-        shifted_decode, data.size, blocks * lanes, data.center, alpha,
+        shifted_decode, data.size, blocks * lanes, data.center,
     )
     main_meta = dict(
         OP=operation.triton_fn, OUTPUT_POLICY=output_policy,
@@ -72,7 +66,7 @@ def _launch_pointwise_compressed_dense(
         fallback_args = (
             metadata, data.fallback_buffer, metadata, data.fallback_buffer, 0,
             metadata, data.fallback_descriptor, data.fallback_count,
-            data.sign_mantissa, other, output, auxiliary, data.size, alpha,
+            data.sign_mantissa, other, output, auxiliary, data.size,
         )
         fallback_meta = dict(
             OP=operation.triton_fn, OUTPUT_POLICY=output_policy,
@@ -90,7 +84,7 @@ def _launch_pointwise_compressed_dense(
             data.offsets, data.fallback_starts, data.fallback_offsets,
             data.fallback_buffer, data.fallback_base, data.offsets,
             data.offsets, data.fallback_count, data.sign_mantissa,
-            other, output, auxiliary, data.size, alpha,
+            other, output, auxiliary, data.size,
         )
         fallback_meta = dict(
             OP=operation.triton_fn, OUTPUT_POLICY=output_policy,
@@ -111,7 +105,6 @@ def pointwise_compressed_dense(
     other: torch.Tensor,
     operation: PointwiseOp,
     *,
-    alpha=None,
     dense_output: bool = True,
     buffer: TensorBuffer | None = None,
     distribution=None,
@@ -136,19 +129,14 @@ def pointwise_compressed_dense(
         )
 
     if data.offsets is None and data.fallback_descriptor is None:
-        if operation.name == "scalar_mul_add":
-            if alpha is None:
-                alpha = 1.0
-            result = operation.torch_fn(data.data.reshape(data.shape), other, alpha)
-        else:
-            result = operation.torch_fn(data.data.reshape(data.shape), other)
+        result = operation.torch_fn(data.data.reshape(data.shape), other)
         if dense_output:
             return result
         return compress_dense(result, result_distribution, buffer)
 
     policy = DENSE_OUTPUT if dense_output else COMPRESSED_OUTPUT
     values, auxiliary = _launch_pointwise_compressed_dense(
-        data, other, operation, policy, alpha=alpha,
+        data, other, operation, policy,
     )
     if dense_output:
         return values.reshape(data.shape)

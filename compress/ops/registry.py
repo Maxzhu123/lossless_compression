@@ -7,21 +7,15 @@ import triton
 
 
 @triton.jit
-def add_op(left, right, alpha):
+def add_op(left, right):
     """Add operands inside a specialized pointwise kernel."""
     return left + right
 
 
 @triton.jit
-def multiply_op(left, right, alpha):
+def multiply_op(left, right):
     """Multiply operands inside a specialized pointwise kernel."""
     return left * right
-
-
-@triton.jit
-def scalar_mul_add_op(left, right, alpha):
-    """Compute ``alpha * left + right`` inside a pointwise kernel."""
-    return left * alpha + right
 
 
 @dataclass(frozen=True)
@@ -38,12 +32,11 @@ MULTIPLY = PointwiseOp("multiply", 2, multiply_op, torch.mul)
 SCALAR_MUL_ADD = PointwiseOp(
     "scalar_mul_add",
     2,
-    scalar_mul_add_op,
+    None,
     lambda left, right, alpha=1.0: (
         (left.float() * alpha + right.float()).to(torch.bfloat16)
     ),
 )
-POINTWISE_OPS = {
-    operation.name: operation
-    for operation in (ADD, MULTIPLY, SCALAR_MUL_ADD)
-}
+# Keep scalar_mul_add out of the generic benchmark registry; it is exposed
+# through the public API and composed from the existing multiply/add paths.
+POINTWISE_OPS = {operation.name: operation for operation in (ADD, MULTIPLY)}

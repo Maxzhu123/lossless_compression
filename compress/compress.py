@@ -5,7 +5,7 @@ import torch
 from .code_storage import CompressedTensor, Distribution, StorageLayout
 from .codec.runtime import compress_dense, decode_matrix_dense
 from .ops.pointwise import pointwise_compressed_dense
-from .ops.registry import ADD, MULTIPLY, SCALAR_MUL_ADD
+from .ops.registry import ADD, MULTIPLY
 from .tensor_buffer import TensorBuffer
 
 
@@ -84,9 +84,19 @@ def compressed_scalar_mul_add(
     buffer: TensorBuffer | None = None,
     distribution=None,
 ) -> torch.Tensor | CompressedTensor:
-    """Compute ``alpha * data + other`` as a fused pointwise operation."""
-    return pointwise_compressed_dense(
-        data, other, SCALAR_MUL_ADD, alpha=alpha,
+    """Compute ``alpha * data + other``.
+
+    This is composed from the existing fused multiply and add paths so the
+    generic pointwise kernels remain unchanged.
+    """
+    alpha_tensor = other.to(torch.bfloat16) * alpha
+    scaled = compressed_multiply(
+        data, alpha_tensor,
+        dense_output=False,
+        buffer=buffer, distribution=distribution,
+    )
+    return compressed_add(
+        scaled, other,
         dense_output=dense_output,
         buffer=buffer, distribution=distribution,
     )
