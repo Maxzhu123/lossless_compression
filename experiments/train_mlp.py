@@ -1,7 +1,5 @@
 import torch
 import torch.nn as nn
-from torch import Tensor
-from torch.autograd import Function
 import torch.nn.functional as F
 import time
 from cprint import c_print
