@@ -89,7 +89,7 @@ def compressed_scalar_mul_add(
     This is composed from the existing fused multiply and add paths so the
     generic pointwise kernels remain unchanged.
     """
-    alpha_tensor = other.to(torch.bfloat16) * alpha
+    alpha_tensor = torch.full_like(other, alpha)
     scaled = compressed_multiply(
         data, alpha_tensor,
         dense_output=False,

@@ -103,6 +103,7 @@ def _pointwise_compressed_dense_impl(
     if K_TILE_BLOCKS == 1 and MATRIX_K == N_LANES and (block + 1) * BLOCK <= MATRIX_NUMEL:
         storage_offset = block * BLOCK + lanes
         true_mask = tl.full((N_LANES,), True, tl.int1)
+        k_tile = 0
         for step in tl.range(0, N_STEPS, 2, flatten=True, warp_specialize=True):
             logical_n0 = block * N_STEPS + step
             logical_n1 = logical_n0 + 1
@@ -162,6 +163,7 @@ def _pointwise_compressed_dense_impl(
         storage_offset = block * BLOCK + lanes
         logical_n_base = 0
         logical_k = lanes
+        k_tile = 0
         if K_TILE_BLOCKS > 1:
             n_tile = block // K_TILE_BLOCKS
             k_tile = block % K_TILE_BLOCKS
