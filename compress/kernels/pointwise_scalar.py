@@ -66,7 +66,7 @@ def _scalar_mul_add_compressed_dense_impl(
             )
             right = tl.load(other + logical_offset0, cache_modifier='.cg')
             _store_result(
-                left * alpha_value + right, output, auxiliary, storage_offset,
+                tl.math.fma(left, alpha_value, right), output, auxiliary, storage_offset,
                 logical_offset0, true_mask, true_mask, OUTPUT_POLICY,
             )
             shift1 = shift + length
@@ -81,7 +81,7 @@ def _scalar_mul_add_compressed_dense_impl(
             )
             right1 = tl.load(other + logical_offset1, cache_modifier='.cg')
             _store_result(
-                left1 * alpha_value + right1, output, auxiliary,
+                tl.math.fma(left1, alpha_value, right1), output, auxiliary,
                 storage_offset + N_LANES, logical_offset1,
                 true_mask, true_mask, OUTPUT_POLICY,
             )
@@ -133,7 +133,7 @@ def _scalar_mul_add_compressed_dense_impl(
                 )
                 right = tl.load(other + logical_offset, cache_modifier='.cg')
                 _store_result(
-                    left * alpha_value + right, output, auxiliary, storage_offset,
+                    tl.math.fma(left, alpha_value, right), output, auxiliary, storage_offset,
                     logical_offset, True, True, OUTPUT_POLICY,
                 )
                 shift1 = shift + length
@@ -151,7 +151,7 @@ def _scalar_mul_add_compressed_dense_impl(
                 )
                 right1 = tl.load(other + logical_offset1, cache_modifier='.cg')
                 _store_result(
-                    left1 * alpha_value + right1, output, auxiliary,
+                    tl.math.fma(left1, alpha_value, right1), output, auxiliary,
                     storage_offset + N_LANES, logical_offset1,
                     True, True, OUTPUT_POLICY,
                 )
@@ -179,7 +179,7 @@ def _scalar_mul_add_compressed_dense_impl(
                 )
                 right = tl.load(other + logical_offset, mask=valid, other=0.0, cache_modifier='.cg')
                 _store_result(
-                    left * alpha_value + right, output, auxiliary, offset, logical_offset,
+                    tl.math.fma(left, alpha_value, right), output, auxiliary, offset, logical_offset,
                     valid, storage_valid, OUTPUT_POLICY,
                 )
                 shift1 = shift + tl.where(storage_valid, length, 0)
@@ -198,7 +198,7 @@ def _scalar_mul_add_compressed_dense_impl(
                 )
                 right1 = tl.load(other + logical_offset1, mask=valid1, other=0.0, cache_modifier='.cg')
                 _store_result(
-                    left1 * alpha_value + right1, output, auxiliary, offset1, logical_offset1,
+                    tl.math.fma(left1, alpha_value, right1), output, auxiliary, offset1, logical_offset1,
                     valid1, storage_valid1, OUTPUT_POLICY,
                 )
                 next_shift = shift1 + tl.where(storage_valid1, length1, 0)
@@ -298,7 +298,7 @@ def _scalar_mul_add_compressed_dense_fallback_impl(
         )
         right = tl.load(other + logical_offset, mask=logical_active, other=0.0, cache_modifier='.cg')
         _store_result(
-            left * alpha_value + right, output, auxiliary, offset, logical_offset,
+            tl.math.fma(left, alpha_value, right), output, auxiliary, offset, logical_offset,
             logical_active, active, OUTPUT_POLICY,
         )
 
