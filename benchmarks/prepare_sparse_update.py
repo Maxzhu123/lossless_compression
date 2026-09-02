@@ -17,7 +17,7 @@ from compress.code_storage import Distribution, DistType
 from compress.compress import (
     compress,
     compressed_add,
-    compressed_scalar_mul_add,
+    compressed_scale_add,
     decompress,
 )
 from compress.tensor_buffer import Allocation, TensorBuffer
@@ -49,14 +49,14 @@ def _assert_bits_equal(left: torch.Tensor, right: torch.Tensor) -> None:
     )
 
 
-def _make_compressed_pair(n: int, p_buf, mom_buf):
+def _make_compressed_pair(n: int):
     shape = SHAPE(n)
     generator = torch.Generator(device="cuda").manual_seed(n)
     p = torch.randn(shape, device="cuda", generator=generator).to(torch.bfloat16)
     mom = torch.randn(shape, device="cuda", generator=generator).to(torch.bfloat16)
     dist = Distribution(DistType.GAUSSIAN)
-    p_enc = compress(p, dist, p_buf)
-    mom_enc = compress(mom, dist, mom_buf)
+    p_enc = compress(p, dist, None)
+    mom_enc = compress(mom, dist, None)
     return p, mom, p_enc, mom_enc, dist, shape
 
 
@@ -72,19 +72,18 @@ def _current_update(p_enc, mom_enc, scale, out_buf):
     )
 
 
-def _fused_update_dummy(p_enc, mom_enc, scale, out_buf):
-    """Dummy planned fused implementation.
+def _fused_update(p_enc, mom_enc, scale, out_buf):
+    """Fused sparse-update entry point.
 
-    This is intentionally not fully fused yet: it decodes the second operand,
-    then uses the existing compressed scalar multiply-add kernel. A real fused
-    kernel will decode both compressed operands and emit the compressed result
-    without materialising the full dense update.
+    ``compressed_scale_add`` currently decodes the second operand to dense and
+    then uses the scalar multiply-add fused path. This avoids materialising
+    ``scale * mom`` as the current method does, while keeping both operands
+    compressed in the API.
     """
-    p_dense = decompress(p_enc)
-    return compressed_scalar_mul_add(
+    return compressed_scale_add(
         mom_enc,
         scale,
-        p_dense,
+        p_enc,
         dense_output=False,
         buffer=out_buf,
         distribution=p_enc.distribution,
@@ -138,10 +137,8 @@ def _compare(first, second, release_first, release_second):
 
 
 def _benchmark_shape(n: int) -> tuple[float, float]:
-    p_buf = _buffer(SHAPE(n)[0] * SHAPE(n)[1])
-    mom_buf = _buffer(SHAPE(n)[0] * SHAPE(n)[1])
     out_buf = _buffer(SHAPE(n)[0] * SHAPE(n)[1])
-    p, mom, p_enc, mom_enc, dist, shape = _make_compressed_pair(n, p_buf, mom_buf)
+    p, mom, p_enc, mom_enc, dist, shape = _make_compressed_pair(n)
     scale = torch.tensor([SCALE_VALUE], device="cuda", dtype=torch.float32)
 
     # Correctness.
@@ -149,12 +146,12 @@ def _benchmark_shape(n: int) -> tuple[float, float]:
     current_result = _current_update(p_enc, mom_enc, scale, out_buf)
     _assert_bits_equal(decompress(current_result), expected)
     _free(current_result, out_buf)
-    fused_result = _fused_update_dummy(p_enc, mom_enc, scale, out_buf)
+    fused_result = _fused_update(p_enc, mom_enc, scale, out_buf)
     _assert_bits_equal(decompress(fused_result), expected)
     _free(fused_result, out_buf)
 
     current = lambda: _current_update(p_enc, mom_enc, scale, out_buf)
-    fused = lambda: _fused_update_dummy(p_enc, mom_enc, scale, out_buf)
+    fused = lambda: _fused_update(p_enc, mom_enc, scale, out_buf)
     current_ms, fused_ms = _compare(
         current,
         fused,
@@ -164,14 +161,10 @@ def _benchmark_shape(n: int) -> tuple[float, float]:
 
     print(
         f"shape={shape!s:>14s}  current={current_ms:7.4f} ms  "
-        f"fused_dummy={fused_ms:7.4f} ms  "
+        f"fused={fused_ms:7.4f} ms  "
         f"reduction={(current_ms - fused_ms) / current_ms:6.2%}"
     )
 
-    _free(p_enc, p_buf)
-    _free(mom_enc, mom_buf)
-    p_buf.reset()
-    mom_buf.reset()
     out_buf.reset()
     del p, mom, p_enc, mom_enc, current_result, fused_result
     torch.cuda.empty_cache()
@@ -180,14 +173,14 @@ def _benchmark_shape(n: int) -> tuple[float, float]:
 
 def main() -> None:
     total_current_ms = 0.0
-    total_fused_dummy_ms = 0.0
+    total_fused_ms = 0.0
     for n in SIZES:
         current_ms, fused_ms = _benchmark_shape(n)
         total_current_ms += current_ms
-        total_fused_dummy_ms += fused_ms
+        total_fused_ms += fused_ms
 
     print(f"Total current: {total_current_ms:.5g}ms")
-    print(f"Total fused dummy: {total_fused_dummy_ms:.5g}ms")
+    print(f"Total fused: {total_fused_ms:.5g}ms")
 
 
 if __name__ == "__main__":

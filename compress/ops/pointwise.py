@@ -6,7 +6,7 @@ import torch
 import triton
 
 from ..code_storage import CompressedTensor, StorageLayout
-from ..codec.runtime import compress_components, compress_dense, geometry
+from ..codec.runtime import compress_components, compress_dense, decode_matrix_dense, geometry
 from ..huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
 from ..trition_kernels import _shift_decoding_table_kernel
 from ..kernels.pointwise import (
@@ -19,8 +19,11 @@ from ..kernels.pointwise_scalar import (
     pointwise_scalar_mul_add_dense_matrix_fallback_kernel,
     pointwise_scalar_mul_add_dense_matrix_kernel,
 )
+from ..kernels.pointwise_scalar_dual import (
+    pointwise_scalar_mul_add_compressed_compressed_kernel,
+)
 from ..tensor_buffer import TensorBuffer
-from .registry import PointwiseOp
+from .registry import PointwiseOp, SCALAR_MUL_ADD
 
 
 def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
@@ -186,6 +189,122 @@ def _launch_scalar_mul_add_compressed_dense(
         )
     return output, auxiliary
 
+
+
+def _launch_scalar_mul_add_compressed_compressed(
+    data, other, alpha, output_policy,
+):
+    """Launch the fused two-compressed scalar multiply-add kernel."""
+    _, a_decode_table, rare_length_a = get_distribution_tables(data.distribution)
+    _, b_decode_table, rare_length_b = get_distribution_tables(other.distribution)
+    a_shifted_decode = torch.empty(
+        1 << FIRST_BITS, dtype=torch.int32, device=data.data.device,
+    )
+    b_shifted_decode = torch.empty(
+        1 << FIRST_BITS, dtype=torch.int32, device=data.data.device,
+    )
+    _shift_decoding_table_kernel[(1,)](
+        a_decode_table, data.center, a_shifted_decode,
+        TABLE_SIZE=1 << FIRST_BITS, BLOCK=1 << FIRST_BITS,
+    )
+    _shift_decoding_table_kernel[(1,)](
+        b_decode_table, other.center, b_shifted_decode,
+        TABLE_SIZE=1 << FIRST_BITS, BLOCK=1 << FIRST_BITS,
+    )
+    block_size, lanes, steps, fixed_words = geometry(data.distribution)
+    blocks = triton.cdiv(data.size, block_size)
+    matrix_n, matrix_k = data.layout_shape
+    k_tile_blocks = data.storage_shape[1]
+
+    if output_policy == DENSE_OUTPUT:
+        output = torch.empty(
+            data.logical_numel,
+            dtype=torch.bfloat16, device=data.data.device,
+        )
+        auxiliary = output
+    else:
+        output = torch.empty(
+            data.size, dtype=torch.uint8, device=data.data.device
+        )
+        auxiliary = torch.empty_like(output)
+
+    main_args = (
+        data.data, data.sign_mantissa,
+        other.data, other.sign_mantissa,
+        output, auxiliary, a_shifted_decode, b_shifted_decode,
+        data.size, blocks * lanes, data.center, other.center, alpha,
+    )
+    main_meta = dict(
+        OUTPUT_POLICY=output_policy,
+        FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length_a,
+        BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
+        FIXED_WORDS=fixed_words,
+    )
+    # Both operands must use the same geometry; the b decode table may have a
+    # different RARE_LENGTH if distributions differ.  The host fallback covers
+    # that case, so this launcher is only called when geometries match.
+    if rare_length_a != rare_length_b:
+        raise ValueError("two-compressed path requires matching RARE_LENGTH")
+    pointwise_scalar_mul_add_compressed_compressed_kernel[(blocks,)](
+        *main_args, MATRIX_N=matrix_n, MATRIX_K=matrix_k,
+        MATRIX_NUMEL=data.logical_numel,
+        K_TILE_BLOCKS=k_tile_blocks, **main_meta,
+    )
+    return output, auxiliary
+
+
+def pointwise_scale_add_compressed(
+    data: CompressedTensor,
+    other: CompressedTensor,
+    alpha: torch.Tensor,
+    *,
+    dense_output: bool = True,
+    buffer: TensorBuffer | None = None,
+    distribution=None,
+) -> torch.Tensor | CompressedTensor:
+    """Apply ``alpha * data + other`` where both operands are compressed.
+
+    Uses the dedicated two-compressed kernel for private no-fallback blocked
+    tensors.  Other combinations fall back to decoding ``other`` to dense and
+    using the existing scalar multiply-add kernel.
+    """
+    same_layout = data.layout == StorageLayout.BLOCKED and other.layout == StorageLayout.BLOCKED
+    private_clean = (
+        data.offsets is not None
+        and data.offsets.numel() == 0
+        and other.offsets is not None
+        and other.offsets.numel() == 0
+    )
+    if same_layout and private_clean and geometry(data.distribution) == geometry(other.distribution):
+        result_distribution = distribution or data.distribution
+        policy = DENSE_OUTPUT if dense_output else COMPRESSED_OUTPUT
+        values, auxiliary = _launch_scalar_mul_add_compressed_compressed(
+            data, other, alpha, policy,
+        )
+        if dense_output:
+            return values.reshape(data.shape)
+        matrix_n, matrix_k = data.layout_shape
+        k_tile_blocks = data.storage_shape[1]
+        result = compress_components(
+            auxiliary, values, data.size, result_distribution,
+            buffer, data.shape, precomputed=True,
+            matrix_shape=(matrix_n, matrix_k, data.logical_numel, k_tile_blocks),
+        )
+        if data.layout == StorageLayout.BLOCKED:
+            result = replace(
+                result, layout=data.layout, layout_shape=data.layout_shape,
+                storage_shape=data.storage_shape,
+            )
+        return result
+
+    if other.layout == StorageLayout.RAW:
+        other_dense = other.data.reshape(other.shape)
+    else:
+        other_dense = decode_matrix_dense(other)
+    return pointwise_compressed_dense(
+        data, other_dense, SCALAR_MUL_ADD, alpha=alpha,
+        dense_output=dense_output, buffer=buffer, distribution=distribution,
+    )
 
 
 def pointwise_compressed_dense(

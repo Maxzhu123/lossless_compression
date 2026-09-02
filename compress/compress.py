@@ -4,7 +4,7 @@ import torch
 
 from .code_storage import CompressedTensor, Distribution, StorageLayout
 from .codec.runtime import compress_dense, decode_matrix_dense
-from .ops.pointwise import pointwise_compressed_dense
+from .ops.pointwise import pointwise_compressed_dense, pointwise_scale_add_compressed
 from .ops.registry import ADD, MULTIPLY, SCALAR_MUL_ADD
 from .tensor_buffer import TensorBuffer
 
@@ -94,4 +94,31 @@ def compressed_scalar_mul_add(
         data, other, SCALAR_MUL_ADD, alpha=alpha,
         dense_output=dense_output,
         buffer=buffer, distribution=distribution,
+    )
+
+
+def compressed_scale_add(
+    data: CompressedTensor,
+    alpha: torch.Tensor,
+    other: CompressedTensor,
+    *,
+    dense_output: bool = True,
+    buffer: TensorBuffer | None = None,
+    distribution=None,
+) -> torch.Tensor | CompressedTensor:
+    """Compute ``alpha * data + other`` with both operands compressed.
+
+    This is the fused sparse-update entry point. The current implementation
+    decodes ``other`` to dense, then uses the scalar multiply-add fused path;
+    a dedicated dual compressed kernel will replace that dense intermediate.
+    """
+    if not isinstance(alpha, torch.Tensor):
+        raise TypeError("alpha must be a torch.Tensor")
+    return pointwise_scale_add_compressed(
+        data,
+        other,
+        alpha,
+        dense_output=dense_output,
+        buffer=buffer,
+        distribution=distribution,
     )

@@ -1,9 +1,16 @@
 import torch
 from typing import Iterable, TYPE_CHECKING
 from torch import Tensor
+import math
 
 from compress.code_storage import CompressedTensor, Distribution, DistType, NoiseLevel
-from compress.compress import compress, decompress, compressed_add
+from compress.compress import (
+    compress,
+    compressed_add,
+    compressed_scale_add,
+    compressed_scalar_mul_add,
+    decompress,
+)
 if TYPE_CHECKING:
     from compress.tensor_buffer import TensorBuffer
 
@@ -25,7 +32,7 @@ class MyCompressed(Tensor):
 
     def __init__(self, x, buffer: TensorBuffer|None, dist: Distribution|None=None):
         if dist is None:
-            dist = Distribution(DistType.GAUSSIAN, 0.5)
+            dist = Distribution(DistType.EMPIRICAL, 0.5)
 
         self.x: CompressedTensor = compress(x, buffer=buffer, distribution=dist)
 
@@ -52,15 +59,28 @@ class MyCompressed(Tensor):
     def nbytes(self):
         return self.x.memory_size()
 
+    @property
+    def dense_nbytes(self):
+        return math.prod(self.x.shape) * 2 # bfloat16 is 2 bytes
+
     def __repr__(self):
         return f"MySparse({self.x})"
 
-    def _add(self, update: Tensor):
+    def add_(self, update: Tensor):
         """ Inplace add,
             x <- x + update
         """
         prev = self.x
         self.x = compressed_add(self.x, update,
+                                dense_output=False, distribution=prev.distribution, buffer=prev.buffer)
+        prev.free()
+
+    def mul_add_(self, alpha: Tensor, update: Tensor):
+        """ Inplace multiply-add,
+            x <- alpha * x + update
+        """
+        prev = self.x
+        self.x = compressed_scalar_mul_add(prev, alpha, update,
                                 dense_output=False, distribution=prev.distribution, buffer=prev.buffer)
         prev.free()
 
@@ -83,10 +103,14 @@ class SparseSGDM:
             assert isinstance(p, (MyCompressed, Tensor)), "params must be a list of MySparse or Tensor"
         self.params = list(params)
         self.lr = lr
-        self.momentum = momentum
+        self.momentum = torch.tensor(momentum, dtype=torch.float32, device="cuda")
 
-        # One momentum tensor per parameter.
-        self.buffers = [None] * len(self.params)
+        # # One momentum tensor per parameter.
+        self.momentums = []
+        for p in self.params:
+            mom = torch.zeros(p.shape, dtype=p.dtype, device=p.device)
+            mom = MyCompressed(mom, buffer=None)
+            self.momentums.append(mom)
 
     @torch.no_grad()
     def step(self):
@@ -94,22 +118,30 @@ class SparseSGDM:
         for i, p in enumerate(self.params):
             g = p.grad
 
-            # First step matches standard PyTorch SGD momentum behavior:
-            # buffer = grad
-            if self.buffers[i] is None:
-                buf = g.clone()
-            else:
-                buf = self.buffers[i]
-                buf = buf * self.momentum + g
+            mom = self.momentums[i]
+            # Inplace update of momentum: mom = mom * self.momentum + g
 
-            self.buffers[i] = buf
+            # torch.add(g, mom, alpha=self.momentum, out=mom)
+            mom.mul_add_(self.momentum, g)
+            # print(f'{mom.nbytes / mom.dense_nbytes :.2g} ')
 
-            # This is the tensor that would normally be added to p.
-            update = buf * (-self.lr)
-
+            # Fused update: result = -lr * mom + p.
             if isinstance(p, MyCompressed):
-                p._add(update)
+                scale = torch.tensor(
+                    [-self.lr], dtype=torch.float32, device=p.device,
+                )
+                prev = p.x
+                p.x = compressed_scale_add(
+                    mom.x,
+                    scale,
+                    prev,
+                    dense_output=False,
+                    buffer=prev.buffer,
+                    distribution=prev.distribution,
+                )
+                prev.free()
             else:
+                update = mom.decompress() * (-self.lr)
                 p.add_(update)
 
     def zero_grad(self):
