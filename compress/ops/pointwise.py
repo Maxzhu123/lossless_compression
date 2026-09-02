@@ -23,21 +23,6 @@ from ..tensor_buffer import TensorBuffer
 from .registry import PointwiseOp
 
 
-_ALPHA_SCALARS: dict[tuple[int, float], torch.Tensor] = {}
-
-
-def _get_alpha_tensor(alpha: float, device: torch.device) -> torch.Tensor:
-    """Return a cached one-element CUDA tensor for a scalar alpha value."""
-    key = (device.index if device.index is not None else 0, float(alpha))
-    tensor = _ALPHA_SCALARS.get(key)
-    if tensor is None or tensor.device != device:
-        tensor = torch.tensor(
-            [float(alpha)], dtype=torch.float32, device=device,
-        )
-        _ALPHA_SCALARS[key] = tensor
-    return tensor
-
-
 def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
     """Launch the fixed-stream operation, then correct sparse fallback tails."""
     other = other.contiguous().view(-1)
@@ -124,8 +109,6 @@ def _launch_scalar_mul_add_compressed_dense(
 ):
     """Launch the dedicated fused scalar multiply-add pointwise kernels."""
     other = other.contiguous().view(-1)
-    if not isinstance(alpha, torch.Tensor):
-        alpha = _get_alpha_tensor(alpha, data.data.device)
     _, decode_table, rare_length = get_distribution_tables(data.distribution)
     shifted_decode = torch.empty(
         1 << FIRST_BITS, dtype=torch.int32, device=data.data.device,
@@ -225,6 +208,10 @@ def pointwise_compressed_dense(
         raise ValueError(f"{operation.name} expects tensors with the same shape")
 
     result_distribution = distribution or data.distribution
+    if operation.name == "scalar_mul_add" and alpha is None:
+        alpha = torch.tensor(
+            [1.0], dtype=torch.float32, device=data.data.device,
+        )
     if (
         data.layout == StorageLayout.BLOCKED
         and not dense_output
@@ -236,8 +223,6 @@ def pointwise_compressed_dense(
 
     if data.offsets is None and data.fallback_descriptor is None:
         if operation.name == "scalar_mul_add":
-            if alpha is None:
-                alpha = 1.0
             result = operation.torch_fn(data.data.reshape(data.shape), other, alpha)
         else:
             result = operation.torch_fn(data.data.reshape(data.shape), other)
@@ -247,8 +232,6 @@ def pointwise_compressed_dense(
 
     policy = DENSE_OUTPUT if dense_output else COMPRESSED_OUTPUT
     if operation.name == "scalar_mul_add":
-        if alpha is None:
-            alpha = 1.0
         values, auxiliary = _launch_scalar_mul_add_compressed_dense(
             data, other, alpha, policy,
         )

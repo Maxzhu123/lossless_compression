@@ -39,7 +39,7 @@ def main():
         outbuf = _buffer(x.numel())
         encoded = compress(x, Distribution(DistType.GAUSSIAN), buf)
         restored = decompress(encoded)
-        alpha = 0.7
+        alpha = torch.tensor([0.7], device="cuda", dtype=torch.float32)
         expected = (restored.float() * alpha + other.float()).to(torch.bfloat16)
         dense = lambda: compressed_scalar_mul_add(encoded, alpha, other, dense_output=True)
         comp = lambda: compressed_scalar_mul_add(

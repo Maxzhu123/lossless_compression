@@ -77,14 +77,19 @@ def compressed_multiply(
 
 def compressed_scalar_mul_add(
     data: CompressedTensor,
-    alpha: float,
+    alpha: torch.Tensor,
     other: torch.Tensor,
     *,
     dense_output: bool = True,
     buffer: TensorBuffer | None = None,
     distribution=None,
 ) -> torch.Tensor | CompressedTensor:
-    """Compute ``alpha * data + other`` with a fused pointwise operation."""
+    """Compute ``alpha * data + other`` with a fused pointwise operation.
+
+    ``alpha`` must be a scalar tensor on the same device as ``data``.
+    """
+    if not isinstance(alpha, torch.Tensor):
+        raise TypeError("alpha must be a torch.Tensor")
     return pointwise_compressed_dense(
         data, other, SCALAR_MUL_ADD, alpha=alpha,
         dense_output=dense_output,
