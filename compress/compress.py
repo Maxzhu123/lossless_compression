@@ -5,7 +5,7 @@ import torch
 from .code_storage import CompressedTensor, Distribution, StorageLayout
 from .codec.runtime import compress_dense, decode_matrix_dense
 from .ops.pointwise import pointwise_compressed_dense
-from .ops.registry import ADD, MULTIPLY
+from .ops.registry import ADD, MULTIPLY, SCALAR_MUL_ADD
 from .tensor_buffer import TensorBuffer
 
 
@@ -71,5 +71,22 @@ def compressed_multiply(
     """Multiply compressed values by dense BF16 values."""
     return pointwise_compressed_dense(
         data, other, MULTIPLY, dense_output=dense_output,
+        buffer=buffer, distribution=distribution,
+    )
+
+
+def compressed_scalar_mul_add(
+    data: CompressedTensor,
+    alpha: float,
+    other: torch.Tensor,
+    *,
+    dense_output: bool = True,
+    buffer: TensorBuffer | None = None,
+    distribution=None,
+) -> torch.Tensor | CompressedTensor:
+    """Compute ``alpha * data + other`` as a fused pointwise operation."""
+    return pointwise_compressed_dense(
+        data, other, SCALAR_MUL_ADD, alpha=alpha,
+        dense_output=dense_output,
         buffer=buffer, distribution=distribution,
     )

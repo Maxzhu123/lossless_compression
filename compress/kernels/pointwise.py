@@ -64,7 +64,7 @@ def _pointwise_location(
 @triton.jit
 def _pointwise_compressed_dense_impl(
     encoded, sign_mantissa, other, output, auxiliary, decode_table,
-    n_elements, n_streams, center,
+    n_elements, n_streams, center, alpha,
     OP: tl.constexpr, OUTPUT_POLICY: tl.constexpr,
     MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
     MATRIX_NUMEL: tl.constexpr,
@@ -98,6 +98,7 @@ def _pointwise_compressed_dense_impl(
     window = word0.to(tl.uint32).to(tl.uint64)
     window |= word1.to(tl.uint32).to(tl.uint64) << 32
     center_value = tl.load(center).to(tl.int32)
+    alpha_value = tl.load(alpha).to(tl.float32)
 
     # Fast 1D path: storage offsets are also logical offsets for fully-contained blocks.
     if K_TILE_BLOCKS == 1 and MATRIX_K == N_LANES and (block + 1) * BLOCK <= MATRIX_NUMEL:
@@ -106,8 +107,8 @@ def _pointwise_compressed_dense_impl(
         for step in tl.range(0, N_STEPS, 2, flatten=True, warp_specialize=True):
             logical_n0 = block * N_STEPS + step
             logical_n1 = logical_n0 + 1
-            logical_k0 = k_tile * N_LANES + ((lanes + tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n0 & 255, 0)) & 255)
-            logical_k1 = k_tile * N_LANES + ((lanes + tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n1 & 255, 0)) & 255)
+            logical_k0 = (lanes + (logical_n0 & 255)) & 255
+            logical_k1 = (lanes + (logical_n1 & 255)) & 255
             logical_offset0 = logical_n0 * MATRIX_K + logical_k0
             logical_offset1 = logical_n1 * MATRIX_K + logical_k1
             # Decode symbol 0, reconstruct its BF16 value, then apply the op.
@@ -122,7 +123,7 @@ def _pointwise_compressed_dense_impl(
             )
             right = tl.load(other + logical_offset0, cache_modifier='.cg')
             _store_result(
-                OP(left, right), output, auxiliary, storage_offset,
+                OP(left, right, alpha_value), output, auxiliary, storage_offset,
                 logical_offset0, true_mask, true_mask, OUTPUT_POLICY,
             )
 
@@ -139,7 +140,7 @@ def _pointwise_compressed_dense_impl(
             )
             right1 = tl.load(other + logical_offset1, cache_modifier='.cg')
             _store_result(
-                OP(left1, right1), output, auxiliary,
+                OP(left1, right1, alpha_value), output, auxiliary,
                 storage_offset + N_LANES, logical_offset1,
                 true_mask, true_mask, OUTPUT_POLICY,
             )
@@ -162,6 +163,7 @@ def _pointwise_compressed_dense_impl(
         storage_offset = block * BLOCK + lanes
         logical_n_base = 0
         logical_k = lanes
+        k_tile = 0
         if K_TILE_BLOCKS > 1:
             n_tile = block // K_TILE_BLOCKS
             k_tile = block % K_TILE_BLOCKS
@@ -195,7 +197,7 @@ def _pointwise_compressed_dense_impl(
                 )
                 right = tl.load(other + logical_offset, cache_modifier='.cg')
                 _store_result(
-                    OP(left, right), output, auxiliary, storage_offset,
+                    OP(left, right, alpha_value), output, auxiliary, storage_offset,
                     logical_offset, True, True, OUTPUT_POLICY,
                 )
 
@@ -214,7 +216,7 @@ def _pointwise_compressed_dense_impl(
                 )
                 right1 = tl.load(other + logical_offset1, cache_modifier='.cg')
                 _store_result(
-                    OP(left1, right1), output, auxiliary,
+                    OP(left1, right1, alpha_value), output, auxiliary,
                     storage_offset + N_LANES, logical_offset1,
                     True, True, OUTPUT_POLICY,
                 )
@@ -244,7 +246,7 @@ def _pointwise_compressed_dense_impl(
                 )
                 right = tl.load(other + logical_offset, mask=valid, other=0.0, cache_modifier='.cg')
                 _store_result(
-                    OP(left, right), output, auxiliary, offset, logical_offset,
+                    OP(left, right, alpha_value), output, auxiliary, offset, logical_offset,
                     valid, storage_valid, OUTPUT_POLICY,
                 )
 
@@ -264,7 +266,7 @@ def _pointwise_compressed_dense_impl(
                 )
                 right1 = tl.load(other + logical_offset1, mask=valid1, other=0.0, cache_modifier='.cg')
                 _store_result(
-                    OP(left1, right1), output, auxiliary, offset1, logical_offset1,
+                    OP(left1, right1, alpha_value), output, auxiliary, offset1, logical_offset1,
                     valid1, storage_valid1, OUTPUT_POLICY,
                 )
 
@@ -288,7 +290,7 @@ def _pointwise_compressed_dense_impl(
 @triton.jit
 def pointwise_compressed_dense_matrix_kernel(
     encoded, sign_mantissa, other, output, auxiliary, decode_table,
-    n_elements, n_streams, center,
+    n_elements, n_streams, center, alpha,
     OP: tl.constexpr, OUTPUT_POLICY: tl.constexpr,
     MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
     MATRIX_NUMEL: tl.constexpr, K_TILE_BLOCKS: tl.constexpr,
@@ -299,7 +301,7 @@ def pointwise_compressed_dense_matrix_kernel(
     """Apply a pointwise policy to native matrix-tiled storage."""
     _pointwise_compressed_dense_impl(
         encoded, sign_mantissa, other, output, auxiliary, decode_table,
-        n_elements, n_streams, center, OP, OUTPUT_POLICY,
+        n_elements, n_streams, center, alpha, OP, OUTPUT_POLICY,
         MATRIX_N, MATRIX_K, MATRIX_NUMEL, K_TILE_BLOCKS,
         FIRST_MASK, RARE_LENGTH, BLOCK, N_LANES, N_STEPS, FIXED_WORDS,
     )
@@ -309,7 +311,7 @@ def pointwise_compressed_dense_matrix_kernel(
 def _pointwise_compressed_dense_fallback_impl(
     bad_streams, bad_starts, fallback_offsets,
     fallback_buffer, fallback_base, metadata, descriptor, fallback_count,
-    sign_mantissa, other, output, auxiliary, n_elements,
+    sign_mantissa, other, output, auxiliary, n_elements, alpha,
     OP: tl.constexpr, OUTPUT_POLICY: tl.constexpr, BUFFERED: tl.constexpr,
     MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
     MATRIX_NUMEL: tl.constexpr,
@@ -320,6 +322,7 @@ def _pointwise_compressed_dense_fallback_impl(
     """Recompute pointwise results for stream tails stored in fallback storage."""
     pid = tl.program_id(0)
     tile = pid * TILE + tl.arange(0, TILE)
+    alpha_value = tl.load(alpha).to(tl.float32)
     count = tl.load(fallback_count).to(tl.int32)
     if pid * TILE >= count:
         return
@@ -368,7 +371,7 @@ def _pointwise_compressed_dense_fallback_impl(
         )
         right = tl.load(other + logical_offset, mask=logical_active, other=0.0, cache_modifier='.cg')
         _store_result(
-            OP(left, right), output, auxiliary, offset, logical_offset,
+            OP(left, right, alpha_value), output, auxiliary, offset, logical_offset,
             logical_active, active, OUTPUT_POLICY,
         )
 
@@ -381,7 +384,7 @@ def _pointwise_compressed_dense_fallback_impl(
 def pointwise_compressed_dense_matrix_fallback_kernel(
     bad_streams, bad_starts, fallback_offsets,
     fallback_buffer, fallback_base, metadata, descriptor, fallback_count,
-    sign_mantissa, other, output, auxiliary, n_elements,
+    sign_mantissa, other, output, auxiliary, n_elements, alpha,
     OP: tl.constexpr, OUTPUT_POLICY: tl.constexpr, BUFFERED: tl.constexpr,
     MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
     MATRIX_NUMEL: tl.constexpr, K_TILE_BLOCKS: tl.constexpr,
@@ -392,7 +395,7 @@ def pointwise_compressed_dense_matrix_fallback_kernel(
     _pointwise_compressed_dense_fallback_impl(
         bad_streams, bad_starts, fallback_offsets, fallback_buffer,
         fallback_base, metadata, descriptor, fallback_count,
-        sign_mantissa, other, output, auxiliary, n_elements,
+        sign_mantissa, other, output, auxiliary, n_elements, alpha,
         OP, OUTPUT_POLICY, BUFFERED,
         MATRIX_N, MATRIX_K, MATRIX_NUMEL, K_TILE_BLOCKS,
         TILE, BLOCK, N_LANES, N_STEPS,

@@ -7,15 +7,21 @@ import triton
 
 
 @triton.jit
-def add_op(left, right):
+def add_op(left, right, alpha):
     """Add operands inside a specialized pointwise kernel."""
     return left + right
 
 
 @triton.jit
-def multiply_op(left, right):
+def multiply_op(left, right, alpha):
     """Multiply operands inside a specialized pointwise kernel."""
     return left * right
+
+
+@triton.jit
+def scalar_mul_add_op(left, right, alpha):
+    """Compute ``alpha * left + right`` inside a pointwise kernel."""
+    return left * alpha + right
 
 
 @dataclass(frozen=True)
@@ -29,4 +35,15 @@ class PointwiseOp:
 
 ADD = PointwiseOp("add", 2, add_op, torch.add)
 MULTIPLY = PointwiseOp("multiply", 2, multiply_op, torch.mul)
-POINTWISE_OPS = {operation.name: operation for operation in (ADD, MULTIPLY)}
+SCALAR_MUL_ADD = PointwiseOp(
+    "scalar_mul_add",
+    2,
+    scalar_mul_add_op,
+    lambda left, right, alpha=1.0: (
+        (left.float() * alpha + right.float()).to(torch.bfloat16)
+    ),
+)
+POINTWISE_OPS = {
+    operation.name: operation
+    for operation in (ADD, MULTIPLY, SCALAR_MUL_ADD)
+}
