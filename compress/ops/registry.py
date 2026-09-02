@@ -37,6 +37,7 @@ SCALAR_MUL_ADD = PointwiseOp(
         (left.float() * alpha + right.float()).to(torch.bfloat16)
     ),
 )
-# Keep scalar_mul_add out of the generic benchmark registry; it is exposed
-# through the public API and composed from the existing multiply/add paths.
-POINTWISE_OPS = {operation.name: operation for operation in (ADD, MULTIPLY)}
+POINTWISE_OPS = {
+    operation.name: operation
+    for operation in (ADD, MULTIPLY, SCALAR_MUL_ADD)
+}
