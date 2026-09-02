@@ -65,7 +65,7 @@ def main():
     model = Model(8, 4096, 21504, 4096, G, buffer=buffer)
     optimiser = SparseSGDM(model.sparse_parameters(), lr=0.001, momentum=0.9)
 
-    x = torch.randn(1000, 4096, dtype=torch.bfloat16, device="cuda", generator=G)
+    x = torch.randn(5000, 4096, dtype=torch.bfloat16, device="cuda", generator=G)
     y_hat = x.norm(dim=0)
 
     # Warmup

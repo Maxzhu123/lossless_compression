@@ -7,10 +7,12 @@ import triton
 from ..code_storage import (
     CompressedTensor, Distribution, DistType, NoiseLevel, StorageLayout,
 )
-from ..huffman_tables import FIRST_MASK, get_distribution_tables
+from ..huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
 from ..tensor_buffer import TensorBuffer
 from ..trition_kernels import (
     _compact_bad_streams_kernel,
+    _shift_encoding_table_kernel,
+    _shift_decoding_table_kernel,
     _compact_matrix_components_extra_kernel,
     _compact_matrix_extra_kernel,
     _count_bad_streams_kernel,
@@ -56,14 +58,14 @@ def geometry(distribution: Distribution):
     return block_size, lanes, clean_steps, lane_bits // 32
 
 
-def _estimate_center(source, size, *, precomputed):
+def _estimate_center(source, size, *, precomputed, ignore_zero=False):
     """Estimate the exponent center from strided samples on the GPU."""
     sample_size = min(size, CENTER_SAMPLE_SIZE)
     stride = size // sample_size
     center = torch.empty(1, dtype=torch.int32, device=source.device)
     _estimate_center_kernel[(1,)](
         source, center, size, SAMPLE_SIZE=sample_size, STRIDE=stride,
-        PRECOMPUTED=precomputed,
+        PRECOMPUTED=precomputed, IGNORE_ZERO=ignore_zero,
     )
     return center
 
@@ -174,13 +176,18 @@ def compress_components(
     block_size, lanes, steps, fixed_words = geometry(distribution)
     blocks = triton.cdiv(size, block_size)
     streams = blocks * lanes
-    encode_table, _, _ = get_distribution_tables(distribution)
-    # Encode and decode share this sampled center through the result metadata.
     matrix_n, matrix_k, matrix_numel, k_tile_blocks = matrix_shape
     if center is None:
         center = _estimate_center(
             source_values, matrix_numel, precomputed=precomputed,
+            ignore_zero=distribution.zero_prob > 0,
         )
+    encode_table, _, _ = get_distribution_tables(distribution)
+    shifted_encode = torch.empty(256, dtype=torch.int32, device=source_values.device)
+    _shift_encoding_table_kernel[(1,)](
+        encode_table, center, shifted_encode, BLOCK=256,
+    )
+    # Encode and decode share this sampled center through the result metadata.
     encoded = torch.empty(
         streams * fixed_words + 4,
         dtype=torch.int32,
@@ -190,7 +197,7 @@ def compress_components(
         streams, dtype=torch.uint8, device=source_values.device
     )
     _launch_encode(
-        source_values, sign_mantissa, encoded, encode_table, center,
+        source_values, sign_mantissa, encoded, shifted_encode, center,
         extra_starts, size, streams,
         precomputed=precomputed,
         matrix_n=matrix_n, matrix_k=matrix_k, matrix_numel=matrix_numel,
@@ -319,12 +326,19 @@ def decode_matrix_dense(data: CompressedTensor) -> torch.Tensor:
     logical_numel = data.logical_numel
     n_tiles, k_tiles, _, _ = data.storage_shape
     _, decode_table, rare_length = get_distribution_tables(data.distribution)
+    shifted_decode = torch.empty(
+        1 << FIRST_BITS, dtype=torch.int32, device=data.data.device,
+    )
+    _shift_decoding_table_kernel[(1,)](
+        decode_table, data.center, shifted_decode,
+        TABLE_SIZE=1 << FIRST_BITS, BLOCK=1 << FIRST_BITS,
+    )
     block_size, lanes, steps, fixed_words = geometry(data.distribution)
     streams = n_tiles * k_tiles * lanes
     output = torch.empty(logical_numel, dtype=torch.int16, device=data.data.device)
     # Use the optimized normal-Triton decode kernel (no Gluon needed).
     _decode_matrix_kernel[(n_tiles * k_tiles,)](
-        data.data, data.sign_mantissa, output, decode_table,
+        data.data, data.sign_mantissa, output, shifted_decode,
         data.size, streams, data.center,
         MATRIX_N=layout_n, MATRIX_K=layout_k,
         MATRIX_NUMEL=logical_numel, K_TILE_BLOCKS=k_tiles,

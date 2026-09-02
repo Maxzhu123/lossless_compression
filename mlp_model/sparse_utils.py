@@ -2,7 +2,7 @@ import torch
 from typing import Iterable, TYPE_CHECKING
 from torch import Tensor
 
-from compress.code_storage import CompressedTensor, Distribution, DistType
+from compress.code_storage import CompressedTensor, Distribution, DistType, NoiseLevel
 from compress.compress import compress, decompress, compressed_add
 if TYPE_CHECKING:
     from compress.tensor_buffer import TensorBuffer
@@ -13,7 +13,7 @@ class MyCompressed(Tensor):
     x: CompressedTensor
 
     @staticmethod
-    def __new__(cls, x, buffer: TensorBuffer|None):
+    def __new__(cls, x, buffer: TensorBuffer|None, zero_prob: float = 0.0):
         assert x.dtype == torch.bfloat16
         assert x.device.type == "cuda", f"x.device={x.device}"
         return torch.Tensor._make_wrapper_subclass(
@@ -23,8 +23,8 @@ class MyCompressed(Tensor):
             requires_grad=x.requires_grad,
         )
 
-    def __init__(self, x, buffer: TensorBuffer | None):
-        dist = Distribution(DistType.GAUSSIAN, 0.5)
+    def __init__(self, x, buffer: TensorBuffer|None, zero_prob: float = 0.0):
+        dist = Distribution(DistType.GAUSSIAN, 0.5, zero_prob=zero_prob)
         self.x: CompressedTensor = compress(x, buffer=buffer, distribution=dist)
 
     @classmethod
@@ -64,6 +64,9 @@ class MyCompressed(Tensor):
 
     def decompress(self) -> Tensor:
         return decompress(self.x)
+
+    def free(self):
+        self.x.free()
 
 
 class SparseSGDM:

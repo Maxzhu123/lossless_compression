@@ -2,7 +2,12 @@ import numpy as np
 from functools import lru_cache
 import torch
 
-from .probabilities import empirical_probabilities, gaussian_probabilities, laplace_probabilities
+from .probabilities import (
+    _exponent_probabilities,
+    empirical_probabilities,
+    gaussian_probabilities,
+    laplace_probabilities,
+)
 from .code_storage import Distribution, DistType
 
 
@@ -189,10 +194,12 @@ def _reverse_bits(value, length):
 
 
 def _build_huffman_tables_from_lengths(probabilities, max_length=FIRST_BITS, max_esc_length=8):
-    """Exact optimal escape-cutoff Huffman tables.
+    """Exact optimal escape-cutoff Huffman tables with a fixed zero symbol.
 
-    Returns the ``(encode, decode, rare_length)`` triple generated from the
-    exact escape-cutoff solver.
+    Table index 0 is reserved for exact zero.  The remaining table indices are
+    assigned to the 255 nonzero centered exponent deltas.  The returned encode
+    table is indexed by this table-index space; the kernels perform the small
+    fixed-zero remapping in registers.
     """
     solution = _optimal_escape_solution(
         probabilities, max_length=max_length, max_esc_length=max_esc_length
@@ -207,22 +214,19 @@ def _build_huffman_tables_from_lengths(probabilities, max_length=FIRST_BITS, max
     codes = _canonical_codes(all_lengths)
     esc_code, _ = codes[len(direct_lengths)]  # ESC is the last symbol
 
-    # Build codewords for all 256 raw exponent bytes.
+    # Build codewords for the 256 table indices.
     codewords = {}
     for pos, raw in enumerate(direct_indices):
-        value = raw if raw < 128 else raw - 256
-        codewords[value] = codes[pos]
+        codewords[raw] = codes[pos]
     for raw in escaped_indices:
-        value = raw if raw < 128 else raw - 256
-        codewords[value] = (
+        codewords[raw] = (
             (esc_code << 8) | _reverse_bits(raw & 255, 8),
             esc_length + 8,
         )
 
     encode = []
     for raw in range(256):
-        value = raw if raw < 128 else raw - 256
-        code, length = codewords[value]
+        code, length = codewords[raw]
         encode.append(_reverse_bits(code, length) | (length << 20))
 
     decode = [0] * (1 << FIRST_BITS)
@@ -237,12 +241,13 @@ def _build_huffman_tables_from_lengths(probabilities, max_length=FIRST_BITS, max
 
     return encode, decode, esc_length
 
-
 def get_distribution_tables(dist: Distribution):
     """Return cached tables for a distribution, independent of noise level."""
     if not isinstance(dist, Distribution):
         raise TypeError("distribution must be a Distribution instance")
-    return _get_distribution_tables(dist.family, dist.param, dist.mean)
+    return _get_distribution_tables(
+        dist.family, dist.param, dist.mean, dist.zero_prob,
+    )
 
 
 @lru_cache(maxsize=None)
@@ -250,18 +255,20 @@ def _get_distribution_tables(
     family: DistType,
     param: float,
     mean: float,
+    zero_prob: float,
 ):
     if family == DistType.EMPIRICAL:
-        probabilities = empirical_probabilities(param, mean)
+        magnitude_cdf = empirical_probabilities(param, mean)
     elif family == DistType.GAUSSIAN:
-        probabilities = gaussian_probabilities(param, mean)
+        magnitude_cdf = gaussian_probabilities(param, mean)
     elif family == DistType.LAPLACE:
-        probabilities = laplace_probabilities(param, mean)
+        magnitude_cdf = laplace_probabilities(param, mean)
     else:  # pragma: no cover - guarded by Distribution validation
         raise ValueError(f"unknown distribution family: {family!r}")
+    probabilities = _exponent_probabilities(magnitude_cdf, zero_prob)
 
     encode, decode, rare_length = _build_huffman_tables_from_lengths(
-        probabilities, max_length=FIRST_BITS, max_esc_length=8
+        probabilities, max_length=FIRST_BITS, max_esc_length=8,
     )
     decode_tensor = torch.tensor(decode, dtype=torch.int32, device="cuda")
     encode_tensor = torch.tensor(encode, dtype=torch.int32, device="cuda")

@@ -19,10 +19,13 @@ from .codec.autotune import (
 def _estimate_center_kernel(
     source_bits, center_out, size,
     SAMPLE_SIZE: tl.constexpr, STRIDE, PRECOMPUTED: tl.constexpr,
+    IGNORE_ZERO: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     offsets = tl.arange(0, BLOCK)
     total = tl.zeros((BLOCK,), tl.int32)
+    s = tl.zeros((BLOCK,), tl.int32)
+    n = tl.zeros((BLOCK,), tl.int32)
     for i in range(0, SAMPLE_SIZE, BLOCK):
         idx = i + offsets
         mask = idx < SAMPLE_SIZE
@@ -32,16 +35,69 @@ def _estimate_center_kernel(
             exp = value - 127
         else:
             exp = ((value >> 7) & 0xFF) - 127
-        total += tl.where(mask, exp, 0)
+        if IGNORE_ZERO:
+            nonzero = mask & (exp != -127)
+            total += tl.where(nonzero, exp, 0)
+            n += tl.where(nonzero, 1, 0)
+        else:
+            total += tl.where(mask, exp, 0)
+            n += tl.where(mask, 1, 0)
     s = tl.sum(total, axis=0)
-    # Round half away from zero and clamp to the exponent range.
+    n = tl.sum(n, axis=0)
+    # If requested, ignore exact zeros when estimating the center.  This keeps
+    # the center aligned with the nonzero component of zero-inflated
+    # distributions.
+    safe_n = tl.maximum(n, 1)
     center = tl.where(
         s >= 0,
-        (s + SAMPLE_SIZE // 2) // SAMPLE_SIZE,
-        -((-s + SAMPLE_SIZE // 2) // SAMPLE_SIZE),
+        (s + safe_n // 2) // safe_n,
+        -((-s + safe_n // 2) // safe_n),
     )
+    center = tl.where(n > 0, center, 0)
     center = tl.minimum(tl.maximum(center, -128), 127)
     tl.store(center_out, center)
+
+
+@triton.jit
+def _shift_encoding_table_kernel(
+    base_encode, center, shifted_encode,
+    BLOCK: tl.constexpr,
+):
+    """Create a raw-exponent-byte-indexed encode table for one center."""
+    idx = tl.arange(0, BLOCK)
+    center_value = tl.load(center).to(tl.int32)
+    zero_delta = (-127 - center_value) & 255
+    raw_byte = idx
+    exp = raw_byte - 127
+    delta = (exp - center_value) & 255
+    table_index = tl.where(
+        exp == -127,
+        0,
+        delta + (delta < zero_delta).to(tl.int32),
+    )
+    packed = tl.load(base_encode + table_index).to(tl.uint32)
+    tl.store(shifted_encode + raw_byte, packed)
+
+
+@triton.jit
+def _shift_decoding_table_kernel(
+    base_decode, center, shifted_decode,
+    TABLE_SIZE: tl.constexpr, BLOCK: tl.constexpr,
+):
+    """Create a decode table that stores unbiased exponents directly."""
+    idx = tl.arange(0, BLOCK)
+    center_value = tl.load(center).to(tl.int32)
+    zero_delta = (-127 - center_value) & 255
+    packed = tl.load(base_decode + idx).to(tl.int32)
+    length = packed & 255
+    symbol = (packed >> 8) & 255
+    is_zero = symbol == 0
+    delta = tl.where(symbol == 0, 0, symbol - (symbol <= zero_delta).to(tl.int32))
+    delta = tl.where(delta >= 128, delta - 256, delta)
+    exponent = tl.where(is_zero, -127, delta + center_value)
+    shifted = tl.where(length == 0, 0, length | (exponent << 8))
+    tl.store(shifted_decode + idx, shifted)
+
 
 
 @triton.jit
@@ -64,7 +120,6 @@ def _encode_impl(
     overflow = tl.zeros((N_LANES,), tl.int1)
     extra_start = tl.full((N_LANES,), N_STEPS, tl.int32)
     has_data = block * BLOCK + lanes < n_elements
-    center_value = tl.load(center).to(tl.int32)
 
     n_tile = block // K_TILE_BLOCKS
     k_tile = block % K_TILE_BLOCKS
@@ -86,11 +141,11 @@ def _encode_impl(
             value0 = tl.load(source_bits + input_offset0).to(tl.int32)
             value1 = tl.load(source_bits + input_offset1).to(tl.int32)
             if PRECOMPUTED:
-                exp0 = value0 - 127
-                exp1 = value1 - 127
+                byte0 = value0 & 255
+                byte1 = value1 & 255
             else:
-                exp0 = ((value0 >> 7) & 0xFF) - 127
-                exp1 = ((value1 >> 7) & 0xFF) - 127
+                byte0 = (value0 >> 7) & 0xFF
+                byte1 = (value1 >> 7) & 0xFF
                 sm0 = (value0 & 0x7F) | ((value0 >> 8) & 0x80)
                 sm1 = (value1 & 0x7F) | ((value1 >> 8) & 0x80)
                 tl.store(sign_mantissa + source_offset, sm0.to(tl.uint8))
@@ -98,12 +153,8 @@ def _encode_impl(
                     sign_mantissa + source_offset + N_LANES,
                     sm1.to(tl.uint8),
                 )
-            packed0 = tl.load(
-                encode_table + ((exp0 - center_value) & 255)
-            ).to(tl.uint32)
-            packed1 = tl.load(
-                encode_table + ((exp1 - center_value) & 255)
-            ).to(tl.uint32)
+            packed0 = tl.load(encode_table + byte0).to(tl.uint32)
+            packed1 = tl.load(encode_table + byte1).to(tl.uint32)
             length0 = (packed0 >> 20).to(tl.int32)
             length1 = (packed1 >> 20).to(tl.int32)
             length = length0 + length1
@@ -150,11 +201,11 @@ def _encode_impl(
                 source_bits + input_offset1, mask=input_valid1, other=0,
             ).to(tl.int32)
             if PRECOMPUTED:
-                exp0 = value0 - 127
-                exp1 = value1 - 127
+                byte0 = value0 & 255
+                byte1 = value1 & 255
             else:
-                exp0 = ((value0 >> 7) & 0xFF) - 127
-                exp1 = ((value1 >> 7) & 0xFF) - 127
+                byte0 = (value0 >> 7) & 0xFF
+                byte1 = (value1 >> 7) & 0xFF
                 sm0 = (value0 & 0x7F) | ((value0 >> 8) & 0x80)
                 sm1 = (value1 & 0x7F) | ((value1 >> 8) & 0x80)
                 tl.store(
@@ -165,12 +216,8 @@ def _encode_impl(
                     sign_mantissa + source_offset + N_LANES,
                     sm1.to(tl.uint8), mask=valid1 & input_valid1,
                 )
-            packed0 = tl.load(
-                encode_table + ((exp0 - center_value) & 255)
-            ).to(tl.uint32)
-            packed1 = tl.load(
-                encode_table + ((exp1 - center_value) & 255)
-            ).to(tl.uint32)
+            packed0 = tl.load(encode_table + byte0).to(tl.uint32)
+            packed1 = tl.load(encode_table + byte1).to(tl.uint32)
             packed0 = tl.where(input_valid0, packed0, 0)
             packed1 = tl.where(input_valid1, packed1, 0)
             length0 = (packed0 >> 20).to(tl.int32)
@@ -504,6 +551,7 @@ def _decode_matrix_kernel(
     ).to(tl.uint32).to(tl.uint64)
     window = word0 | (word1 << 32)
     center_value = tl.load(center).to(tl.int32)
+    zero_delta = (-127 - center_value) & 255
     # Fast path: 1D layout with a single k-tile and a fully-contained block.
     # Here storage offsets are also the logical offsets, so no matrix mapping is needed.
     if K_TILE_BLOCKS == 1 and MATRIX_K == N_LANES and (block + 1) * BLOCK <= MATRIX_NUMEL:
@@ -522,9 +570,12 @@ def _decode_matrix_kernel(
             first_length = first & 255
             continuation = first_length == 0
             length = tl.where(continuation, RARE_LENGTH + 8, first_length)
-            tail = ((current >> RARE_LENGTH) & 255).to(tl.int32)
-            tail = tl.where(tail >= 128, tail - 256, tail)
-            value = tl.where(continuation, tail, first >> 8) + center_value
+            symbol = ((current >> RARE_LENGTH) & 255).to(tl.int32)
+            is_zero = symbol == 0
+            delta = tl.where(symbol == 0, 0, symbol - (symbol <= zero_delta).to(tl.int32))
+            delta = tl.where(delta >= 128, delta - 256, delta)
+            escaped_value = tl.where(is_zero, -127, delta + center_value)
+            value = tl.where(continuation, escaped_value, first >> 8)
             sm = tl.load(sign_mantissa + storage_offset, cache_modifier='.cg')
             packed = (
                 (((value.to(tl.int32) + 127) & 255) << 7)
@@ -542,9 +593,12 @@ def _decode_matrix_kernel(
             first_length1 = first1 & 255
             continuation1 = first_length1 == 0
             length1 = tl.where(continuation1, RARE_LENGTH + 8, first_length1)
-            tail1 = ((current1 >> RARE_LENGTH) & 255).to(tl.int32)
-            tail1 = tl.where(tail1 >= 128, tail1 - 256, tail1)
-            value1 = tl.where(continuation1, tail1, first1 >> 8) + center_value
+            symbol1 = ((current1 >> RARE_LENGTH) & 255).to(tl.int32)
+            is_zero1 = symbol1 == 0
+            delta1 = tl.where(symbol1 == 0, 0, symbol1 - (symbol1 <= zero_delta).to(tl.int32))
+            delta1 = tl.where(delta1 >= 128, delta1 - 256, delta1)
+            escaped_value1 = tl.where(is_zero1, -127, delta1 + center_value)
+            value1 = tl.where(continuation1, escaped_value1, first1 >> 8)
             sm1 = tl.load(sign_mantissa + storage_offset + N_LANES, cache_modifier='.cg')
             packed1 = (
                 (((value1.to(tl.int32) + 127) & 255) << 7)
@@ -604,9 +658,12 @@ def _decode_matrix_kernel(
             first_length = first & 255
             continuation = first_length == 0
             length = tl.where(continuation, RARE_LENGTH + 8, first_length)
-            tail = ((current >> RARE_LENGTH) & 255).to(tl.int32)
-            tail = tl.where(tail >= 128, tail - 256, tail)
-            value = tl.where(continuation, tail, first >> 8) + center_value
+            symbol = ((current >> RARE_LENGTH) & 255).to(tl.int32)
+            is_zero = symbol == 0
+            delta = tl.where(symbol == 0, 0, symbol - (symbol <= zero_delta).to(tl.int32))
+            delta = tl.where(delta >= 128, delta - 256, delta)
+            escaped_value = tl.where(is_zero, -127, delta + center_value)
+            value = tl.where(continuation, escaped_value, first >> 8)
             sm = tl.load(
                 sign_mantissa + storage_offset,
                 mask=storage_valid, other=0, cache_modifier='.cg',
@@ -626,9 +683,12 @@ def _decode_matrix_kernel(
             first_length1 = first1 & 255
             continuation1 = first_length1 == 0
             length1 = tl.where(continuation1, RARE_LENGTH + 8, first_length1)
-            tail1 = ((current1 >> RARE_LENGTH) & 255).to(tl.int32)
-            tail1 = tl.where(tail1 >= 128, tail1 - 256, tail1)
-            value1 = tl.where(continuation1, tail1, first1 >> 8) + center_value
+            symbol1 = ((current1 >> RARE_LENGTH) & 255).to(tl.int32)
+            is_zero1 = symbol1 == 0
+            delta1 = tl.where(symbol1 == 0, 0, symbol1 - (symbol1 <= zero_delta).to(tl.int32))
+            delta1 = tl.where(delta1 >= 128, delta1 - 256, delta1)
+            escaped_value1 = tl.where(is_zero1, -127, delta1 + center_value)
+            value1 = tl.where(continuation1, escaped_value1, first1 >> 8)
             storage_offset1 = storage_offset + N_LANES
             storage_valid1 = storage_offset1 < n_elements
             output_offset1 = output_offset + MATRIX_K

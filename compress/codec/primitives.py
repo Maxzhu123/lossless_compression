@@ -24,7 +24,13 @@ def decode_symbol(
     first_length = first & 255
     continuation = first_length == 0
     length = tl.where(continuation, RARE_LENGTH + 8, first_length)
-    tail = ((current >> RARE_LENGTH) & 255).to(tl.int32)
-    tail = tl.where(tail >= 128, tail - 256, tail)
-    value = tl.where(continuation, tail, first >> 8) + center
+    # Direct symbols already store the unbiased exponent in the shifted table.
+    # Only escaped symbols carry a table index and need the inverse remap.
+    symbol = ((current >> RARE_LENGTH) & 255).to(tl.int32)
+    zero_delta = (-127 - center) & 255
+    is_zero = symbol == 0
+    delta = tl.where(symbol == 0, 0, symbol - (symbol <= zero_delta).to(tl.int32))
+    delta = tl.where(delta >= 128, delta - 256, delta)
+    escaped_value = tl.where(is_zero, -127, delta + center)
+    value = tl.where(continuation, escaped_value, first >> 8)
     return value, length

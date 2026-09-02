@@ -19,31 +19,29 @@ class FFN(Function):
     def forward(ctx, x, W1, W2, buffer: TensorBuffer=None):
         """Run the dense FFN forward pass and save tensors for backward."""
         z = x @ W1.T
-        z.relu_()
-        output = z @ W2.T
+        h = z.relu_()
+        output = h @ W2.T
 
-        # Compress z
-        # z = MyCompressed(z, buffer=buffer)
-        ctx.save_for_backward(x, W1, W2, z)
+        # h = MyCompressed(h, buffer=buffer, zero_prob=0.5)
+        ctx.save_for_backward(x, W1, W2, h)
+
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
         """Compute dense FFN gradients from ``grad_output[B, D]``."""
-        x, W1, W2, z = ctx.saved_tensors
         needs_x = ctx.needs_input_grad[0]
 
-        # print(f'{z.nbytes // 1024 ** 2} MB compressed')
-        # z = z.decompress()
-        # print(f'{z.nbytes // 1024 ** 2} MB Decompressed')
+        x, W1, W2, h = ctx.saved_tensors
+        # h = h.decompress()
 
         grad_z = grad_output @ W2
-        grad_W2 = grad_output.T @ z
+        grad_W2 = grad_output.T @ h
 
         grad_preact = torch.ops.aten.threshold_backward.grad_input(
-            grad_z, z, 0, grad_input=grad_z)
+            grad_z, h, 0, grad_input=grad_z)
 
-        del z, grad_z
+        del h, grad_z
         if not torch.compiler.is_compiling():
             ctx.maybe_clear_saved_tensors()
 

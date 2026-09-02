@@ -7,7 +7,8 @@ import triton
 
 from ..code_storage import CompressedTensor, StorageLayout
 from ..codec.runtime import compress_components, compress_dense, geometry
-from ..huffman_tables import FIRST_MASK, get_distribution_tables
+from ..huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
+from ..trition_kernels import _shift_decoding_table_kernel
 from ..kernels.pointwise import (
     COMPRESSED_OUTPUT,
     DENSE_OUTPUT,
@@ -22,6 +23,13 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
     """Launch the fixed-stream operation, then correct sparse fallback tails."""
     other = other.contiguous().view(-1)
     _, decode_table, rare_length = get_distribution_tables(data.distribution)
+    shifted_decode = torch.empty(
+        1 << FIRST_BITS, dtype=torch.int32, device=data.data.device,
+    )
+    _shift_decoding_table_kernel[(1,)](
+        decode_table, data.center, shifted_decode,
+        TABLE_SIZE=1 << FIRST_BITS, BLOCK=1 << FIRST_BITS,
+    )
     block_size, lanes, steps, fixed_words = geometry(data.distribution)
     blocks = triton.cdiv(data.size, block_size)
     matrix_n, matrix_k = data.layout_shape
@@ -40,7 +48,7 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
 
     main_args = (
         data.data, data.sign_mantissa, other, output, auxiliary,
-        decode_table, data.size, blocks * lanes, data.center,
+        shifted_decode, data.size, blocks * lanes, data.center,
     )
     main_meta = dict(
         OP=operation.triton_fn, OUTPUT_POLICY=output_policy,
