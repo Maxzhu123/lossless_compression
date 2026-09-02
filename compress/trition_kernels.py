@@ -66,77 +66,136 @@ def _encode_impl(
     has_data = block * BLOCK + lanes < n_elements
     center_value = tl.load(center).to(tl.int32)
 
-    for step in tl.range(0, N_STEPS, 2, loop_unroll_factor=4):
-        source_offset = block * BLOCK + step * N_LANES + lanes
-        valid0 = source_offset < n_elements
-        valid1 = source_offset + N_LANES < n_elements
-        n_tile = block // K_TILE_BLOCKS
-        k_tile = block % K_TILE_BLOCKS
-        logical_k = k_tile * N_LANES + lanes
-        logical_n = n_tile * N_STEPS + step
-        input_offset0 = logical_n * MATRIX_K + logical_k
-        input_offset1 = (logical_n + 1) * MATRIX_K + logical_k
-        input_valid0 = (
-            (logical_n < MATRIX_N) & (logical_k < MATRIX_K)
-            & (input_offset0 < MATRIX_NUMEL)
+    n_tile = block // K_TILE_BLOCKS
+    k_tile = block % K_TILE_BLOCKS
+    logical_k = k_tile * N_LANES + lanes
+    # Fully-valid blocks can skip all per-element validity/mask checks.
+    if K_TILE_BLOCKS == 1 and MATRIX_K == N_LANES:
+        full_block = (block + 1) * BLOCK <= MATRIX_NUMEL
+    else:
+        full_block = (
+            ((n_tile + 1) * N_STEPS <= MATRIX_N)
+            & ((k_tile + 1) * N_LANES <= MATRIX_K)
         )
-        input_valid1 = (
-            (logical_n + 1 < MATRIX_N) & (logical_k < MATRIX_K)
-            & (input_offset1 < MATRIX_NUMEL)
-        )
-        value0 = tl.load(
-            source_bits + input_offset0, mask=input_valid0, other=0,
-        ).to(tl.int32)
-        value1 = tl.load(
-            source_bits + input_offset1, mask=input_valid1, other=0,
-        ).to(tl.int32)
-        if PRECOMPUTED:
-            exp0 = value0 - 127
-            exp1 = value1 - 127
-        else:
-            exp0 = ((value0 >> 7) & 0xFF) - 127
-            exp1 = ((value1 >> 7) & 0xFF) - 127
-            sm0 = (value0 & 0x7F) | ((value0 >> 8) & 0x80)
-            sm1 = (value1 & 0x7F) | ((value1 >> 8) & 0x80)
+    if full_block:
+        for step in tl.range(0, N_STEPS, 2, loop_unroll_factor=4):
+            source_offset = block * BLOCK + step * N_LANES + lanes
+            logical_n = n_tile * N_STEPS + step
+            input_offset0 = logical_n * MATRIX_K + logical_k
+            input_offset1 = input_offset0 + MATRIX_K
+            value0 = tl.load(source_bits + input_offset0).to(tl.int32)
+            value1 = tl.load(source_bits + input_offset1).to(tl.int32)
+            if PRECOMPUTED:
+                exp0 = value0 - 127
+                exp1 = value1 - 127
+            else:
+                exp0 = ((value0 >> 7) & 0xFF) - 127
+                exp1 = ((value1 >> 7) & 0xFF) - 127
+                sm0 = (value0 & 0x7F) | ((value0 >> 8) & 0x80)
+                sm1 = (value1 & 0x7F) | ((value1 >> 8) & 0x80)
+                tl.store(sign_mantissa + source_offset, sm0.to(tl.uint8))
+                tl.store(
+                    sign_mantissa + source_offset + N_LANES,
+                    sm1.to(tl.uint8),
+                )
+            packed0 = tl.load(
+                encode_table + ((exp0 - center_value) & 255)
+            ).to(tl.uint32)
+            packed1 = tl.load(
+                encode_table + ((exp1 - center_value) & 255)
+            ).to(tl.uint32)
+            length0 = (packed0 >> 20).to(tl.int32)
+            length1 = (packed1 >> 20).to(tl.int32)
+            length = length0 + length1
+            code = (packed0 & 0xfffff) | ((packed1 & 0xfffff) << length0)
+
+            new_word = word_value | (code << shift)
+            crosses_word = shift + length >= 32
+            pair_overflow = word * 32 + shift + length > FIXED_WORDS * 32
+            first_overflow = (~overflow) & pair_overflow
+
+            extra_start = tl.where(first_overflow, step, extra_start)
+
+            store_value = tl.where(first_overflow, word_value, new_word)
+            safe_word = tl.minimum(word, FIXED_WORDS - 1)
             tl.store(
-                sign_mantissa + source_offset, sm0.to(tl.uint8),
-                mask=valid0 & input_valid0,
+                encoded + safe_word * n_streams + lane_index,
+                store_value,
+                mask=crosses_word & (word < FIXED_WORDS),
             )
+            word_value = tl.where(crosses_word, code >> (32 - shift), new_word)
+            word += tl.where(crosses_word, 1, 0)
+            shift = tl.where(crosses_word, shift + length - 32, shift + length)
+            overflow |= pair_overflow
+    else:
+        for step in tl.range(0, N_STEPS, 2, loop_unroll_factor=4):
+            source_offset = block * BLOCK + step * N_LANES + lanes
+            valid0 = source_offset < n_elements
+            valid1 = source_offset + N_LANES < n_elements
+            logical_n = n_tile * N_STEPS + step
+            input_offset0 = logical_n * MATRIX_K + logical_k
+            input_offset1 = input_offset0 + MATRIX_K
+            input_valid0 = (
+                (logical_n < MATRIX_N) & (logical_k < MATRIX_K)
+                & (input_offset0 < MATRIX_NUMEL)
+            )
+            input_valid1 = (
+                (logical_n + 1 < MATRIX_N) & (logical_k < MATRIX_K)
+                & (input_offset1 < MATRIX_NUMEL)
+            )
+            value0 = tl.load(
+                source_bits + input_offset0, mask=input_valid0, other=0,
+            ).to(tl.int32)
+            value1 = tl.load(
+                source_bits + input_offset1, mask=input_valid1, other=0,
+            ).to(tl.int32)
+            if PRECOMPUTED:
+                exp0 = value0 - 127
+                exp1 = value1 - 127
+            else:
+                exp0 = ((value0 >> 7) & 0xFF) - 127
+                exp1 = ((value1 >> 7) & 0xFF) - 127
+                sm0 = (value0 & 0x7F) | ((value0 >> 8) & 0x80)
+                sm1 = (value1 & 0x7F) | ((value1 >> 8) & 0x80)
+                tl.store(
+                    sign_mantissa + source_offset, sm0.to(tl.uint8),
+                    mask=valid0 & input_valid0,
+                )
+                tl.store(
+                    sign_mantissa + source_offset + N_LANES,
+                    sm1.to(tl.uint8), mask=valid1 & input_valid1,
+                )
+            packed0 = tl.load(
+                encode_table + ((exp0 - center_value) & 255)
+            ).to(tl.uint32)
+            packed1 = tl.load(
+                encode_table + ((exp1 - center_value) & 255)
+            ).to(tl.uint32)
+            packed0 = tl.where(input_valid0, packed0, 0)
+            packed1 = tl.where(input_valid1, packed1, 0)
+            length0 = (packed0 >> 20).to(tl.int32)
+            length1 = (packed1 >> 20).to(tl.int32)
+            length = length0 + length1
+            code = (packed0 & 0xfffff) | ((packed1 & 0xfffff) << length0)
+
+            new_word = word_value | (code << shift)
+            crosses_word = shift + length >= 32
+            pair_overflow = (word * 32 + shift + length > FIXED_WORDS * 32) & valid0
+            first_overflow = (~overflow) & pair_overflow
+
+            extra_start = tl.where(first_overflow, step, extra_start)
+
+            store_value = tl.where(first_overflow, word_value, new_word)
+            safe_word = tl.minimum(word, FIXED_WORDS - 1)
             tl.store(
-                sign_mantissa + source_offset + N_LANES,
-                sm1.to(tl.uint8), mask=valid1 & input_valid1,
+                encoded + safe_word * n_streams + lane_index,
+                store_value,
+                mask=crosses_word & (word < FIXED_WORDS),
             )
-        packed0 = tl.load(
-            encode_table + ((exp0 - center_value) & 255)
-        ).to(tl.uint32)
-        packed1 = tl.load(
-            encode_table + ((exp1 - center_value) & 255)
-        ).to(tl.uint32)
-        packed0 = tl.where(input_valid0, packed0, 0)
-        packed1 = tl.where(input_valid1, packed1, 0)
-        length0 = (packed0 >> 20).to(tl.int32)
-        length1 = (packed1 >> 20).to(tl.int32)
-        length = length0 + length1
-        code = (packed0 & 0xfffff) | ((packed1 & 0xfffff) << length0)
-
-        new_word = word_value | (code << shift)
-        crosses_word = shift + length >= 32
-        pair_overflow = (word * 32 + shift + length > FIXED_WORDS * 32) & valid0
-        first_overflow = (~overflow) & pair_overflow
-
-        extra_start = tl.where(first_overflow, step, extra_start)
-
-        store_value = tl.where(first_overflow, word_value, new_word)
-        safe_word = tl.minimum(word, FIXED_WORDS - 1)
-        tl.store(
-            encoded + safe_word * n_streams + lane_index,
-            store_value,
-            mask=crosses_word & (word < FIXED_WORDS),
-        )
-        word_value = tl.where(crosses_word, code >> (32 - shift), new_word)
-        word += tl.where(crosses_word, 1, 0)
-        shift = tl.where(crosses_word, shift + length - 32, shift + length)
-        overflow |= pair_overflow
+            word_value = tl.where(crosses_word, code >> (32 - shift), new_word)
+            word += tl.where(crosses_word, 1, 0)
+            shift = tl.where(crosses_word, shift + length - 32, shift + length)
+            overflow |= pair_overflow
 
     safe_word = tl.minimum(word, FIXED_WORDS - 1)
     tl.store(
