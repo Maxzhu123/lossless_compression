@@ -58,7 +58,7 @@ def main():
     G.manual_seed(0)
 
     if BUFFER:
-        buffer = TensorBuffer(100_000_000)
+        buffer = TensorBuffer(1_000_000)
     else:
         buffer = None
 
@@ -80,10 +80,10 @@ def main():
     torch.cuda.reset_peak_memory_stats()
     torch.cuda.synchronize()
     st = time.perf_counter()
-    for i in range(11):
+    for i in range(50):
         y = model(x, buffer=buffer)
         loss = (y - y_hat).pow(2).mean()
-        print(visualize_buffer(buffer))
+        # print(visualize_buffer(buffer))
 
         loss.backward()
 
