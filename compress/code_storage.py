@@ -18,6 +18,8 @@ class DistType(Enum):
     EMPIRICAL = "empirical"
     GAUSSIAN = "gaussian"
     LAPLACE = "laplace"
+    GAMMA = "gamma"
+    POLYNOMIAL = "polynomial"
 
 
 class StorageLayout(Enum):

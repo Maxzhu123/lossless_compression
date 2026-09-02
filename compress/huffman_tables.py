@@ -5,6 +5,7 @@ import torch
 from .probabilities import (
     _exponent_probabilities,
     empirical_probabilities,
+    gamma_probabilities,
     gaussian_probabilities,
     laplace_probabilities,
 )
@@ -263,6 +264,9 @@ def _get_distribution_tables(
         magnitude_cdf = gaussian_probabilities(param, mean)
     elif family == DistType.LAPLACE:
         magnitude_cdf = laplace_probabilities(param, mean)
+    elif family == DistType.GAMMA:
+        # Best hardcoded Gamma fit for the observed activation distribution.
+        magnitude_cdf = gamma_probabilities()
     else:  # pragma: no cover - guarded by Distribution validation
         raise ValueError(f"unknown distribution family: {family!r}")
     probabilities = _exponent_probabilities(magnitude_cdf, zero_prob)

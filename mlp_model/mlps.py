@@ -4,6 +4,8 @@ import torch
 from torch.autograd import Function
 
 from sparse_utils import MyCompressed
+from compress.code_storage import CompressedTensor, Distribution, DistType, NoiseLevel
+
 if TYPE_CHECKING:
     from compress.tensor_buffer import TensorBuffer
     from torch import Tensor
@@ -22,7 +24,9 @@ class FFN(Function):
         h = z.relu_()
         output = h @ W2.T
 
-        h = MyCompressed(h, buffer=buffer, zero_prob=0.5)
+        dist = Distribution(DistType.LAPLACE, noise_level=NoiseLevel.CLEAN, param=0.75, zero_prob=0.5)
+
+        h = MyCompressed(h, buffer=buffer, dist=dist)
         ctx.save_for_backward(x, W1, W2, h)
 
         return output
@@ -35,10 +39,14 @@ class FFN(Function):
         x, W1, W2, h = ctx.saved_tensors
 
         h = cast(MyCompressed, h)
-        # comp_bytes = h.nbytes
+        comp_bytes = h.nbytes
         h = h.decompress_free()
-        # decomp_bytes = h.nbytes
-        # print(f'Ratio: {comp_bytes / decomp_bytes:.2f}')
+        decomp_bytes = h.nbytes
+        ratio = comp_bytes / decomp_bytes
+        print(f'Ratio: {ratio:.2f}')
+        if ratio > 0.76:
+            torch.save(h, "test.pt")
+            exit(5)
 
         grad_z = grad_output @ W2
         grad_W2 = grad_output.T @ h

@@ -4,6 +4,11 @@ import math
 
 import numpy as np
 
+try:
+    from scipy.integrate import quad as _quad
+except ImportError:  # pragma: no cover - scipy is optional
+    _quad = None
+
 
 def _shifted_magnitude_cdf(base_magnitude_cdf, mean):
     """Return the magnitude CDF after shifting a symmetric distribution."""
@@ -25,7 +30,45 @@ def _shifted_magnitude_cdf(base_magnitude_cdf, mean):
     return magnitude_cdf
 
 
-def _exponent_probabilities(magnitude_cdf, zero_prob=0.0):
+def _shifted_magnitude_pdf(base_magnitude_pdf, mean):
+    """Return the magnitude PDF after shifting a symmetric distribution."""
+    mean = float(mean)
+
+    def magnitude_pdf(value):
+        # For a symmetric signed distribution, the magnitude density is the
+        # sum of the two folded-side densities after the shift.
+        return 0.5 * (
+            base_magnitude_pdf(abs(value - mean))
+            + base_magnitude_pdf(abs(value + mean))
+        )
+
+    return magnitude_pdf
+
+
+def _interval_probability(pdf, low, high):
+    """Integrate a magnitude PDF over the BF16 magnitude bin [low, high]."""
+    if high == low:
+        return 0.0
+    if _quad is not None:
+        return _quad(pdf, low, high, epsabs=1e-12, epsrel=1e-10, limit=200)[0]
+    # Fallback Gauss-Legendre quadrature, used only if scipy isn't installed.
+    nodes, weights = np.polynomial.legendre.leggauss(64)
+    if math.isinf(high):
+        # Map [0, 1] to [low, +inf) with x = low / (1 - t).
+        t = 0.5 * (nodes + 1.0)
+        x = low / (1.0 - t)
+        dt = 0.5
+        w = weights * dt
+        jac = low / ((1.0 - t) ** 2)
+        return float(np.sum(w * jac * pdf(x)))
+    mid = 0.5 * (low + high)
+    half = 0.5 * (high - low)
+    x = mid + half * nodes
+    w = half * weights
+    return float(np.sum(w * pdf(x)))
+
+
+def _exponent_probabilities(magnitude_pdf, zero_prob=0.0):
     """Map a value-magnitude CDF onto the codec's centered exponent symbols.
 
     The center is computed from the continuous/nonzero component only.  Any
@@ -38,7 +81,7 @@ def _exponent_probabilities(magnitude_cdf, zero_prob=0.0):
     for exponent in range(-127, 129):
         low = 0.0 if exponent == -127 else math.ldexp(1.0, exponent)
         high = math.inf if exponent == 128 else math.ldexp(1.0, exponent + 1)
-        raw[exponent & 255] = magnitude_cdf(high) - magnitude_cdf(low)
+        raw[exponent & 255] = _interval_probability(magnitude_pdf, low, high)
     raw /= raw.sum()
 
     exponents = np.arange(-127, 129)
@@ -71,41 +114,66 @@ def _exponent_probabilities(magnitude_cdf, zero_prob=0.0):
     return probabilities
 
 
+def gamma_probabilities(shape: float = 0.82, scale: float = 2.43):
+    """Return the Gamma magnitude PDF.
+
+    Hardcoded defaults match the best Gamma fit found for the current
+    ReLU-style activation data.
+    """
+    shape = float(shape)
+    scale = float(scale)
+    log_norm = shape * math.log(scale) + math.lgamma(shape)
+
+    def magnitude_pdf(value):
+        value = abs(value)
+
+        return math.exp(
+            (shape - 1.0) * math.log(value) - value / scale - log_norm
+        )
+
+    return magnitude_pdf
+
+
 def gaussian_probabilities(std: float = 1.0, mean: float = 0.0):
-    """Return the Gaussian value-magnitude CDF."""
-    scale = std * math.sqrt(2.0)
+    """Return the Gaussian value-magnitude PDF."""
+    sigma = float(std)
 
-    def base_magnitude_cdf(value):
-        return 1.0 if math.isinf(value) else math.erf(value / scale)
+    def base_magnitude_pdf(value):
+        return (
+            2.0 / (sigma * math.sqrt(2.0 * math.pi))
+            * math.exp(-0.5 * (value / sigma) ** 2)
+        )
 
-    magnitude_cdf = _shifted_magnitude_cdf(base_magnitude_cdf, mean)
-    return magnitude_cdf
+    magnitude_pdf = _shifted_magnitude_pdf(base_magnitude_pdf, mean)
+    return magnitude_pdf
 
 
 def laplace_probabilities(scale: float = 1.0, mean: float = 0.0):
-    """Return the Laplace value-magnitude CDF."""
-    def base_magnitude_cdf(value):
-        return 1.0 if math.isinf(value) else -math.expm1(-value / scale)
+    """Return the Laplace value-magnitude PDF."""
+    s = float(scale)
 
-    magnitude_cdf = _shifted_magnitude_cdf(base_magnitude_cdf, mean)
-    return magnitude_cdf
+    def base_magnitude_pdf(value):
+        return math.exp(-value / s) / s
+
+    magnitude_pdf = _shifted_magnitude_pdf(base_magnitude_pdf, mean)
+    return magnitude_pdf
 
 
 def empirical_probabilities(scale: float = 1.0, mean: float = 0.0):
-    """Return the empirical value-magnitude CDF."""
+    """Return the empirical value-magnitude PDF."""
+    s = float(scale)
     tail_probability = 0.05
     tail_alpha = 2.8
-    tail_start = -scale * math.log(tail_probability)
+    tail_start = -s * math.log(tail_probability)
 
-    def base_magnitude_cdf(value):
-        if math.isinf(value):
-            return 1.0
+    def base_magnitude_pdf(value):
         if value <= tail_start:
-            return -math.expm1(-value / scale)
-        survival = tail_probability * (
-            tail_start / value
-        ) ** (tail_alpha - 1.0)
-        return 1.0 - survival
+            return math.exp(-value / s) / s
+        # Derivative of the power-law tail survival.
+        return (
+            tail_probability * (tail_alpha - 1.0) / tail_start
+            * (tail_start / value) ** tail_alpha
+        )
 
-    magnitude_cdf = _shifted_magnitude_cdf(base_magnitude_cdf, mean)
-    return magnitude_cdf
+    magnitude_pdf = _shifted_magnitude_pdf(base_magnitude_pdf, mean)
+    return magnitude_pdf

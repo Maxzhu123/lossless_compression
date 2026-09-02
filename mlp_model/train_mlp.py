@@ -80,7 +80,7 @@ def main():
     torch.cuda.reset_peak_memory_stats()
     torch.cuda.synchronize()
     st = time.perf_counter()
-    for i in range(50):
+    for i in range(11):
         y = model(x, buffer=buffer)
         loss = (y - y_hat).pow(2).mean()
         print(visualize_buffer(buffer))
