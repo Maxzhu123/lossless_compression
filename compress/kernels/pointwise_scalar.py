@@ -115,13 +115,13 @@ def _scalar_mul_add_compressed_dense_impl(
                 & ((k_tile + 1) * N_LANES <= MATRIX_K)
             )
         if full_generic:
-            for step in tl.range(0, N_STEPS, 2, loop_unroll_factor=2):
+            for step in tl.range(0, N_STEPS, 2, loop_unroll_factor=4):
                 word2_prefetch = tl.load(
                     encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams
                     + lane_index,
                 ).to(tl.uint32).to(tl.uint64)
                 logical_n = logical_n_base + step
-                logical_k = k_tile * N_LANES + ((lanes + tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n & 255, 0)) & 255)
+                logical_k = k_tile * N_LANES + ((lanes + (logical_n & 255)) & 255)
                 logical_offset = logical_n * MATRIX_K + logical_k
                 value, length = decode_symbol(
                     window >> shift, decode_table, center_value,
@@ -143,7 +143,7 @@ def _scalar_mul_add_compressed_dense_impl(
                     FIRST_MASK, RARE_LENGTH,
                 )
                 logical_n1 = logical_n + 1
-                logical_k1 = k_tile * N_LANES + ((lanes + tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n1 & 255, 0)) & 255)
+                logical_k1 = k_tile * N_LANES + ((lanes + (logical_n1 & 255)) & 255)
                 logical_offset1 = logical_n1 * MATRIX_K + logical_k1
                 sm1 = tl.load(sign_mantissa + storage_offset + N_LANES, cache_modifier='.cg')
                 left1 = pack_bf16(value1, sm1).to(tl.int16).to(
