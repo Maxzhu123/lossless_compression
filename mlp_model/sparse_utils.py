@@ -152,7 +152,7 @@ class SparseSGDM:
 def main():
     torch.manual_seed(0)
     x = torch.randn(1000, 1000, dtype=torch.bfloat16, device="cuda", requires_grad=True)
-    x_sparse = MyCompressed(x)
+    x_sparse = MyCompressed(x, None)
     x_sparse.requires_grad_(True)
 
     optimiser = SparseSGDM([x_sparse], lr=100000)
