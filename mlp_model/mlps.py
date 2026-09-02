@@ -1,7 +1,12 @@
+from typing import TYPE_CHECKING
+
 import torch
-from torch import Tensor
 from torch.autograd import Function
 
+from sparse_utils import MyCompressed
+if TYPE_CHECKING:
+    from compress.tensor_buffer import TensorBuffer
+    from torch import Tensor
 
 class FFN(Function):
     """Dense baseline autograd FFN for comparison.
@@ -11,12 +16,14 @@ class FFN(Function):
     """
 
     @staticmethod
-    def forward(ctx, x, W1, W2, e1=None):
+    def forward(ctx, x, W1, W2, buffer: TensorBuffer=None):
         """Run the dense FFN forward pass and save tensors for backward."""
         z = x @ W1.T
         z.relu_()
         output = z @ W2.T
 
+        # Compress z
+        # z = MyCompressed(z, buffer=buffer)
         ctx.save_for_backward(x, W1, W2, z)
         return output
 
@@ -25,6 +32,10 @@ class FFN(Function):
         """Compute dense FFN gradients from ``grad_output[B, D]``."""
         x, W1, W2, z = ctx.saved_tensors
         needs_x = ctx.needs_input_grad[0]
+
+        # print(f'{z.nbytes // 1024 ** 2} MB compressed')
+        # z = z.decompress()
+        # print(f'{z.nbytes // 1024 ** 2} MB Decompressed')
 
         grad_z = grad_output @ W2
         grad_W2 = grad_output.T @ z

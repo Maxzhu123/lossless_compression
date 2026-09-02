@@ -17,7 +17,7 @@ scripts.sh
 *.whl
 *.pt
 nanogpt/data/fineweb10B/
-/experiments/results/
+/benchmarks/results/
 *.csv
 *.txt
 /program.md

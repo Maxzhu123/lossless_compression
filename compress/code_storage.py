@@ -98,7 +98,7 @@ class CompressedTensor:
         """Return the element count represented by compressed storage."""
         return self.size
 
-    def memory_size(self):
+    def memory_size(self) -> int:
         """Return GPU allocation bytes owned by one compressed tensor.
         """
         allocations: dict[tuple[torch.device, int], int] = {}

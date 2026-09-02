@@ -9,7 +9,7 @@ from sparse_utils import MyCompressed, SparseSGDM
 from mlps import FFN
 
 COMPRESSED = True
-BUFFER = True
+BUFFER = False
 c_print(f"Compressed: {COMPRESSED}", color="bright_blue")
 c_print(f"Buffer: {BUFFER}", color="bright_blue")
 
@@ -29,8 +29,8 @@ class FFNLayer(nn.Module):
             self.W1 = W1
             self.W2 = W2
 
-    def forward(self, x):
-        out = FFN.apply(x, self.W1, self.W2)
+    def forward(self, x, buffer:TensorBuffer):
+        out = FFN.apply(x, self.W1, self.W2, buffer)
         return out
 
     def sparse_parameters(self):
@@ -44,9 +44,9 @@ class Model(nn.Module):
             [FFNLayer(in_features, hidden_features, out_features, G, buffer=buffer) for _ in range(num_layers)]
         )
 
-    def forward(self, x):
+    def forward(self, x, buffer: TensorBuffer):
         for layer in self.layers:
-            x = x + layer(F.rms_norm(x, normalized_shape=(x.shape[-1],)))
+            x = x + layer(F.rms_norm(x, normalized_shape=(x.shape[-1],)), buffer=buffer)
         return x
 
     def sparse_parameters(self):
@@ -62,15 +62,15 @@ def main():
     else:
         buffer = None
 
-    model = Model(8, 2048, 24000, 2048, G, buffer=buffer)
+    model = Model(8, 4096, 21504, 4096, G, buffer=buffer)
     optimiser = SparseSGDM(model.sparse_parameters(), lr=0.001, momentum=0.9)
 
-    x = torch.randn(1000, 2048, dtype=torch.bfloat16, device="cuda", generator=G)
+    x = torch.randn(1000, 4096, dtype=torch.bfloat16, device="cuda", generator=G)
     y_hat = x.norm(dim=0)
 
     # Warmup
     for i in range(5):
-        y = model(x)
+        y = model(x, buffer=buffer)
         loss = (y - y_hat).pow(2).mean()
         loss.backward()
         optimiser.step()
@@ -81,7 +81,7 @@ def main():
     torch.cuda.synchronize()
     st = time.perf_counter()
     for i in range(50):
-        y = model(x)
+        y = model(x, buffer=buffer)
         loss = (y - y_hat).pow(2).mean()
 
         loss.backward()

@@ -4,15 +4,16 @@ from torch import Tensor
 
 from compress.code_storage import CompressedTensor, Distribution, DistType
 from compress.compress import compress, decompress, compressed_add
-
 if TYPE_CHECKING:
     from compress.tensor_buffer import TensorBuffer
 
+
 class MyCompressed(Tensor):
     __torch_function__ = torch._C._disabled_torch_function_impl
+    x: CompressedTensor
 
     @staticmethod
-    def __new__(cls, x, buffer):
+    def __new__(cls, x, buffer: TensorBuffer|None):
         assert x.dtype == torch.bfloat16
         assert x.device.type == "cuda", f"x.device={x.device}"
         return torch.Tensor._make_wrapper_subclass(
@@ -22,9 +23,9 @@ class MyCompressed(Tensor):
             requires_grad=x.requires_grad,
         )
 
-    def __init__(self, values, buffer: TensorBuffer):
+    def __init__(self, x, buffer: TensorBuffer | None):
         dist = Distribution(DistType.GAUSSIAN, 0.5)
-        self.x: CompressedTensor = compress(values, buffer=buffer, distribution=dist)
+        self.x: CompressedTensor = compress(x, buffer=buffer, distribution=dist)
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
@@ -52,23 +53,18 @@ class MyCompressed(Tensor):
     def __repr__(self):
         return f"MySparse({self.x})"
 
-    def apply_update(self, update: Tensor):
+    def _add(self, update: Tensor):
+        """ Inplace add,
+            x <- x + update
+        """
         prev = self.x
-
-        # x_dense = decompress(self.x)
-        # self.x.free()
-        # self.x = None
-        # x_dense.add_(update)
-        # self.x = compress(x_dense)
-
-        # x_dense = compressed_add(self.x, update, dense_output=True)
-        # self.x.free()
-        # self.x = compress(x_dense)
-
         self.x = compressed_add(self.x, update,
                                 dense_output=False, distribution=prev.distribution, buffer=prev.buffer)
         prev.free()
-        # print(self.x.memory_buffer_size())
+
+    def decompress(self) -> Tensor:
+        return decompress(self.x)
+
 
 class SparseSGDM:
     def __init__(self, params: Iterable[MyCompressed | Tensor], lr, momentum=0.9):
@@ -101,7 +97,7 @@ class SparseSGDM:
             update = buf * (-self.lr)
 
             if isinstance(p, MyCompressed):
-                p.apply_update(update)
+                p._add(update)
             else:
                 p.add_(update)
 
