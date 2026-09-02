@@ -65,6 +65,12 @@ class MyCompressed(Tensor):
     def decompress(self) -> Tensor:
         return decompress(self.x)
 
+    def decompress_free(self) -> Tensor:
+        """ Decompresses the compressed tensor and frees the compressed representation."""
+        x_dense = self.decompress()
+        self.x.free()
+        return x_dense
+
     def free(self):
         self.x.free()
 

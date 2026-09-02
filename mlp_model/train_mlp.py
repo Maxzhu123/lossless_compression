@@ -9,7 +9,7 @@ from sparse_utils import MyCompressed, SparseSGDM
 from mlps import FFN
 
 COMPRESSED = True
-BUFFER = False
+BUFFER = True
 c_print(f"Compressed: {COMPRESSED}", color="bright_blue")
 c_print(f"Buffer: {BUFFER}", color="bright_blue")
 
@@ -58,7 +58,7 @@ def main():
     G.manual_seed(0)
 
     if BUFFER:
-        buffer = TensorBuffer(2048)
+        buffer = TensorBuffer(100_000_000)
     else:
         buffer = None
 
@@ -83,8 +83,10 @@ def main():
     for i in range(50):
         y = model(x, buffer=buffer)
         loss = (y - y_hat).pow(2).mean()
+        print(visualize_buffer(buffer))
 
         loss.backward()
+
         optimiser.step()
         optimiser.zero_grad()
 

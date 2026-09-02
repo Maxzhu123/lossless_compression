@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 from torch.autograd import Function
@@ -22,7 +22,7 @@ class FFN(Function):
         h = z.relu_()
         output = h @ W2.T
 
-        # h = MyCompressed(h, buffer=buffer, zero_prob=0.5)
+        h = MyCompressed(h, buffer=buffer, zero_prob=0.5)
         ctx.save_for_backward(x, W1, W2, h)
 
         return output
@@ -33,7 +33,12 @@ class FFN(Function):
         needs_x = ctx.needs_input_grad[0]
 
         x, W1, W2, h = ctx.saved_tensors
-        # h = h.decompress()
+
+        h = cast(MyCompressed, h)
+        # comp_bytes = h.nbytes
+        h = h.decompress_free()
+        # decomp_bytes = h.nbytes
+        # print(f'Ratio: {comp_bytes / decomp_bytes:.2f}')
 
         grad_z = grad_output @ W2
         grad_W2 = grad_output.T @ h
