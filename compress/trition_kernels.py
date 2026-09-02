@@ -123,7 +123,6 @@ def _encode_impl(
 
     n_tile = block // K_TILE_BLOCKS
     k_tile = block % K_TILE_BLOCKS
-    logical_k = k_tile * N_LANES + lanes
     # Fully-valid blocks can skip all per-element validity/mask checks.
     if K_TILE_BLOCKS == 1 and MATRIX_K == N_LANES:
         full_block = (block + 1) * BLOCK <= MATRIX_NUMEL
@@ -136,8 +135,12 @@ def _encode_impl(
         for step in tl.range(0, N_STEPS, 2, loop_unroll_factor=4):
             source_offset = block * BLOCK + step * N_LANES + lanes
             logical_n = n_tile * N_STEPS + step
-            input_offset0 = logical_n * MATRIX_K + logical_k
-            input_offset1 = input_offset0 + MATRIX_K
+            shift0 = tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n & 255, 0)
+            shift1 = tl.where((k_tile + 1) * N_LANES <= MATRIX_K, (logical_n + 1) & 255, 0)
+            input_k0 = k_tile * N_LANES + ((lanes + shift0) & 255)
+            input_k1 = k_tile * N_LANES + ((lanes + shift1) & 255)
+            input_offset0 = logical_n * MATRIX_K + input_k0
+            input_offset1 = (logical_n + 1) * MATRIX_K + input_k1
             value0 = tl.load(source_bits + input_offset0).to(tl.int32)
             value1 = tl.load(source_bits + input_offset1).to(tl.int32)
             if PRECOMPUTED:
@@ -184,14 +187,18 @@ def _encode_impl(
             valid0 = source_offset < n_elements
             valid1 = source_offset + N_LANES < n_elements
             logical_n = n_tile * N_STEPS + step
-            input_offset0 = logical_n * MATRIX_K + logical_k
-            input_offset1 = input_offset0 + MATRIX_K
+            shift0 = tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n & 255, 0)
+            shift1 = tl.where((k_tile + 1) * N_LANES <= MATRIX_K, (logical_n + 1) & 255, 0)
+            input_k0 = k_tile * N_LANES + ((lanes + shift0) & 255)
+            input_k1 = k_tile * N_LANES + ((lanes + shift1) & 255)
+            input_offset0 = logical_n * MATRIX_K + input_k0
+            input_offset1 = (logical_n + 1) * MATRIX_K + input_k1
             input_valid0 = (
-                (logical_n < MATRIX_N) & (logical_k < MATRIX_K)
+                (logical_n < MATRIX_N) & (input_k0 < MATRIX_K)
                 & (input_offset0 < MATRIX_NUMEL)
             )
             input_valid1 = (
-                (logical_n + 1 < MATRIX_N) & (logical_k < MATRIX_K)
+                (logical_n + 1 < MATRIX_N) & (input_k1 < MATRIX_K)
                 & (input_offset1 < MATRIX_NUMEL)
             )
             value0 = tl.load(
@@ -440,7 +447,7 @@ def _compact_extra_impl(
         n_tile = block // K_TILE_BLOCKS
         k_tile = block % K_TILE_BLOCKS
         logical_n = n_tile * N_STEPS + step + start
-        logical_k = k_tile * N_LANES + lane
+        logical_k = k_tile * N_LANES + ((lane + tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n & 255, 0)) & 255)
         input_offset = logical_n * MATRIX_K + logical_k
         input_active = (
             active & (logical_n < MATRIX_N) & (logical_k < MATRIX_K)
@@ -557,6 +564,12 @@ def _decode_matrix_kernel(
     if K_TILE_BLOCKS == 1 and MATRIX_K == N_LANES and (block + 1) * BLOCK <= MATRIX_NUMEL:
         storage_offset = block * BLOCK + lanes
         for step in tl.range(0, N_STEPS, 2, flatten=True, warp_specialize=True):
+            logical_n0 = block * N_STEPS + step
+            logical_n1 = logical_n0 + 1
+            out_k0 = (lanes + (logical_n0 & 255)) & 255
+            out_k1 = (lanes + (logical_n1 & 255)) & 255
+            output_offset0 = logical_n0 * MATRIX_K + out_k0
+            output_offset1 = logical_n1 * MATRIX_K + out_k1
             if not ON_DEMAND:
                 word2_prefetch = tl.load(
                     encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams + lane_index
@@ -582,7 +595,7 @@ def _decode_matrix_kernel(
                 | (sm.to(tl.int32) & 0x7F)
                 | ((sm.to(tl.int32) & 0x80) << 8)
             )
-            tl.store(output + storage_offset, packed.to(tl.int16), cache_modifier='.cs')
+            tl.store(output + output_offset0, packed.to(tl.int16), cache_modifier='.cs')
             # Decode symbol 1 at the bit offset after symbol 0.
             shift1 = shift + length
             current1 = window >> shift1
@@ -606,7 +619,7 @@ def _decode_matrix_kernel(
                 | ((sm1.to(tl.int32) & 0x80) << 8)
             )
             tl.store(
-                output + storage_offset + N_LANES,
+                output + output_offset1,
                 packed1.to(tl.int16),
                 cache_modifier='.cs',
             )
@@ -628,26 +641,29 @@ def _decode_matrix_kernel(
     else:
         # General path: map the codec storage block back to logical matrix coordinates.
         if K_TILE_BLOCKS == 1 and MATRIX_K == N_LANES:
-            logical_k = lanes
             storage_offset = block * BLOCK + lanes
-            output_offset = storage_offset
             logical_n = block * N_STEPS
+            k_tile = 0
         else:
             n_tile = block // K_TILE_BLOCKS
             k_tile = block % K_TILE_BLOCKS
-            logical_k = k_tile * N_LANES + lanes
             storage_offset = block * BLOCK + lanes
-            output_offset = n_tile * N_STEPS * MATRIX_K + logical_k
             logical_n = n_tile * N_STEPS
         for step in tl.range(0, N_STEPS, 2):
             word2_prefetch = tl.load(
                 encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams + lane_index
             ).to(tl.uint32).to(tl.uint64)
+            logical_n0 = logical_n + step
+            logical_n1 = logical_n0 + 1
+            out_k0 = k_tile * N_LANES + ((lanes + tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n0 & 255, 0)) & 255)
+            out_k1 = k_tile * N_LANES + ((lanes + tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n1 & 255, 0)) & 255)
+            output_offset0 = logical_n0 * MATRIX_K + out_k0
+            output_offset1 = logical_n1 * MATRIX_K + out_k1
             storage_valid = storage_offset < n_elements
             valid = (
-                (logical_n < MATRIX_N)
-                & (logical_k < MATRIX_K)
-                & (output_offset < MATRIX_NUMEL)
+                (logical_n0 < MATRIX_N)
+                & (out_k0 < MATRIX_K)
+                & (output_offset0 < MATRIX_NUMEL)
             )
             # Decode symbol 0 from the current prefix bits.
             current = window >> shift
@@ -673,7 +689,7 @@ def _decode_matrix_kernel(
                 | (sm.to(tl.int32) & 0x7F)
                 | ((sm.to(tl.int32) & 0x80) << 8)
             )
-            tl.store(output + output_offset, packed.to(tl.int16), mask=valid, cache_modifier='.cs')
+            tl.store(output + output_offset0, packed.to(tl.int16), mask=valid, cache_modifier='.cs')
             shift1 = shift + tl.where(storage_valid, length, 0)
             current1 = window >> shift1
             first1 = tl.load(
@@ -691,10 +707,9 @@ def _decode_matrix_kernel(
             value1 = tl.where(continuation1, escaped_value1, first1 >> 8)
             storage_offset1 = storage_offset + N_LANES
             storage_valid1 = storage_offset1 < n_elements
-            output_offset1 = output_offset + MATRIX_K
             valid1 = (
-                (logical_n + 1 < MATRIX_N)
-                & (logical_k < MATRIX_K)
+                (logical_n1 < MATRIX_N)
+                & (out_k1 < MATRIX_K)
                 & (output_offset1 < MATRIX_NUMEL)
             )
             sm1 = tl.load(
@@ -717,8 +732,6 @@ def _decode_matrix_kernel(
             word += crosses_word
             shift = tl.where(crosses_word, next_shift - 32, next_shift)
             storage_offset += 2 * N_LANES
-            output_offset += 2 * MATRIX_K
-            logical_n += 2
 
 @triton.autotune(
     configs=SCATTER_FALLBACK_AUTOTUNE_CONFIGS,
@@ -765,10 +778,10 @@ def _scatter_blocked_fallback_kernel(
     lane = stream % N_LANES
     n_tile = block // K_TILE_BLOCKS
     k_tile = block % K_TILE_BLOCKS
-    logical_k = k_tile * N_LANES + lane
     for step in tl.range(0, N_STEPS):
         storage_offset = block * BLOCK + step * N_LANES + lane
         logical_n = n_tile * N_STEPS + step
+        logical_k = k_tile * N_LANES + ((lane + tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n & 255, 0)) & 255)
         logical_offset = logical_n * MATRIX_K + logical_k
         active = (
             valid & (step >= start) & (storage_offset < n_elements)

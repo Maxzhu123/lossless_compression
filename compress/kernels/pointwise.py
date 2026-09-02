@@ -52,7 +52,7 @@ def _pointwise_location(
     n_tile = block // K_TILE_BLOCKS
     k_tile = block % K_TILE_BLOCKS
     logical_n = n_tile * N_STEPS + step
-    logical_k = k_tile * N_LANES + lane
+    logical_k = k_tile * N_LANES + ((lane + tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n & 255, 0)) & 255)
     logical_offset = logical_n * MATRIX_K + logical_k
     logical_valid = (
         (logical_n < MATRIX_N) & (logical_k < MATRIX_K)
@@ -104,6 +104,12 @@ def _pointwise_compressed_dense_impl(
         storage_offset = block * BLOCK + lanes
         true_mask = tl.full((N_LANES,), True, tl.int1)
         for step in tl.range(0, N_STEPS, 2, flatten=True, warp_specialize=True):
+            logical_n0 = block * N_STEPS + step
+            logical_n1 = logical_n0 + 1
+            logical_k0 = k_tile * N_LANES + ((lanes + tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n0 & 255, 0)) & 255)
+            logical_k1 = k_tile * N_LANES + ((lanes + tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n1 & 255, 0)) & 255)
+            logical_offset0 = logical_n0 * MATRIX_K + logical_k0
+            logical_offset1 = logical_n1 * MATRIX_K + logical_k1
             # Decode symbol 0, reconstruct its BF16 value, then apply the op.
             current = window >> shift
             value, length = decode_symbol(
@@ -114,10 +120,10 @@ def _pointwise_compressed_dense_impl(
             left = pack_bf16(value, sm).to(tl.int16).to(
                 tl.bfloat16, bitcast=True
             )
-            right = tl.load(other + storage_offset, cache_modifier='.cg')
+            right = tl.load(other + logical_offset0, cache_modifier='.cg')
             _store_result(
                 OP(left, right), output, auxiliary, storage_offset,
-                storage_offset, true_mask, true_mask, OUTPUT_POLICY,
+                logical_offset0, true_mask, true_mask, OUTPUT_POLICY,
             )
 
             # Decode symbol 1 at the next bit offset and process it the same way.
@@ -131,10 +137,10 @@ def _pointwise_compressed_dense_impl(
             left1 = pack_bf16(value1, sm1).to(tl.int16).to(
                 tl.bfloat16, bitcast=True
             )
-            right1 = tl.load(other + storage_offset + N_LANES, cache_modifier='.cg')
+            right1 = tl.load(other + logical_offset1, cache_modifier='.cg')
             _store_result(
                 OP(left1, right1), output, auxiliary,
-                storage_offset + N_LANES, storage_offset + N_LANES,
+                storage_offset + N_LANES, logical_offset1,
                 true_mask, true_mask, OUTPUT_POLICY,
             )
 
@@ -177,6 +183,7 @@ def _pointwise_compressed_dense_impl(
                     + lane_index,
                 ).to(tl.uint32).to(tl.uint64)
                 logical_n = logical_n_base + step
+                logical_k = k_tile * N_LANES + ((lanes + tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n & 255, 0)) & 255)
                 logical_offset = logical_n * MATRIX_K + logical_k
                 value, length = decode_symbol(
                     window >> shift, decode_table, center_value,
@@ -198,7 +205,9 @@ def _pointwise_compressed_dense_impl(
                     current1, decode_table, center_value,
                     FIRST_MASK, RARE_LENGTH,
                 )
-                logical_offset1 = logical_offset + MATRIX_K
+                logical_n1 = logical_n + 1
+                logical_k1 = k_tile * N_LANES + ((lanes + tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n1 & 255, 0)) & 255)
+                logical_offset1 = logical_n1 * MATRIX_K + logical_k1
                 sm1 = tl.load(sign_mantissa + storage_offset + N_LANES, cache_modifier='.cg')
                 left1 = pack_bf16(value1, sm1).to(tl.int16).to(
                     tl.bfloat16, bitcast=True
