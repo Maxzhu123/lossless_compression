@@ -317,6 +317,8 @@ def _pointwise_compressed_dense_impl(
                 window = tl.where(crosses_word, next_window, window)
                 word += crosses_word
                 shift = tl.where(crosses_word, next_shift - 32, next_shift)
+
+
 @triton.autotune(
     configs=DECODE_AUTOTUNE_CONFIGS,
     key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS", "OUTPUT_POLICY"],
