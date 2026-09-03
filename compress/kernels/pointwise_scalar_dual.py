@@ -123,7 +123,7 @@ def _scalar_mul_add_compressed_compressed_matrix_impl(
         & ((k_tile + 1) * N_LANES <= MATRIX_K)
     )
     if full_generic:
-        for step in tl.range(0, N_STEPS, 2, loop_unroll_factor=4):
+        for step in tl.range(0, N_STEPS, 2, loop_unroll_factor=6):
             a_word2_prefetch = tl.load(
                 a_encoded + tl.minimum(a_word + 2, FIXED_WORDS - 1) * n_streams
                 + stream,
