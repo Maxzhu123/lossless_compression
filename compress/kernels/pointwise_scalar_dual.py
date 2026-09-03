@@ -112,70 +112,180 @@ def _scalar_mul_add_compressed_compressed_matrix_impl(
     b_center_value = tl.load(b_center).to(tl.int32)
     alpha_value = tl.load(alpha).to(tl.float32)
 
-    for step in tl.range(0, N_STEPS):
-        a_is_fb = step >= a_start
-        b_is_fb = step >= b_start
+    n_tile = block // K_TILE_BLOCKS
+    k_tile = block % K_TILE_BLOCKS
+    full_generic = (
+        ((n_tile + 1) * N_STEPS <= MATRIX_N)
+        & ((k_tile + 1) * N_LANES <= MATRIX_K)
+    )
+    if full_generic:
+        for step in tl.range(0, N_STEPS, 2, loop_unroll_factor=2):
+            a0_is_fb = step >= a_start
+            b0_is_fb = step >= b_start
 
-        a_value, a_length = decode_symbol(
-            a_window >> a_shift, a_decode_table, a_center_value,
-            FIRST_MASK, RARE_LENGTH,
-        )
-        b_value, b_length = decode_symbol(
-            b_window >> b_shift, b_decode_table, b_center_value,
-            FIRST_MASK, RARE_LENGTH,
-        )
-        a_fb_value = tl.load(
-            a_fallback_buffer + a_real_base + a_offset + (step - a_start),
-            mask=a_is_fb, other=0,
-        ).to(tl.int32)
-        b_fb_value = tl.load(
-            b_fallback_buffer + b_real_base + b_offset + (step - b_start),
-            mask=b_is_fb, other=0,
-        ).to(tl.int32)
-        a_value = tl.where(a_is_fb, a_fb_value, a_value)
-        b_value = tl.where(b_is_fb, b_fb_value, b_value)
-        a_length = tl.where(a_is_fb, 0, a_length)
-        b_length = tl.where(b_is_fb, 0, b_length)
+            a0, a0_len = decode_symbol(
+                a_window >> a_shift, a_decode_table, a_center_value,
+                FIRST_MASK, RARE_LENGTH,
+            )
+            b0, b0_len = decode_symbol(
+                b_window >> b_shift, b_decode_table, b_center_value,
+                FIRST_MASK, RARE_LENGTH,
+            )
+            a0_fb = tl.load(
+                a_fallback_buffer + a_real_base + a_offset + (step - a_start),
+                mask=a0_is_fb, other=0,
+            ).to(tl.int32)
+            b0_fb = tl.load(
+                b_fallback_buffer + b_real_base + b_offset + (step - b_start),
+                mask=b0_is_fb, other=0,
+            ).to(tl.int32)
+            a0 = tl.where(a0_is_fb, a0_fb, a0)
+            b0 = tl.where(b0_is_fb, b0_fb, b0)
+            a0_len = tl.where(a0_is_fb, 0, a0_len)
+            b0_len = tl.where(b0_is_fb, 0, b0_len)
 
-        offset, logical_offset, storage_valid, logical_valid = _pointwise_location(
-            block, step, lanes, n_elements, MATRIX_N, MATRIX_K,
-            MATRIX_NUMEL, K_TILE_BLOCKS,
-            BLOCK, N_LANES, N_STEPS,
-        )
-        valid = storage_valid
-        logical_active = valid & logical_valid
-        sm_a = tl.load(a_sign_mantissa + offset, mask=valid, other=0, cache_modifier='.cg')
-        sm_b = tl.load(b_sign_mantissa + offset, mask=valid, other=0, cache_modifier='.cg')
-        a_left = pack_bf16(a_value, sm_a).to(tl.int16).to(tl.bfloat16, bitcast=True)
-        b_left = pack_bf16(b_value, sm_b).to(tl.int16).to(tl.bfloat16, bitcast=True)
-        _store_result(
-            tl.math.fma(a_left, alpha_value, b_left), output, auxiliary,
-            offset, logical_offset, logical_active, valid, OUTPUT_POLICY,
-        )
+            offset0 = block * BLOCK + step * N_LANES + lanes
+            logical_n0 = n_tile * N_STEPS + step
+            logical_k0 = k_tile * N_LANES + ((lanes + (logical_n0 & 255)) & 255)
+            logical_offset0 = logical_n0 * MATRIX_K + logical_k0
+            sm_a0 = tl.load(a_sign_mantissa + offset0, cache_modifier='.cg')
+            sm_b0 = tl.load(b_sign_mantissa + offset0, cache_modifier='.cg')
+            a_left0 = pack_bf16(a0, sm_a0).to(tl.int16).to(tl.bfloat16, bitcast=True)
+            b_left0 = pack_bf16(b0, sm_b0).to(tl.int16).to(tl.bfloat16, bitcast=True)
+            _store_result(
+                tl.math.fma(a_left0, alpha_value, b_left0), output, auxiliary,
+                offset0, logical_offset0, True, True, OUTPUT_POLICY,
+            )
 
-        a_shift1 = a_shift + a_length
-        a_crosses = a_shift1 >= 32
-        a_word2 = tl.load(
-            a_encoded + tl.minimum(a_word + 2, FIXED_WORDS - 1) * n_streams
-            + stream,
-            mask=a_crosses, other=0,
-        ).to(tl.uint32).to(tl.uint64)
-        a_next_window = (a_window >> 32) | (a_word2 << 32)
-        a_window = tl.where(a_crosses, a_next_window, a_window)
-        a_word += a_crosses
-        a_shift = tl.where(a_crosses, a_shift1 - 32, a_shift1)
+            a_shift1 = a_shift + a0_len
+            b_shift1 = b_shift + b0_len
+            a1_is_fb = step + 1 >= a_start
+            b1_is_fb = step + 1 >= b_start
 
-        b_shift1 = b_shift + b_length
-        b_crosses = b_shift1 >= 32
-        b_word2 = tl.load(
-            b_encoded + tl.minimum(b_word + 2, FIXED_WORDS - 1) * n_streams
-            + stream,
-            mask=b_crosses, other=0,
-        ).to(tl.uint32).to(tl.uint64)
-        b_next_window = (b_window >> 32) | (b_word2 << 32)
-        b_window = tl.where(b_crosses, b_next_window, b_window)
-        b_word += b_crosses
-        b_shift = tl.where(b_crosses, b_shift1 - 32, b_shift1)
+            a1, a1_len = decode_symbol(
+                a_window >> a_shift1, a_decode_table, a_center_value,
+                FIRST_MASK, RARE_LENGTH,
+            )
+            b1, b1_len = decode_symbol(
+                b_window >> b_shift1, b_decode_table, b_center_value,
+                FIRST_MASK, RARE_LENGTH,
+            )
+            a1_fb = tl.load(
+                a_fallback_buffer + a_real_base + a_offset + (step + 1 - a_start),
+                mask=a1_is_fb, other=0,
+            ).to(tl.int32)
+            b1_fb = tl.load(
+                b_fallback_buffer + b_real_base + b_offset + (step + 1 - b_start),
+                mask=b1_is_fb, other=0,
+            ).to(tl.int32)
+            a1 = tl.where(a1_is_fb, a1_fb, a1)
+            b1 = tl.where(b1_is_fb, b1_fb, b1)
+            a1_len = tl.where(a1_is_fb, 0, a1_len)
+            b1_len = tl.where(b1_is_fb, 0, b1_len)
+
+            offset1 = offset0 + N_LANES
+            logical_n1 = logical_n0 + 1
+            logical_k1 = k_tile * N_LANES + ((lanes + (logical_n1 & 255)) & 255)
+            logical_offset1 = logical_n1 * MATRIX_K + logical_k1
+            sm_a1 = tl.load(a_sign_mantissa + offset1, cache_modifier='.cg')
+            sm_b1 = tl.load(b_sign_mantissa + offset1, cache_modifier='.cg')
+            a_left1 = pack_bf16(a1, sm_a1).to(tl.int16).to(tl.bfloat16, bitcast=True)
+            b_left1 = pack_bf16(b1, sm_b1).to(tl.int16).to(tl.bfloat16, bitcast=True)
+            _store_result(
+                tl.math.fma(a_left1, alpha_value, b_left1), output, auxiliary,
+                offset1, logical_offset1, True, True, OUTPUT_POLICY,
+            )
+
+            a_next_shift = a_shift1 + a1_len
+            a_crosses = a_next_shift >= 32
+            a_word2 = tl.load(
+                a_encoded + tl.minimum(a_word + 2, FIXED_WORDS - 1) * n_streams
+                + stream,
+                mask=a_crosses, other=0,
+            ).to(tl.uint32).to(tl.uint64)
+            a_next_window = (a_window >> 32) | (a_word2 << 32)
+            a_window = tl.where(a_crosses, a_next_window, a_window)
+            a_word += a_crosses
+            a_shift = tl.where(a_crosses, a_next_shift - 32, a_next_shift)
+
+            b_next_shift = b_shift1 + b1_len
+            b_crosses = b_next_shift >= 32
+            b_word2 = tl.load(
+                b_encoded + tl.minimum(b_word + 2, FIXED_WORDS - 1) * n_streams
+                + stream,
+                mask=b_crosses, other=0,
+            ).to(tl.uint32).to(tl.uint64)
+            b_next_window = (b_window >> 32) | (b_word2 << 32)
+            b_window = tl.where(b_crosses, b_next_window, b_window)
+            b_word += b_crosses
+            b_shift = tl.where(b_crosses, b_next_shift - 32, b_next_shift)
+
+    else:
+        for step in tl.range(0, N_STEPS):
+            a_is_fb = step >= a_start
+            b_is_fb = step >= b_start
+
+            a_value, a_length = decode_symbol(
+                a_window >> a_shift, a_decode_table, a_center_value,
+                FIRST_MASK, RARE_LENGTH,
+            )
+            b_value, b_length = decode_symbol(
+                b_window >> b_shift, b_decode_table, b_center_value,
+                FIRST_MASK, RARE_LENGTH,
+            )
+            a_fb_value = tl.load(
+                a_fallback_buffer + a_real_base + a_offset + (step - a_start),
+                mask=a_is_fb, other=0,
+            ).to(tl.int32)
+            b_fb_value = tl.load(
+                b_fallback_buffer + b_real_base + b_offset + (step - b_start),
+                mask=b_is_fb, other=0,
+            ).to(tl.int32)
+            a_value = tl.where(a_is_fb, a_fb_value, a_value)
+            b_value = tl.where(b_is_fb, b_fb_value, b_value)
+            a_length = tl.where(a_is_fb, 0, a_length)
+            b_length = tl.where(b_is_fb, 0, b_length)
+
+            offset, logical_offset, storage_valid, logical_valid = _pointwise_location(
+                block, step, lanes, n_elements, MATRIX_N, MATRIX_K,
+                MATRIX_NUMEL, K_TILE_BLOCKS,
+                BLOCK, N_LANES, N_STEPS,
+            )
+            valid = storage_valid
+            logical_active = valid & logical_valid
+            sm_a = tl.load(a_sign_mantissa + offset, mask=valid, other=0, cache_modifier='.cg')
+            sm_b = tl.load(b_sign_mantissa + offset, mask=valid, other=0, cache_modifier='.cg')
+            a_left = pack_bf16(a_value, sm_a).to(tl.int16).to(tl.bfloat16, bitcast=True)
+            b_left = pack_bf16(b_value, sm_b).to(tl.int16).to(tl.bfloat16, bitcast=True)
+            _store_result(
+                tl.math.fma(a_left, alpha_value, b_left), output, auxiliary,
+                offset, logical_offset, logical_active, valid, OUTPUT_POLICY,
+            )
+
+            a_shift1 = a_shift + a_length
+            a_crosses = a_shift1 >= 32
+            a_word2 = tl.load(
+                a_encoded + tl.minimum(a_word + 2, FIXED_WORDS - 1) * n_streams
+                + stream,
+                mask=a_crosses, other=0,
+            ).to(tl.uint32).to(tl.uint64)
+            a_next_window = (a_window >> 32) | (a_word2 << 32)
+            a_window = tl.where(a_crosses, a_next_window, a_window)
+            a_word += a_crosses
+            a_shift = tl.where(a_crosses, a_shift1 - 32, a_shift1)
+
+            b_shift1 = b_shift + b_length
+            b_crosses = b_shift1 >= 32
+            b_word2 = tl.load(
+                b_encoded + tl.minimum(b_word + 2, FIXED_WORDS - 1) * n_streams
+                + stream,
+                mask=b_crosses, other=0,
+            ).to(tl.uint32).to(tl.uint64)
+            b_next_window = (b_window >> 32) | (b_word2 << 32)
+            b_window = tl.where(b_crosses, b_next_window, b_window)
+            b_word += b_crosses
+            b_shift = tl.where(b_crosses, b_shift1 - 32, b_shift1)
+
 
 
 @triton.autotune(
