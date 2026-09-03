@@ -35,8 +35,7 @@ def _scalar_mul_add_compressed_compressed_matrix_impl(
     n_elements, n_streams,
     BUFFERED: tl.constexpr,
     OUTPUT_POLICY: tl.constexpr,
-    MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
-    MATRIX_NUMEL: tl.constexpr, K_TILE_BLOCKS: tl.constexpr,
+    LOGICAL_NUMEL: tl.constexpr,
     FIRST_MASK: tl.constexpr, RARE_LENGTH: tl.constexpr,
     BLOCK: tl.constexpr, N_LANES: tl.constexpr,
     N_STEPS: tl.constexpr, FIXED_WORDS: tl.constexpr,
@@ -113,13 +112,8 @@ def _scalar_mul_add_compressed_compressed_matrix_impl(
     b_center_value = tl.load(b_center).to(tl.int32)
     alpha_value = tl.load(alpha).to(tl.float32)
 
-    n_tile = block // K_TILE_BLOCKS
-    k_tile = block % K_TILE_BLOCKS
-    full_generic = (
-        ((n_tile + 1) * N_STEPS <= MATRIX_N)
-        & ((k_tile + 1) * N_LANES <= MATRIX_K)
-    )
-    if full_generic:
+    # Fast path: fully-contained blocks skip all per-element validity checks.
+    if (block + 1) * BLOCK <= LOGICAL_NUMEL:
         for step in tl.range(0, N_STEPS, 2, loop_unroll_factor=6):
             a_word2_prefetch = tl.load(
                 a_encoded + tl.minimum(a_word + 2, FIXED_WORDS - 1) * n_streams
@@ -154,13 +148,11 @@ def _scalar_mul_add_compressed_compressed_matrix_impl(
             b0_len = tl.where(b0_is_fb, 0, b0_len)
 
             offset0 = block * BLOCK + step * N_LANES + lanes
-            logical_n0 = n_tile * N_STEPS + step
-            # Keep the logical column swizzle.  Do NOT simplify `logical_n & 255`
-            # to `step` even when N_STEPS == 256: the row-dependent swizzle
-            # matches the encode/decode layout and prevents correlations across
-            # rows of the input, so future optimisations must preserve it.
-            logical_k0 = k_tile * N_LANES + ((lanes + (logical_n0 & 255)) & 255)
-            logical_offset0 = logical_n0 * MATRIX_K + logical_k0
+            logical_n0 = block * N_STEPS + step
+            # Row-dependent swizzle matches the encode/decode layout and
+            # prevents correlations across rows of the flattened input.
+            logical_k0 = (lanes + (logical_n0 & 255)) & 255
+            logical_offset0 = logical_n0 * N_LANES + logical_k0
             sm_a0 = tl.load(a_sign_mantissa + offset0, cache_modifier='.cg')
             sm_b0 = tl.load(b_sign_mantissa + offset0, cache_modifier='.cg')
             a_left0 = pack_bf16(a0, sm_a0).to(tl.int16).to(tl.bfloat16, bitcast=True)
@@ -198,8 +190,8 @@ def _scalar_mul_add_compressed_compressed_matrix_impl(
 
             offset1 = offset0 + N_LANES
             logical_n1 = logical_n0 + 1
-            logical_k1 = k_tile * N_LANES + ((lanes + (logical_n1 & 255)) & 255)
-            logical_offset1 = logical_n1 * MATRIX_K + logical_k1
+            logical_k1 = (lanes + (logical_n1 & 255)) & 255
+            logical_offset1 = logical_n1 * N_LANES + logical_k1
             sm_a1 = tl.load(a_sign_mantissa + offset1, cache_modifier='.cg')
             sm_b1 = tl.load(b_sign_mantissa + offset1, cache_modifier='.cg')
             a_left1 = pack_bf16(a1, sm_a1).to(tl.int16).to(tl.bfloat16, bitcast=True)
@@ -250,8 +242,7 @@ def _scalar_mul_add_compressed_compressed_matrix_impl(
             b_length = tl.where(b_is_fb, 0, b_length)
 
             offset, logical_offset, storage_valid, logical_valid = _pointwise_location(
-                block, step, lanes, n_elements, MATRIX_N, MATRIX_K,
-                MATRIX_NUMEL, K_TILE_BLOCKS,
+                block, step, lanes, n_elements, LOGICAL_NUMEL,
                 BLOCK, N_LANES, N_STEPS,
             )
             valid = storage_valid
@@ -309,8 +300,7 @@ def pointwise_scalar_mul_add_compressed_compressed_matrix_kernel(
     n_elements, n_streams,
     BUFFERED: tl.constexpr,
     OUTPUT_POLICY: tl.constexpr,
-    MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
-    MATRIX_NUMEL: tl.constexpr, K_TILE_BLOCKS: tl.constexpr,
+    LOGICAL_NUMEL: tl.constexpr,
     FIRST_MASK: tl.constexpr, RARE_LENGTH: tl.constexpr,
     BLOCK: tl.constexpr, N_LANES: tl.constexpr,
     N_STEPS: tl.constexpr, FIXED_WORDS: tl.constexpr,
@@ -327,6 +317,6 @@ def pointwise_scalar_mul_add_compressed_compressed_matrix_kernel(
         output, auxiliary, alpha,
         n_elements, n_streams,
         BUFFERED, OUTPUT_POLICY,
-        MATRIX_N, MATRIX_K, MATRIX_NUMEL, K_TILE_BLOCKS,
+        LOGICAL_NUMEL,
         FIRST_MASK, RARE_LENGTH, BLOCK, N_LANES, N_STEPS, FIXED_WORDS,
     )

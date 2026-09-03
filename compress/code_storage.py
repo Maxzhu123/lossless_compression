@@ -102,8 +102,6 @@ class CompressedTensor:
     center: torch.Tensor | int = 0  # CUDA center scalar used by encode/decode.
     shape: tuple[int, ...] = ()  # Original tensor shape.
     layout: StorageLayout = StorageLayout.RAW
-    layout_shape: tuple[int, int] = ()  # Logical 2D mapping used by blocked storage.
-    storage_shape: tuple[int, ...] = ()  # Padded codec shape for non-linear layouts.
 
     @property
     def logical_numel(self) -> int:

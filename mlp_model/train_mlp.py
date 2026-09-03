@@ -65,7 +65,7 @@ def main():
     model = Model(8, 4096, 21504, 4096, G, buffer=buffer)
     optimiser = SparseSGDM(model.sparse_parameters(), lr=0.001, momentum=0.9)
 
-    x = torch.randn(5000, 4096, dtype=torch.bfloat16, device="cuda", generator=G)
+    x = torch.randn(12000, 4096, dtype=torch.bfloat16, device="cuda", generator=G)
     y_hat = x.norm(dim=0)
 
     # Warmup
@@ -80,7 +80,7 @@ def main():
     torch.cuda.reset_peak_memory_stats()
     torch.cuda.synchronize()
     st = time.perf_counter()
-    for i in range(50):
+    for i in range(21):
         y = model(x, buffer=buffer)
         loss = (y - y_hat).pow(2).mean()
         # print(visualize_buffer(buffer))

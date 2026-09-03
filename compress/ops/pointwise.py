@@ -39,8 +39,6 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
     )
     block_size, lanes, steps, fixed_words = geometry(data.distribution)
     blocks = triton.cdiv(data.size, block_size)
-    matrix_n, matrix_k = data.layout_shape
-    k_tile_blocks = data.storage_shape[1]
     if output_policy == DENSE_OUTPUT:
         output = torch.empty(
             data.logical_numel,
@@ -64,9 +62,7 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
         FIXED_WORDS=fixed_words,
     )
     pointwise_compressed_dense_matrix_kernel[(blocks,)](
-        *main_args, MATRIX_N=matrix_n, MATRIX_K=matrix_k,
-        MATRIX_NUMEL=data.logical_numel,
-        K_TILE_BLOCKS=k_tile_blocks, **main_meta,
+        *main_args, LOGICAL_NUMEL=data.logical_numel, **main_meta,
     )
     if data.fallback_descriptor is not None:
         metadata = data.fallback_buffer.view(torch.int32)
@@ -82,9 +78,7 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
         )
         fallback_grid = (triton.cdiv(blocks * lanes, 64),)
         pointwise_compressed_dense_matrix_fallback_kernel[fallback_grid](
-            *fallback_args, MATRIX_N=matrix_n, MATRIX_K=matrix_k,
-            MATRIX_NUMEL=data.logical_numel,
-            K_TILE_BLOCKS=k_tile_blocks, **fallback_meta,
+            *fallback_args, LOGICAL_NUMEL=data.logical_numel, **fallback_meta,
         )
     elif data.offsets.numel():
         fallback_args = (
@@ -100,9 +94,7 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
         )
         fallback_grid = (triton.cdiv(data.offsets.numel(), 64),)
         pointwise_compressed_dense_matrix_fallback_kernel[fallback_grid](
-            *fallback_args, MATRIX_N=matrix_n, MATRIX_K=matrix_k,
-            MATRIX_NUMEL=data.logical_numel,
-            K_TILE_BLOCKS=k_tile_blocks, **fallback_meta,
+            *fallback_args, LOGICAL_NUMEL=data.logical_numel, **fallback_meta,
         )
     return output, auxiliary
 
@@ -122,8 +114,6 @@ def _launch_scalar_mul_add_compressed_dense(
     )
     block_size, lanes, steps, fixed_words = geometry(data.distribution)
     blocks = triton.cdiv(data.size, block_size)
-    matrix_n, matrix_k = data.layout_shape
-    k_tile_blocks = data.storage_shape[1]
     if output_policy == DENSE_OUTPUT:
         output = torch.empty(
             data.logical_numel,
@@ -147,9 +137,7 @@ def _launch_scalar_mul_add_compressed_dense(
         FIXED_WORDS=fixed_words,
     )
     pointwise_scalar_mul_add_dense_matrix_kernel[(blocks,)](
-        *main_args, MATRIX_N=matrix_n, MATRIX_K=matrix_k,
-        MATRIX_NUMEL=data.logical_numel,
-        K_TILE_BLOCKS=k_tile_blocks, **main_meta,
+        *main_args, LOGICAL_NUMEL=data.logical_numel, **main_meta,
     )
     if data.fallback_descriptor is not None:
         metadata = data.fallback_buffer.view(torch.int32)
@@ -165,9 +153,7 @@ def _launch_scalar_mul_add_compressed_dense(
         )
         fallback_grid = (triton.cdiv(blocks * lanes, 64),)
         pointwise_scalar_mul_add_dense_matrix_fallback_kernel[fallback_grid](
-            *fallback_args, MATRIX_N=matrix_n, MATRIX_K=matrix_k,
-            MATRIX_NUMEL=data.logical_numel,
-            K_TILE_BLOCKS=k_tile_blocks, **fallback_meta,
+            *fallback_args, LOGICAL_NUMEL=data.logical_numel, **fallback_meta,
         )
     elif data.offsets.numel():
         fallback_args = (
@@ -183,9 +169,7 @@ def _launch_scalar_mul_add_compressed_dense(
         )
         fallback_grid = (triton.cdiv(data.offsets.numel(), 64),)
         pointwise_scalar_mul_add_dense_matrix_fallback_kernel[fallback_grid](
-            *fallback_args, MATRIX_N=matrix_n, MATRIX_K=matrix_k,
-            MATRIX_NUMEL=data.logical_numel,
-            K_TILE_BLOCKS=k_tile_blocks, **fallback_meta,
+            *fallback_args, LOGICAL_NUMEL=data.logical_numel, **fallback_meta,
         )
     return output, auxiliary
 
@@ -216,8 +200,6 @@ def _launch_scalar_mul_add_compressed_compressed(
     )
     block_size, lanes, steps, fixed_words = geometry(data.distribution)
     blocks = triton.cdiv(data.size, block_size)
-    matrix_n, matrix_k = data.layout_shape
-    k_tile_blocks = data.storage_shape[1]
 
     if output_policy == DENSE_OUTPUT:
         output = torch.empty(
@@ -257,9 +239,7 @@ def _launch_scalar_mul_add_compressed_compressed(
         data.size, blocks * lanes,
         BUFFERED=buffered,
         OUTPUT_POLICY=output_policy,
-        MATRIX_N=matrix_n, MATRIX_K=matrix_k,
-        MATRIX_NUMEL=data.logical_numel,
-        K_TILE_BLOCKS=k_tile_blocks,
+        LOGICAL_NUMEL=data.logical_numel,
         FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length_a,
         BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
         FIXED_WORDS=fixed_words,
@@ -291,18 +271,13 @@ def pointwise_scale_add_compressed(
         )
         if dense_output:
             return values.reshape(data.shape)
-        matrix_n, matrix_k = data.layout_shape
-        k_tile_blocks = data.storage_shape[1]
         result = compress_components(
             auxiliary, values, data.size, result_distribution,
             buffer, data.shape, precomputed=True,
-            matrix_shape=(matrix_n, matrix_k, data.logical_numel, k_tile_blocks),
+            logical_numel=data.logical_numel,
         )
         if data.layout == StorageLayout.BLOCKED:
-            result = replace(
-                result, layout=data.layout, layout_shape=data.layout_shape,
-                storage_shape=data.storage_shape,
-            )
+            result = replace(result, layout=data.layout)
         return result
 
     if other.layout == StorageLayout.RAW:
@@ -368,16 +343,11 @@ def pointwise_compressed_dense(
         )
     if dense_output:
         return values.reshape(data.shape)
-    matrix_n, matrix_k = data.layout_shape
-    k_tile_blocks = data.storage_shape[1]
     result = compress_components(
         auxiliary, values, data.size, result_distribution,
         buffer, data.shape, precomputed=True,
-        matrix_shape=(matrix_n, matrix_k, data.logical_numel, k_tile_blocks),
+        logical_numel=data.logical_numel,
     )
     if data.layout == StorageLayout.BLOCKED:
-        result = replace(
-            result, layout=data.layout, layout_shape=data.layout_shape,
-            storage_shape=data.storage_shape,
-        )
+        result = replace(result, layout=data.layout)
     return result

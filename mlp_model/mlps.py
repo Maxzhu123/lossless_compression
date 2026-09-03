@@ -38,7 +38,7 @@ class FFN(Function):
 
         x, W1, W2, h = ctx.saved_tensors
 
-        h = cast(MyCompressed, h)
+        # h = cast(MyCompressed, h)
         # h = h.decompress_free()
 
         grad_z = grad_output @ W2

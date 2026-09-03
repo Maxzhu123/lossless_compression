@@ -106,11 +106,17 @@ def _encode_impl(
     center, extra_starts,
     n_elements, n_streams,
     PRECOMPUTED: tl.constexpr,
-    MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
-    MATRIX_NUMEL: tl.constexpr, K_TILE_BLOCKS: tl.constexpr,
+    LOGICAL_NUMEL: tl.constexpr,
     FIXED_WORDS: tl.constexpr,
     BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
 ):
+    """Encode one flattened contiguous block per program (1D storage).
+
+    Storage offset ``block * BLOCK + step * N_LANES + lane`` maps to the
+    flattened logical element ``logical_n * N_LANES + out_k`` with the
+    row-dependent swizzle ``out_k = (lane + (logical_n & 255)) & 255``,
+    which spreads neighbouring values across lanes.
+    """
     block = tl.program_id(0)
     lanes = tl.arange(0, N_LANES)
     lane_index = block * N_LANES + lanes
@@ -121,26 +127,19 @@ def _encode_impl(
     extra_start = tl.full((N_LANES,), N_STEPS, tl.int32)
     has_data = block * BLOCK + lanes < n_elements
 
-    n_tile = block // K_TILE_BLOCKS
-    k_tile = block % K_TILE_BLOCKS
+    logical_n_base = block * N_STEPS
     # Fully-valid blocks can skip all per-element validity/mask checks.
-    if K_TILE_BLOCKS == 1 and MATRIX_K == N_LANES:
-        full_block = (block + 1) * BLOCK <= MATRIX_NUMEL
-    else:
-        full_block = (
-            ((n_tile + 1) * N_STEPS <= MATRIX_N)
-            & ((k_tile + 1) * N_LANES <= MATRIX_K)
-        )
+    full_block = (block + 1) * BLOCK <= LOGICAL_NUMEL
     if full_block:
         for step in tl.range(0, N_STEPS, 2, loop_unroll_factor=4):
             source_offset = block * BLOCK + step * N_LANES + lanes
-            logical_n = n_tile * N_STEPS + step
-            shift0 = tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n & 255, 0)
-            shift1 = tl.where((k_tile + 1) * N_LANES <= MATRIX_K, (logical_n + 1) & 255, 0)
-            input_k0 = k_tile * N_LANES + ((lanes + shift0) & 255)
-            input_k1 = k_tile * N_LANES + ((lanes + shift1) & 255)
-            input_offset0 = logical_n * MATRIX_K + input_k0
-            input_offset1 = (logical_n + 1) * MATRIX_K + input_k1
+            logical_n = logical_n_base + step
+            shift0 = logical_n & 255
+            shift1 = (logical_n + 1) & 255
+            input_k0 = (lanes + shift0) & 255
+            input_k1 = (lanes + shift1) & 255
+            input_offset0 = logical_n * N_LANES + input_k0
+            input_offset1 = (logical_n + 1) * N_LANES + input_k1
             value0 = tl.load(source_bits + input_offset0).to(tl.int32)
             value1 = tl.load(source_bits + input_offset1).to(tl.int32)
             if PRECOMPUTED:
@@ -186,21 +185,15 @@ def _encode_impl(
             source_offset = block * BLOCK + step * N_LANES + lanes
             valid0 = source_offset < n_elements
             valid1 = source_offset + N_LANES < n_elements
-            logical_n = n_tile * N_STEPS + step
-            shift0 = tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n & 255, 0)
-            shift1 = tl.where((k_tile + 1) * N_LANES <= MATRIX_K, (logical_n + 1) & 255, 0)
-            input_k0 = k_tile * N_LANES + ((lanes + shift0) & 255)
-            input_k1 = k_tile * N_LANES + ((lanes + shift1) & 255)
-            input_offset0 = logical_n * MATRIX_K + input_k0
-            input_offset1 = (logical_n + 1) * MATRIX_K + input_k1
-            input_valid0 = (
-                (logical_n < MATRIX_N) & (input_k0 < MATRIX_K)
-                & (input_offset0 < MATRIX_NUMEL)
-            )
-            input_valid1 = (
-                (logical_n + 1 < MATRIX_N) & (input_k1 < MATRIX_K)
-                & (input_offset1 < MATRIX_NUMEL)
-            )
+            logical_n = logical_n_base + step
+            shift0 = logical_n & 255
+            shift1 = (logical_n + 1) & 255
+            input_k0 = (lanes + shift0) & 255
+            input_k1 = (lanes + shift1) & 255
+            input_offset0 = logical_n * N_LANES + input_k0
+            input_offset1 = (logical_n + 1) * N_LANES + input_k1
+            input_valid0 = input_offset0 < LOGICAL_NUMEL
+            input_valid1 = input_offset1 < LOGICAL_NUMEL
             value0 = tl.load(
                 source_bits + input_offset0, mask=input_valid0, other=0,
             ).to(tl.int32)
@@ -271,16 +264,15 @@ def _encode_impl(
 def _encode_matrix_components_kernel(
     source_bits, sign_mantissa, encoded, encode_table,
     center, extra_starts, n_elements, n_streams,
-    MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
-    MATRIX_NUMEL: tl.constexpr, K_TILE_BLOCKS: tl.constexpr,
+    LOGICAL_NUMEL: tl.constexpr,
     FIXED_WORDS: tl.constexpr,
     BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
 ):
-    """Encode logical-order precomputed exponent planes into matrix storage."""
+    """Encode flattened precomputed exponent planes into 1D storage."""
     _encode_impl(
         source_bits, sign_mantissa, encoded, encode_table, center,
         extra_starts, n_elements, n_streams, True,
-        MATRIX_N, MATRIX_K, MATRIX_NUMEL, K_TILE_BLOCKS,
+        LOGICAL_NUMEL,
         FIXED_WORDS, BLOCK, N_LANES, N_STEPS,
     )
 
@@ -293,16 +285,15 @@ def _encode_matrix_components_kernel(
 def _encode_matrix_kernel(
     source_bits, sign_mantissa, encoded, encode_table,
     center, extra_starts, n_elements, n_streams,
-    MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
-    MATRIX_NUMEL: tl.constexpr, K_TILE_BLOCKS: tl.constexpr,
+    LOGICAL_NUMEL: tl.constexpr,
     FIXED_WORDS: tl.constexpr,
     BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
 ):
-    """Encode a native matrix through compile-time logical source mapping."""
+    """Encode a flattened tensor through the 1D codec mapping."""
     _encode_impl(
         source_bits, sign_mantissa, encoded, encode_table, center,
         extra_starts, n_elements, n_streams, False,
-        MATRIX_N, MATRIX_K, MATRIX_NUMEL, K_TILE_BLOCKS,
+        LOGICAL_NUMEL,
         FIXED_WORDS, BLOCK, N_LANES, N_STEPS,
     )
 
@@ -404,9 +395,7 @@ def _compact_extra_impl(
     metadata_buffer, allocation_descriptor, final_counts, bad_count,
     n_elements,
     BUFFERED: tl.constexpr, PRECOMPUTED: tl.constexpr,
-    MATRIX_N: tl.constexpr,
-    MATRIX_K: tl.constexpr, MATRIX_NUMEL: tl.constexpr,
-    K_TILE_BLOCKS: tl.constexpr,
+    LOGICAL_NUMEL: tl.constexpr,
     BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr, TILE: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -444,15 +433,10 @@ def _compact_extra_impl(
     for step in tl.range(0, max_tail):
         source_offset = block * BLOCK + (step + start) * N_LANES + lane
         active = valid & (step < tail_steps) & (source_offset < n_elements)
-        n_tile = block // K_TILE_BLOCKS
-        k_tile = block % K_TILE_BLOCKS
-        logical_n = n_tile * N_STEPS + step + start
-        logical_k = k_tile * N_LANES + ((lane + tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n & 255, 0)) & 255)
-        input_offset = logical_n * MATRIX_K + logical_k
-        input_active = (
-            active & (logical_n < MATRIX_N) & (logical_k < MATRIX_K)
-            & (input_offset < MATRIX_NUMEL)
-        )
+        logical_n = block * N_STEPS + step + start
+        logical_k = (lane + (logical_n & 255)) & 255
+        input_offset = logical_n * N_LANES + logical_k
+        input_active = active & (input_offset < LOGICAL_NUMEL)
         value = tl.load(
             source_bits + input_offset, mask=input_active, other=0,
         ).to(tl.int32)
@@ -479,18 +463,16 @@ def _compact_matrix_components_extra_kernel(
     source_bits, extra_streams, extra_starts,
     fallback_offsets, fallback_data, metadata_buffer,
     allocation_descriptor, final_counts, bad_count, n_elements,
-    BUFFERED: tl.constexpr, MATRIX_N: tl.constexpr,
-    MATRIX_K: tl.constexpr, MATRIX_NUMEL: tl.constexpr,
-    K_TILE_BLOCKS: tl.constexpr,
+    BUFFERED: tl.constexpr, LOGICAL_NUMEL: tl.constexpr,
     BLOCK: tl.constexpr, N_LANES: tl.constexpr,
     N_STEPS: tl.constexpr, TILE: tl.constexpr,
 ):
-    """Compact overflow exponents from logical-order precomputed planes."""
+    """Compact overflow exponents from flattened precomputed planes."""
     _compact_extra_impl(
         source_bits, extra_streams, extra_starts, fallback_offsets,
         fallback_data, metadata_buffer, allocation_descriptor,
         final_counts, bad_count, n_elements, BUFFERED, True,
-        MATRIX_N, MATRIX_K, MATRIX_NUMEL, K_TILE_BLOCKS,
+        LOGICAL_NUMEL,
         BLOCK, N_LANES, N_STEPS, TILE,
     )
 
@@ -504,18 +486,16 @@ def _compact_matrix_extra_kernel(
     source_bits, extra_streams, extra_starts,
     fallback_offsets, fallback_data, metadata_buffer,
     allocation_descriptor, final_counts, bad_count, n_elements,
-    BUFFERED: tl.constexpr, MATRIX_N: tl.constexpr,
-    MATRIX_K: tl.constexpr, MATRIX_NUMEL: tl.constexpr,
-    K_TILE_BLOCKS: tl.constexpr,
+    BUFFERED: tl.constexpr, LOGICAL_NUMEL: tl.constexpr,
     BLOCK: tl.constexpr, N_LANES: tl.constexpr,
     N_STEPS: tl.constexpr, TILE: tl.constexpr,
 ):
-    """Compact matrix overflow values through compile-time source mapping."""
+    """Compact flattened overflow values through the 1D source mapping."""
     _compact_extra_impl(
         source_bits, extra_streams, extra_starts, fallback_offsets,
         fallback_data, metadata_buffer, allocation_descriptor,
         final_counts, bad_count, n_elements, BUFFERED, False,
-        MATRIX_N, MATRIX_K, MATRIX_NUMEL, K_TILE_BLOCKS,
+        LOGICAL_NUMEL,
         BLOCK, N_LANES, N_STEPS, TILE,
     )
 
@@ -531,14 +511,13 @@ def _pack_bf16(value, sm):
 
 @triton.autotune(
     configs=DECODE_AUTOTUNE_CONFIGS,
-    key=["MATRIX_N", "MATRIX_K", "N_STEPS", "FIXED_WORDS", "ON_DEMAND"],
+    key=["n_elements", "N_STEPS", "FIXED_WORDS", "ON_DEMAND"],
 )
 @triton.jit
 def _decode_matrix_kernel(
     encoded, sign_mantissa, output,
     decode_table, n_elements, n_streams, center,
-    MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
-    MATRIX_NUMEL: tl.constexpr, K_TILE_BLOCKS: tl.constexpr,
+    LOGICAL_NUMEL: tl.constexpr,
     FIRST_MASK: tl.constexpr, RARE_LENGTH: tl.constexpr,
     BLOCK: tl.constexpr,N_LANES: tl.constexpr, N_STEPS: tl.constexpr, FIXED_WORDS: tl.constexpr,
     ON_DEMAND: tl.constexpr,
@@ -559,17 +538,17 @@ def _decode_matrix_kernel(
     window = word0 | (word1 << 32)
     center_value = tl.load(center).to(tl.int32)
     zero_delta = (-127 - center_value) & 255
-    # Fast path: 1D layout with a single k-tile and a fully-contained block.
-    # Here storage offsets are also the logical offsets, so no matrix mapping is needed.
-    if K_TILE_BLOCKS == 1 and MATRIX_K == N_LANES and (block + 1) * BLOCK <= MATRIX_NUMEL:
+    # Fast path: fully-contained blocks skip all per-element validity checks.
+    # The swizzled logical mapping (storage -> flattened output) still applies.
+    if (block + 1) * BLOCK <= LOGICAL_NUMEL:
         storage_offset = block * BLOCK + lanes
         for step in tl.range(0, N_STEPS, 2, flatten=True, warp_specialize=True):
             logical_n0 = block * N_STEPS + step
             logical_n1 = logical_n0 + 1
             out_k0 = (lanes + (logical_n0 & 255)) & 255
             out_k1 = (lanes + (logical_n1 & 255)) & 255
-            output_offset0 = logical_n0 * MATRIX_K + out_k0
-            output_offset1 = logical_n1 * MATRIX_K + out_k1
+            output_offset0 = logical_n0 * N_LANES + out_k0
+            output_offset1 = logical_n1 * N_LANES + out_k1
             if not ON_DEMAND:
                 word2_prefetch = tl.load(
                     encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams + lane_index
@@ -639,32 +618,22 @@ def _decode_matrix_kernel(
             shift = tl.where(crosses_word, next_shift - 32, next_shift)
             storage_offset += 2 * N_LANES
     else:
-        # General path: map the codec storage block back to logical matrix coordinates.
-        if K_TILE_BLOCKS == 1 and MATRIX_K == N_LANES:
-            storage_offset = block * BLOCK + lanes
-            logical_n = block * N_STEPS
-            k_tile = 0
-        else:
-            n_tile = block // K_TILE_BLOCKS
-            k_tile = block % K_TILE_BLOCKS
-            storage_offset = block * BLOCK + lanes
-            logical_n = n_tile * N_STEPS
+        # Tail path: map the codec storage block back to flattened coordinates
+        # with bounds masks.
+        storage_offset = block * BLOCK + lanes
+        logical_n = block * N_STEPS
         for step in tl.range(0, N_STEPS, 2):
             word2_prefetch = tl.load(
                 encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams + lane_index
             ).to(tl.uint32).to(tl.uint64)
             logical_n0 = logical_n + step
             logical_n1 = logical_n0 + 1
-            out_k0 = k_tile * N_LANES + ((lanes + tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n0 & 255, 0)) & 255)
-            out_k1 = k_tile * N_LANES + ((lanes + tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n1 & 255, 0)) & 255)
-            output_offset0 = logical_n0 * MATRIX_K + out_k0
-            output_offset1 = logical_n1 * MATRIX_K + out_k1
+            out_k0 = (lanes + (logical_n0 & 255)) & 255
+            out_k1 = (lanes + (logical_n1 & 255)) & 255
+            output_offset0 = logical_n0 * N_LANES + out_k0
+            output_offset1 = logical_n1 * N_LANES + out_k1
             storage_valid = storage_offset < n_elements
-            valid = (
-                (logical_n0 < MATRIX_N)
-                & (out_k0 < MATRIX_K)
-                & (output_offset0 < MATRIX_NUMEL)
-            )
+            valid = output_offset0 < LOGICAL_NUMEL
             # Decode symbol 0 from the current prefix bits.
             current = window >> shift
             first = tl.load(
@@ -707,11 +676,7 @@ def _decode_matrix_kernel(
             value1 = tl.where(continuation1, escaped_value1, first1 >> 8)
             storage_offset1 = storage_offset + N_LANES
             storage_valid1 = storage_offset1 < n_elements
-            valid1 = (
-                (logical_n1 < MATRIX_N)
-                & (out_k1 < MATRIX_K)
-                & (output_offset1 < MATRIX_NUMEL)
-            )
+            valid1 = output_offset1 < LOGICAL_NUMEL
             sm1 = tl.load(
                 sign_mantissa + storage_offset1,
                 mask=storage_valid1, other=0, cache_modifier='.cg',
@@ -743,8 +708,7 @@ def _scatter_blocked_fallback_kernel(
     fallback_buffer, fallback_base, metadata, descriptor, fallback_count,
     sign_mantissa, output, n_elements,
     BUFFERED: tl.constexpr,
-    MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
-    MATRIX_NUMEL: tl.constexpr, K_TILE_BLOCKS: tl.constexpr,
+    LOGICAL_NUMEL: tl.constexpr,
     TILE: tl.constexpr, BLOCK: tl.constexpr,
     N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
 ):
@@ -776,17 +740,14 @@ def _scatter_blocked_fallback_kernel(
     fallback_offset = fallback_offset.to(tl.int32)
     block = stream // N_LANES
     lane = stream % N_LANES
-    n_tile = block // K_TILE_BLOCKS
-    k_tile = block % K_TILE_BLOCKS
     for step in tl.range(0, N_STEPS):
         storage_offset = block * BLOCK + step * N_LANES + lane
-        logical_n = n_tile * N_STEPS + step
-        logical_k = k_tile * N_LANES + ((lane + tl.where((k_tile + 1) * N_LANES <= MATRIX_K, logical_n & 255, 0)) & 255)
-        logical_offset = logical_n * MATRIX_K + logical_k
+        logical_n = block * N_STEPS + step
+        logical_k = (lane + (logical_n & 255)) & 255
+        logical_offset = logical_n * N_LANES + logical_k
         active = (
             valid & (step >= start) & (storage_offset < n_elements)
-            & (logical_n < MATRIX_N) & (logical_k < MATRIX_K)
-            & (logical_offset < MATRIX_NUMEL)
+            & (logical_offset < LOGICAL_NUMEL)
         )
         exponent = tl.load(
             fallback_buffer + fallback_base + fallback_offset + step - start,
