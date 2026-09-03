@@ -60,9 +60,13 @@ def _make_compressed_pair(n: int):
     return p, mom, p_enc, mom_enc, dist, shape
 
 
-def _current_update(p_enc, mom_enc, scale, out_buf):
-    """Current implementation used by SparseSGDM, expressed as a pure op."""
-    update = decompress(mom_enc) * scale
+def _current_update(p_enc, mom_enc, _scale, out_buf):
+    """Current implementation used by SparseSGDM, expressed as a pure op.
+
+    The real SparseSGDM multiplies by a Python scalar, producing a BF16 update;
+    the fused path uses a CUDA tensor alpha so it is kept separate here.
+    """
+    update = decompress(mom_enc) * SCALE_VALUE
     return compressed_add(
         p_enc,
         update,
