@@ -5,7 +5,7 @@ import torch
 
 from compress.code_storage import Distribution, DistType
 from compress.codec.runtime import compress_dense
-from compress.compress import compressed_matmul, decompress
+from compress.compress import A_compB, decompress
 from compress.tensor_buffer import TensorBuffer
 
 
@@ -80,11 +80,11 @@ def _benchmark(n: int) -> tuple[float, float]:
     _assert_bits_equal(weight, restored)
 
     expected = activations @ weight
-    actual = compressed_matmul(activations, encoded)
+    actual = A_compB(activations, encoded)
     torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
 
     dense = lambda: activations @ weight
-    compressed = lambda: compressed_matmul(activations, encoded)
+    compressed = lambda: A_compB(activations, encoded)
     dense_ms, compressed_ms = _compare((dense, compressed))
 
     overhead = (compressed_ms - dense_ms) / dense_ms

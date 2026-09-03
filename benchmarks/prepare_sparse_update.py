@@ -16,8 +16,8 @@ import torch
 from compress.code_storage import Distribution, DistType
 from compress.compress import (
     compress,
-    compressed_add,
-    compressed_scale_add,
+    compA_add_B,
+    a_compA_add_compB,
     decompress,
 )
 from compress.tensor_buffer import Allocation, TensorBuffer
@@ -67,7 +67,7 @@ def _current_update(p_enc, mom_enc, _scale, out_buf):
     the fused path uses a CUDA tensor alpha so it is kept separate here.
     """
     update = decompress(mom_enc) * SCALE_VALUE
-    return compressed_add(
+    return compA_add_B(
         p_enc,
         update,
         dense_output=False,
@@ -84,7 +84,7 @@ def _fused_update(p_enc, mom_enc, scale, out_buf):
     ``scale * mom`` as the current method does, while keeping both operands
     compressed in the API.
     """
-    return compressed_scale_add(
+    return a_compA_add_compB(
         mom_enc,
         scale,
         p_enc,

@@ -6,9 +6,9 @@ import math
 from compress.code_storage import CompressedTensor, Distribution, DistType, NoiseLevel
 from compress.compress import (
     compress,
-    compressed_add,
-    compressed_scale_add,
-    compressed_scalar_mul_add,
+    compA_add_B,
+    a_compA_add_compB,
+    a_compA_add_B,
     decompress,
 )
 if TYPE_CHECKING:
@@ -71,8 +71,8 @@ class MyCompressed(Tensor):
             x <- x + update
         """
         prev = self.x
-        self.x = compressed_add(self.x, update,
-                                dense_output=False, distribution=prev.distribution, buffer=prev.buffer)
+        self.x = compA_add_B(self.x, update,
+                             dense_output=False, distribution=prev.distribution, buffer=prev.buffer)
         prev.free()
 
     def mul_add_(self, alpha: Tensor, update: Tensor):
@@ -80,8 +80,8 @@ class MyCompressed(Tensor):
             x <- alpha * x + update
         """
         prev = self.x
-        self.x = compressed_scalar_mul_add(prev, alpha, update,
-                                dense_output=False, distribution=prev.distribution, buffer=prev.buffer)
+        self.x = a_compA_add_B(prev, alpha, update,
+                               dense_output=False, distribution=prev.distribution, buffer=prev.buffer)
         prev.free()
 
     def decompress(self) -> Tensor:
@@ -132,7 +132,7 @@ class SparseSGDM:
                     [-self.lr], dtype=torch.float32, device=p.device,
                 )
                 prev = p.x
-                p.x = compressed_scale_add(
+                p.x = a_compA_add_compB(
                     mom.x,
                     scale,
                     prev,

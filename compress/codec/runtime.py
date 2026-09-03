@@ -300,7 +300,7 @@ def compress_dense(
         distribution, buffer, shape, precomputed=False,
         logical_numel=logical_numel,
     )
-    return replace(result, shape=shape, layout=StorageLayout.BLOCKED)
+    return replace(result, shape=shape, layout=StorageLayout.COMPRESSED)
 
 
 def decode_matrix_dense(data: CompressedTensor) -> torch.Tensor:

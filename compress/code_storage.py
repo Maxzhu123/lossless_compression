@@ -23,9 +23,9 @@ class DistType(Enum):
 
 
 class StorageLayout(Enum):
-    """Logical ordering used by the values stored inside a compressed tensor."""
+    """ If the tensor is compressed or raw format."""
     RAW = auto()
-    BLOCKED = auto()
+    COMPRESSED = auto()
 
 
 @dataclass

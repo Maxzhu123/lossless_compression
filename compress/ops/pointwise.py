@@ -261,7 +261,7 @@ def pointwise_scale_add_compressed(
     Uses the one-pass fused matrix kernel for blocked operands with the same
     geometry, including both private and buffered fallback storage.
     """
-    same_layout = data.layout == StorageLayout.BLOCKED and other.layout == StorageLayout.BLOCKED
+    same_layout = data.layout == StorageLayout.COMPRESSED and other.layout == StorageLayout.COMPRESSED
     same_buffering = (data.fallback_descriptor is None) == (other.fallback_descriptor is None)
     if same_layout and same_buffering and geometry(data.distribution) == geometry(other.distribution):
         result_distribution = distribution or data.distribution
@@ -276,7 +276,7 @@ def pointwise_scale_add_compressed(
             buffer, data.shape, precomputed=True,
             logical_numel=data.logical_numel,
         )
-        if data.layout == StorageLayout.BLOCKED:
+        if data.layout == StorageLayout.COMPRESSED:
             result = replace(result, layout=data.layout)
         return result
 
@@ -315,7 +315,7 @@ def pointwise_compressed_dense(
             [1.0], dtype=torch.float32, device=data.data.device,
         )
     if (
-        data.layout == StorageLayout.BLOCKED
+        data.layout == StorageLayout.COMPRESSED
         and not dense_output
         and geometry(result_distribution) != geometry(data.distribution)
     ):
@@ -348,6 +348,6 @@ def pointwise_compressed_dense(
         buffer, data.shape, precomputed=True,
         logical_numel=data.logical_numel,
     )
-    if data.layout == StorageLayout.BLOCKED:
+    if data.layout == StorageLayout.COMPRESSED:
         result = replace(result, layout=data.layout)
     return result
