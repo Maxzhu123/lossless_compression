@@ -59,6 +59,9 @@ def _scalar_mul_add_compressed_compressed_matrix_impl(
         a_base = tl.load(a_descriptor).to(tl.int32)
         a_base_words = a_base // 4
         a_real_base = a_base + 9 * a_count
+        b_base = tl.load(b_descriptor).to(tl.int32)
+        b_base_words = b_base // 4
+        b_real_base = b_base + 9 * b_count
         for i in tl.range(0, a_count):
             a_sid = tl.load(a_metadata + a_base_words + i).to(tl.int32)
             a_start_i = tl.load(a_bad_starts + a_base + 8 * a_count + i).to(tl.int32)
@@ -66,20 +69,6 @@ def _scalar_mul_add_compressed_compressed_matrix_impl(
             is_a = a_sid == stream
             a_start = tl.where(is_a, a_start_i, a_start)
             a_offset = tl.where(is_a, a_off, a_offset)
-    else:
-        a_real_base = a_fallback_base
-        for i in tl.range(0, a_count):
-            a_sid = tl.load(a_bad_streams + i).to(tl.int32)
-            a_start_i = tl.load(a_bad_starts + i).to(tl.int32)
-            a_off = tl.load(a_fallback_offsets + i).to(tl.int32)
-            is_a = a_sid == stream
-            a_start = tl.where(is_a, a_start_i, a_start)
-            a_offset = tl.where(is_a, a_off, a_offset)
-
-    if BUFFERED:
-        b_base = tl.load(b_descriptor).to(tl.int32)
-        b_base_words = b_base // 4
-        b_real_base = b_base + 9 * b_count
         for i in tl.range(0, b_count):
             b_sid = tl.load(b_metadata + b_base_words + i).to(tl.int32)
             b_start_i = tl.load(b_bad_starts + b_base + 8 * b_count + i).to(tl.int32)
@@ -88,7 +77,15 @@ def _scalar_mul_add_compressed_compressed_matrix_impl(
             b_start = tl.where(is_b, b_start_i, b_start)
             b_offset = tl.where(is_b, b_off, b_offset)
     else:
+        a_real_base = a_fallback_base
         b_real_base = b_fallback_base
+        for i in tl.range(0, a_count):
+            a_sid = tl.load(a_bad_streams + i).to(tl.int32)
+            a_start_i = tl.load(a_bad_starts + i).to(tl.int32)
+            a_off = tl.load(a_fallback_offsets + i).to(tl.int32)
+            is_a = a_sid == stream
+            a_start = tl.where(is_a, a_start_i, a_start)
+            a_offset = tl.where(is_a, a_off, a_offset)
         for i in tl.range(0, b_count):
             b_sid = tl.load(b_bad_streams + i).to(tl.int32)
             b_start_i = tl.load(b_bad_starts + i).to(tl.int32)
