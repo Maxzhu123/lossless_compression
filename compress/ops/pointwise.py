@@ -20,8 +20,7 @@ from ..kernels.pointwise_scalar import (
     pointwise_scalar_mul_add_dense_matrix_kernel,
 )
 from ..kernels.pointwise_scalar_dual import (
-    pointwise_scalar_mul_add_compressed_compressed_fallback_kernel,
-    pointwise_scalar_mul_add_compressed_compressed_kernel,
+    pointwise_scalar_mul_add_compressed_compressed_matrix_kernel,
 )
 from ..tensor_buffer import TensorBuffer
 from .registry import PointwiseOp, SCALAR_MUL_ADD
@@ -194,16 +193,13 @@ def _launch_scalar_mul_add_compressed_dense(
 
 def _launch_scalar_mul_add_compressed_compressed(
     data, other, alpha, output_policy,
-    *,
-    a_fallback_buffer=None, a_fallback_base=0,
-    a_fallback_starts=None, a_fallback_offsets=None,
-    b_fallback_buffer=None, b_fallback_base=0,
-    b_fallback_starts=None, b_fallback_offsets=None,
-    job_streams=None, job_sides=None, job_count=0,
 ):
-    """Launch the fused two-compressed scalar multiply-add kernel."""
+    """Launch the one-pass fused two-compressed matrix kernel."""
     _, a_decode_table, rare_length_a = get_distribution_tables(data.distribution)
     _, b_decode_table, rare_length_b = get_distribution_tables(other.distribution)
+    if rare_length_a != rare_length_b:
+        raise ValueError("two-compressed path requires matching RARE_LENGTH")
+
     a_shifted_decode = torch.empty(
         1 << FIRST_BITS, dtype=torch.int32, device=data.data.device,
     )
@@ -235,44 +231,39 @@ def _launch_scalar_mul_add_compressed_compressed(
         )
         auxiliary = torch.empty_like(output)
 
-    main_args = (
-        data.data, data.sign_mantissa,
-        other.data, other.sign_mantissa,
-        output, auxiliary, a_shifted_decode, b_shifted_decode,
-        data.size, blocks * lanes, data.center, other.center, alpha,
-    )
-    main_meta = dict(
+    a_buffered = data.fallback_descriptor is not None
+    b_buffered = other.fallback_descriptor is not None
+    a_metadata = data.fallback_buffer.view(torch.int32) if a_buffered else data.offsets
+    b_metadata = other.fallback_buffer.view(torch.int32) if b_buffered else other.offsets
+    a_bad_streams = a_metadata
+    b_bad_streams = b_metadata
+    a_bad_starts = data.fallback_buffer if a_buffered else data.fallback_starts
+    b_bad_starts = other.fallback_buffer if b_buffered else other.fallback_starts
+    a_fb_offsets = data.fallback_offsets if not a_buffered else a_metadata
+    b_fb_offsets = other.fallback_offsets if not b_buffered else b_metadata
+    a_descriptor = data.fallback_descriptor if a_buffered else data.offsets
+    b_descriptor = other.fallback_descriptor if b_buffered else other.offsets
+
+    pointwise_scalar_mul_add_compressed_compressed_matrix_kernel[(blocks,)](
+        data.data, data.sign_mantissa, a_shifted_decode, data.center,
+        a_bad_streams, a_bad_starts, a_fb_offsets, a_metadata,
+        a_descriptor, data.fallback_count,
+        data.fallback_buffer, data.fallback_base,
+        other.data, other.sign_mantissa, b_shifted_decode, other.center,
+        b_bad_streams, b_bad_starts, b_fb_offsets, b_metadata,
+        b_descriptor, other.fallback_count,
+        other.fallback_buffer, other.fallback_base,
+        output, auxiliary, alpha,
+        data.size, blocks * lanes,
+        A_BUFFERED=a_buffered, B_BUFFERED=b_buffered,
         OUTPUT_POLICY=output_policy,
+        MATRIX_N=matrix_n, MATRIX_K=matrix_k,
+        MATRIX_NUMEL=data.logical_numel,
+        K_TILE_BLOCKS=k_tile_blocks,
         FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length_a,
         BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
         FIXED_WORDS=fixed_words,
     )
-    # Both operands must use the same geometry; the b decode table may have a
-    # different RARE_LENGTH if distributions differ.  The host fallback covers
-    # that case, so this launcher is only called when geometries match.
-    if rare_length_a != rare_length_b:
-        raise ValueError("two-compressed path requires matching RARE_LENGTH")
-    pointwise_scalar_mul_add_compressed_compressed_kernel[(blocks,)](
-        *main_args, MATRIX_N=matrix_n, MATRIX_K=matrix_k,
-        MATRIX_NUMEL=data.logical_numel,
-        K_TILE_BLOCKS=k_tile_blocks, **main_meta,
-    )
-    if job_count:
-        fallback_grid = (triton.cdiv(job_count, 64),)
-        pointwise_scalar_mul_add_compressed_compressed_fallback_kernel[fallback_grid](
-            job_streams, job_sides,
-            data.data, data.sign_mantissa, a_shifted_decode, data.center,
-            other.data, other.sign_mantissa, b_shifted_decode, other.center,
-            a_fallback_buffer, a_fallback_base,
-            a_fallback_starts, a_fallback_offsets,
-            b_fallback_buffer, b_fallback_base,
-            b_fallback_starts, b_fallback_offsets,
-            output, auxiliary, alpha,
-            data.size, blocks * lanes, job_count,
-            MATRIX_N=matrix_n, MATRIX_K=matrix_k,
-            MATRIX_NUMEL=data.logical_numel,
-            K_TILE_BLOCKS=k_tile_blocks, TILE=64, **main_meta,
-        )
     return output, auxiliary
 
 
@@ -287,70 +278,15 @@ def pointwise_scale_add_compressed(
 ) -> torch.Tensor | CompressedTensor:
     """Apply ``alpha * data + other`` where both operands are compressed.
 
-    Uses the dedicated two-compressed kernel for private blocked tensors,
-    including tensors with fallback/overflow streams.  Buffered fallback and
-    non-blocked operands fall back to decoding ``other`` to dense and using the
-    existing scalar multiply-add kernel.
+    Uses the one-pass fused matrix kernel for blocked operands with the same
+    geometry, including both private and buffered fallback storage.
     """
     same_layout = data.layout == StorageLayout.BLOCKED and other.layout == StorageLayout.BLOCKED
-    private_storage = (
-        data.offsets is not None
-        and other.offsets is not None
-    )
-    if same_layout and private_storage and geometry(data.distribution) == geometry(other.distribution):
-        block_size, lanes, steps, _ = geometry(data.distribution)
-        blocks = triton.cdiv(data.size, block_size)
-        streams = blocks * lanes
-
-        def fallback_lookup(compressed):
-            starts = torch.full(
-                (streams,), steps, dtype=torch.int32, device=data.data.device,
-            )
-            offsets = torch.zeros(
-                (streams,), dtype=torch.int32, device=data.data.device,
-            )
-            if compressed.offsets is not None and compressed.offsets.numel():
-                ids = compressed.offsets.long()
-                starts.index_put_((ids,), compressed.fallback_starts.to(torch.int32))
-                offsets.index_put_((ids,), compressed.fallback_offsets.to(torch.int32))
-            return starts, offsets
-
-        a_count = data.offsets.numel() if data.offsets is not None else 0
-        b_count = other.offsets.numel() if other.offsets is not None else 0
-        if a_count or b_count:
-            a_starts, a_offsets = fallback_lookup(data)
-            b_starts, b_offsets = fallback_lookup(other)
-            job_streams = torch.cat(
-                [data.offsets.to(torch.int32), other.offsets.to(torch.int32)]
-            )
-            job_sides = torch.cat(
-                [
-                    torch.zeros(a_count, dtype=torch.int32, device=data.data.device),
-                    torch.ones(b_count, dtype=torch.int32, device=data.data.device),
-                ]
-            )
-            job_count = a_count + b_count
-        else:
-            a_starts = b_starts = a_offsets = b_offsets = None
-            job_streams = None
-            job_sides = None
-            job_count = 0
-
+    if same_layout and geometry(data.distribution) == geometry(other.distribution):
         result_distribution = distribution or data.distribution
         policy = DENSE_OUTPUT if dense_output else COMPRESSED_OUTPUT
         values, auxiliary = _launch_scalar_mul_add_compressed_compressed(
             data, other, alpha, policy,
-            a_fallback_buffer=data.fallback_buffer,
-            a_fallback_base=data.fallback_base,
-            a_fallback_starts=a_starts,
-            a_fallback_offsets=a_offsets,
-            b_fallback_buffer=other.fallback_buffer,
-            b_fallback_base=other.fallback_base,
-            b_fallback_starts=b_starts,
-            b_fallback_offsets=b_offsets,
-            job_streams=job_streams,
-            job_sides=job_sides,
-            job_count=job_count,
         )
         if dense_output:
             return values.reshape(data.shape)
