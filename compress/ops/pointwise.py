@@ -231,18 +231,18 @@ def _launch_scalar_mul_add_compressed_compressed(
         )
         auxiliary = torch.empty_like(output)
 
-    a_buffered = data.fallback_descriptor is not None
-    b_buffered = other.fallback_descriptor is not None
-    a_metadata = data.fallback_buffer.view(torch.int32) if a_buffered else data.offsets
-    b_metadata = other.fallback_buffer.view(torch.int32) if b_buffered else other.offsets
+    # The caller guarantees both operands use the same fallback storage mode.
+    buffered = data.fallback_descriptor is not None
+    a_metadata = data.fallback_buffer.view(torch.int32) if buffered else data.offsets
+    b_metadata = other.fallback_buffer.view(torch.int32) if buffered else other.offsets
     a_bad_streams = a_metadata
     b_bad_streams = b_metadata
-    a_bad_starts = data.fallback_buffer if a_buffered else data.fallback_starts
-    b_bad_starts = other.fallback_buffer if b_buffered else other.fallback_starts
-    a_fb_offsets = data.fallback_offsets if not a_buffered else a_metadata
-    b_fb_offsets = other.fallback_offsets if not b_buffered else b_metadata
-    a_descriptor = data.fallback_descriptor if a_buffered else data.offsets
-    b_descriptor = other.fallback_descriptor if b_buffered else other.offsets
+    a_bad_starts = data.fallback_buffer if buffered else data.fallback_starts
+    b_bad_starts = other.fallback_buffer if buffered else other.fallback_starts
+    a_fb_offsets = data.fallback_offsets if not buffered else a_metadata
+    b_fb_offsets = other.fallback_offsets if not buffered else b_metadata
+    a_descriptor = data.fallback_descriptor if buffered else data.offsets
+    b_descriptor = other.fallback_descriptor if buffered else other.offsets
 
     pointwise_scalar_mul_add_compressed_compressed_matrix_kernel[(blocks,)](
         data.data, data.sign_mantissa, a_shifted_decode, data.center,
@@ -255,7 +255,7 @@ def _launch_scalar_mul_add_compressed_compressed(
         other.fallback_buffer, other.fallback_base,
         output, auxiliary, alpha,
         data.size, blocks * lanes,
-        A_BUFFERED=a_buffered, B_BUFFERED=b_buffered,
+        BUFFERED=buffered,
         OUTPUT_POLICY=output_policy,
         MATRIX_N=matrix_n, MATRIX_K=matrix_k,
         MATRIX_NUMEL=data.logical_numel,
@@ -282,7 +282,8 @@ def pointwise_scale_add_compressed(
     geometry, including both private and buffered fallback storage.
     """
     same_layout = data.layout == StorageLayout.BLOCKED and other.layout == StorageLayout.BLOCKED
-    if same_layout and geometry(data.distribution) == geometry(other.distribution):
+    same_buffering = (data.fallback_descriptor is None) == (other.fallback_descriptor is None)
+    if same_layout and same_buffering and geometry(data.distribution) == geometry(other.distribution):
         result_distribution = distribution or data.distribution
         policy = DENSE_OUTPUT if dense_output else COMPRESSED_OUTPUT
         values, auxiliary = _launch_scalar_mul_add_compressed_compressed(

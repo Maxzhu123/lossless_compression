@@ -29,7 +29,7 @@ def _scalar_mul_add_compressed_compressed_matrix_impl(
     b_fallback_buffer, b_fallback_base,
     output, auxiliary, alpha,
     n_elements, n_streams,
-    A_BUFFERED: tl.constexpr, B_BUFFERED: tl.constexpr,
+    BUFFERED: tl.constexpr,
     OUTPUT_POLICY: tl.constexpr,
     MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
     MATRIX_NUMEL: tl.constexpr, K_TILE_BLOCKS: tl.constexpr,
@@ -51,7 +51,7 @@ def _scalar_mul_add_compressed_compressed_matrix_impl(
     a_offset = tl.zeros((N_LANES,), tl.int32)
     b_offset = tl.zeros((N_LANES,), tl.int32)
 
-    if A_BUFFERED:
+    if BUFFERED:
         a_base = tl.load(a_descriptor).to(tl.int32)
         a_base_words = a_base // 4
         a_real_base = a_base + 9 * a_count
@@ -72,7 +72,7 @@ def _scalar_mul_add_compressed_compressed_matrix_impl(
             a_start = tl.where(is_a, a_start_i, a_start)
             a_offset = tl.where(is_a, a_off, a_offset)
 
-    if B_BUFFERED:
+    if BUFFERED:
         b_base = tl.load(b_descriptor).to(tl.int32)
         b_base_words = b_base // 4
         b_real_base = b_base + 9 * b_count
@@ -194,7 +194,7 @@ def pointwise_scalar_mul_add_compressed_compressed_matrix_kernel(
     b_fallback_buffer, b_fallback_base,
     output, auxiliary, alpha,
     n_elements, n_streams,
-    A_BUFFERED: tl.constexpr, B_BUFFERED: tl.constexpr,
+    BUFFERED: tl.constexpr,
     OUTPUT_POLICY: tl.constexpr,
     MATRIX_N: tl.constexpr, MATRIX_K: tl.constexpr,
     MATRIX_NUMEL: tl.constexpr, K_TILE_BLOCKS: tl.constexpr,
@@ -213,7 +213,7 @@ def pointwise_scalar_mul_add_compressed_compressed_matrix_kernel(
         b_fallback_buffer, b_fallback_base,
         output, auxiliary, alpha,
         n_elements, n_streams,
-        A_BUFFERED, B_BUFFERED, OUTPUT_POLICY,
+        BUFFERED, OUTPUT_POLICY,
         MATRIX_N, MATRIX_K, MATRIX_NUMEL, K_TILE_BLOCKS,
         FIRST_MASK, RARE_LENGTH, BLOCK, N_LANES, N_STEPS, FIXED_WORDS,
     )
