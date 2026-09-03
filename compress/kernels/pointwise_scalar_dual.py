@@ -158,6 +158,10 @@ def _scalar_mul_add_compressed_compressed_matrix_impl(
 
             offset0 = block * BLOCK + step * N_LANES + lanes
             logical_n0 = n_tile * N_STEPS + step
+            # Keep the logical column swizzle.  Do NOT simplify `logical_n & 255`
+            # to `step` even when N_STEPS == 256: the row-dependent swizzle
+            # matches the encode/decode layout and prevents correlations across
+            # rows of the input, so future optimisations must preserve it.
             logical_k0 = k_tile * N_LANES + ((lanes + (logical_n0 & 255)) & 255)
             logical_offset0 = logical_n0 * MATRIX_K + logical_k0
             sm_a0 = tl.load(a_sign_mantissa + offset0, cache_modifier='.cg')
