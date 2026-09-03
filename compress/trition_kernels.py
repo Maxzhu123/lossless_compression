@@ -128,14 +128,19 @@ def _encode_impl(
     has_data = block * BLOCK + lanes < n_elements
 
     logical_n_base = block * N_STEPS
+    # Hoisted swizzle: (block*N_STEPS + step) & 255 == (block_shift + step) & 255
+    # with block_shift loop-invariant, so the hot loop only sees `step`.
+    # (N_STEPS=256 -> block_shift=0; N_STEPS=128 -> 128*(block & 1).)
+    block_shift = (block * N_STEPS) & 255
+    block_base = block * BLOCK
     # Fully-valid blocks can skip all per-element validity/mask checks.
     full_block = (block + 1) * BLOCK <= LOGICAL_NUMEL
     if full_block:
         for step in tl.range(0, N_STEPS, 2, loop_unroll_factor=4):
-            source_offset = block * BLOCK + step * N_LANES + lanes
+            source_offset = block_base + step * N_LANES + lanes
             logical_n = logical_n_base + step
-            shift0 = logical_n & 255
-            shift1 = (logical_n + 1) & 255
+            shift0 = (block_shift + step) & 255
+            shift1 = (block_shift + step + 1) & 255
             input_k0 = (lanes + shift0) & 255
             input_k1 = (lanes + shift1) & 255
             input_offset0 = logical_n * N_LANES + input_k0
@@ -182,12 +187,12 @@ def _encode_impl(
             overflow |= pair_overflow
     else:
         for step in tl.range(0, N_STEPS, 2, loop_unroll_factor=4):
-            source_offset = block * BLOCK + step * N_LANES + lanes
+            source_offset = block_base + step * N_LANES + lanes
             valid0 = source_offset < n_elements
             valid1 = source_offset + N_LANES < n_elements
             logical_n = logical_n_base + step
-            shift0 = logical_n & 255
-            shift1 = (logical_n + 1) & 255
+            shift0 = (block_shift + step) & 255
+            shift1 = (block_shift + step + 1) & 255
             input_k0 = (lanes + shift0) & 255
             input_k1 = (lanes + shift1) & 255
             input_offset0 = logical_n * N_LANES + input_k0
@@ -430,11 +435,14 @@ def _compact_extra_impl(
     lane = stream - block * N_LANES
     tail_steps = N_STEPS - start
     max_tail = tl.max(tl.where(valid, tail_steps, 0), axis=0)
+    # Hoisted swizzle (see _encode_impl): block_shift is loop-invariant.
+    block_shift = (block * N_STEPS) & 255
+    block_base = block * BLOCK
     for step in tl.range(0, max_tail):
-        source_offset = block * BLOCK + (step + start) * N_LANES + lane
+        source_offset = block_base + (step + start) * N_LANES + lane
         active = valid & (step < tail_steps) & (source_offset < n_elements)
         logical_n = block * N_STEPS + step + start
-        logical_k = (lane + (logical_n & 255)) & 255
+        logical_k = (lane + ((block_shift + step + start) & 255)) & 255
         input_offset = logical_n * N_LANES + logical_k
         input_active = active & (input_offset < LOGICAL_NUMEL)
         value = tl.load(
@@ -540,13 +548,16 @@ def _decode_matrix_kernel(
     zero_delta = (-127 - center_value) & 255
     # Fast path: fully-contained blocks skip all per-element validity checks.
     # The swizzled logical mapping (storage -> flattened output) still applies.
+    # Hoisted swizzle: shift depends only on step + loop-invariant block_shift.
+    block_shift = (block * N_STEPS) & 255
+    block_base = block * BLOCK
     if (block + 1) * BLOCK <= LOGICAL_NUMEL:
-        storage_offset = block * BLOCK + lanes
+        storage_offset = block_base + lanes
         for step in tl.range(0, N_STEPS, 2, flatten=True, warp_specialize=True):
             logical_n0 = block * N_STEPS + step
             logical_n1 = logical_n0 + 1
-            out_k0 = (lanes + (logical_n0 & 255)) & 255
-            out_k1 = (lanes + (logical_n1 & 255)) & 255
+            out_k0 = (lanes + ((block_shift + step) & 255)) & 255
+            out_k1 = (lanes + ((block_shift + step + 1) & 255)) & 255
             output_offset0 = logical_n0 * N_LANES + out_k0
             output_offset1 = logical_n1 * N_LANES + out_k1
             if not ON_DEMAND:
@@ -620,7 +631,7 @@ def _decode_matrix_kernel(
     else:
         # Tail path: map the codec storage block back to flattened coordinates
         # with bounds masks.
-        storage_offset = block * BLOCK + lanes
+        storage_offset = block_base + lanes
         logical_n = block * N_STEPS
         for step in tl.range(0, N_STEPS, 2):
             word2_prefetch = tl.load(
@@ -628,8 +639,8 @@ def _decode_matrix_kernel(
             ).to(tl.uint32).to(tl.uint64)
             logical_n0 = logical_n + step
             logical_n1 = logical_n0 + 1
-            out_k0 = (lanes + (logical_n0 & 255)) & 255
-            out_k1 = (lanes + (logical_n1 & 255)) & 255
+            out_k0 = (lanes + ((block_shift + step) & 255)) & 255
+            out_k1 = (lanes + ((block_shift + step + 1) & 255)) & 255
             output_offset0 = logical_n0 * N_LANES + out_k0
             output_offset1 = logical_n1 * N_LANES + out_k1
             storage_valid = storage_offset < n_elements
@@ -740,10 +751,13 @@ def _scatter_blocked_fallback_kernel(
     fallback_offset = fallback_offset.to(tl.int32)
     block = stream // N_LANES
     lane = stream % N_LANES
+    # Hoisted swizzle (see _encode_impl): block_shift is loop-invariant.
+    block_shift = (block * N_STEPS) & 255
+    block_base = block * BLOCK
     for step in tl.range(0, N_STEPS):
-        storage_offset = block * BLOCK + step * N_LANES + lane
+        storage_offset = block_base + step * N_LANES + lane
         logical_n = block * N_STEPS + step
-        logical_k = (lane + (logical_n & 255)) & 255
+        logical_k = (lane + ((block_shift + step) & 255)) & 255
         logical_offset = logical_n * N_LANES + logical_k
         active = (
             valid & (step >= start) & (storage_offset < n_elements)

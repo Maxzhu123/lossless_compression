@@ -45,11 +45,13 @@ def _scalar_mul_add_compressed_dense_impl(
     if (block + 1) * BLOCK <= LOGICAL_NUMEL:
         storage_offset = block * BLOCK + lanes
         true_mask = tl.full((N_LANES,), True, tl.int1)
+        # Hoisted swizzle: shift depends only on step + loop-invariant block_shift.
+        block_shift = (block * N_STEPS) & 255
         for step in tl.range(0, N_STEPS, 2, flatten=True, warp_specialize=True):
             logical_n0 = block * N_STEPS + step
             logical_n1 = logical_n0 + 1
-            logical_k0 = (lanes + (logical_n0 & 255)) & 255
-            logical_k1 = (lanes + (logical_n1 & 255)) & 255
+            logical_k0 = (lanes + ((block_shift + step) & 255)) & 255
+            logical_k1 = (lanes + ((block_shift + step + 1) & 255)) & 255
             logical_offset0 = logical_n0 * N_LANES + logical_k0
             logical_offset1 = logical_n1 * N_LANES + logical_k1
             current = window >> shift
@@ -97,52 +99,52 @@ def _scalar_mul_add_compressed_dense_impl(
     else:
         # Tail path: flattened logical coordinates with bounds masks.
         for step in tl.range(0, N_STEPS, 2):
-                offset, logical_offset, storage_valid, valid = _pointwise_location(
-                    block, step, lanes, n_elements, LOGICAL_NUMEL,
-                    BLOCK, N_LANES, N_STEPS,
-                )
-                value, length = decode_symbol(
-                    window >> shift, decode_table, center_value,
-                    FIRST_MASK, RARE_LENGTH,
-                )
-                sm = tl.load(sign_mantissa + offset, mask=storage_valid, other=0, cache_modifier='.cg')
-                left = pack_bf16(value, sm).to(tl.int16).to(
-                    tl.bfloat16, bitcast=True
-                )
-                right = tl.load(other + logical_offset, mask=valid, other=0.0, cache_modifier='.cg')
-                _store_result(
-                    tl.math.fma(left, alpha_value, right), output, auxiliary, offset, logical_offset,
-                    valid, storage_valid, OUTPUT_POLICY,
-                )
-                shift1 = shift + tl.where(storage_valid, length, 0)
-                offset1, logical_offset1, storage_valid1, valid1 = _pointwise_location(
-                    block, step + 1, lanes, n_elements, LOGICAL_NUMEL,
-                    BLOCK, N_LANES, N_STEPS,
-                )
-                value1, length1 = decode_symbol(
-                    window >> shift1, decode_table, center_value,
-                    FIRST_MASK, RARE_LENGTH,
-                )
-                sm1 = tl.load(sign_mantissa + offset1, mask=storage_valid1, other=0, cache_modifier='.cg')
-                left1 = pack_bf16(value1, sm1).to(tl.int16).to(
-                    tl.bfloat16, bitcast=True
-                )
-                right1 = tl.load(other + logical_offset1, mask=valid1, other=0.0, cache_modifier='.cg')
-                _store_result(
-                    tl.math.fma(left1, alpha_value, right1), output, auxiliary, offset1, logical_offset1,
-                    valid1, storage_valid1, OUTPUT_POLICY,
-                )
-                next_shift = shift1 + tl.where(storage_valid1, length1, 0)
-                crosses_word = next_shift >= 32
-                word2 = tl.load(
-                    encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams
-                    + lane_index,
-                    mask=crosses_word, other=0,
-                ).to(tl.uint32).to(tl.uint64)
-                next_window = (window >> 32) | (word2 << 32)
-                window = tl.where(crosses_word, next_window, window)
-                word += crosses_word
-                shift = tl.where(crosses_word, next_shift - 32, next_shift)
+            offset, logical_offset, storage_valid, valid = _pointwise_location(
+                block, step, lanes, n_elements, LOGICAL_NUMEL,
+                BLOCK, N_LANES, N_STEPS,
+            )
+            value, length = decode_symbol(
+                window >> shift, decode_table, center_value,
+                FIRST_MASK, RARE_LENGTH,
+            )
+            sm = tl.load(sign_mantissa + offset, mask=storage_valid, other=0, cache_modifier='.cg')
+            left = pack_bf16(value, sm).to(tl.int16).to(
+                tl.bfloat16, bitcast=True
+            )
+            right = tl.load(other + logical_offset, mask=valid, other=0.0, cache_modifier='.cg')
+            _store_result(
+                tl.math.fma(left, alpha_value, right), output, auxiliary, offset, logical_offset,
+                valid, storage_valid, OUTPUT_POLICY,
+            )
+            shift1 = shift + tl.where(storage_valid, length, 0)
+            offset1, logical_offset1, storage_valid1, valid1 = _pointwise_location(
+                block, step + 1, lanes, n_elements, LOGICAL_NUMEL,
+                BLOCK, N_LANES, N_STEPS,
+            )
+            value1, length1 = decode_symbol(
+                window >> shift1, decode_table, center_value,
+                FIRST_MASK, RARE_LENGTH,
+            )
+            sm1 = tl.load(sign_mantissa + offset1, mask=storage_valid1, other=0, cache_modifier='.cg')
+            left1 = pack_bf16(value1, sm1).to(tl.int16).to(
+                tl.bfloat16, bitcast=True
+            )
+            right1 = tl.load(other + logical_offset1, mask=valid1, other=0.0, cache_modifier='.cg')
+            _store_result(
+                tl.math.fma(left1, alpha_value, right1), output, auxiliary, offset1, logical_offset1,
+                valid1, storage_valid1, OUTPUT_POLICY,
+            )
+            next_shift = shift1 + tl.where(storage_valid1, length1, 0)
+            crosses_word = next_shift >= 32
+            word2 = tl.load(
+                encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams
+                + lane_index,
+                mask=crosses_word, other=0,
+            ).to(tl.uint32).to(tl.uint64)
+            next_window = (window >> 32) | (word2 << 32)
+            window = tl.where(crosses_word, next_window, window)
+            word += crosses_word
+            shift = tl.where(crosses_word, next_shift - 32, next_shift)
 
 
 @triton.autotune(

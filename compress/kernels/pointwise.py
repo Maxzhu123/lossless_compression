@@ -45,11 +45,16 @@ def _pointwise_location(
     LOGICAL_NUMEL: tl.constexpr,
     BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
 ):
-    """Map one storage-stream position to its flattened logical offset (1D)."""
+    """Map one storage-stream position to its flattened logical offset (1D).
+
+    The row swizzle ``(n & 255)`` is hoisted: ``(block*N_STEPS+step) & 255``
+    equals ``(block_shift + step) & 255`` with ``block_shift`` loop-invariant,
+    so callers in hot loops should prefer the hoisted form below.
+    """
     storage_offset = block * BLOCK + step * N_LANES + lane
     storage_valid = storage_offset < n_elements
     logical_n = block * N_STEPS + step
-    logical_k = (lane + (logical_n & 255)) & 255
+    logical_k = (lane + (((block * N_STEPS) + step) & 255)) & 255
     logical_offset = logical_n * N_LANES + logical_k
     logical_valid = logical_offset < LOGICAL_NUMEL
     return storage_offset, logical_offset, storage_valid, logical_valid
@@ -79,16 +84,23 @@ def _pointwise_compressed_dense_impl(
     center_value = tl.load(center).to(tl.int32)
 
     # Fast path: fully-contained blocks skip all per-element validity checks.
+    # Hoisted swizzle: shift depends only on step + loop-invariant block_shift.
+    block_shift = (block * N_STEPS) & 255
     if (block + 1) * BLOCK <= LOGICAL_NUMEL:
         storage_offset = block * BLOCK + lanes
         true_mask = tl.full((N_LANES,), True, tl.int1)
-        for step in tl.range(0, N_STEPS, 2, flatten=True, warp_specialize=True):
+        for step in tl.range(0, N_STEPS, 2, loop_unroll_factor=2):
             logical_n0 = block * N_STEPS + step
             logical_n1 = logical_n0 + 1
-            logical_k0 = (lanes + (logical_n0 & 255)) & 255
-            logical_k1 = (lanes + (logical_n1 & 255)) & 255
+            logical_k0 = (lanes + ((block_shift + step) & 255)) & 255
+            logical_k1 = (lanes + ((block_shift + step + 1) & 255)) & 255
             logical_offset0 = logical_n0 * N_LANES + logical_k0
             logical_offset1 = logical_n1 * N_LANES + logical_k1
+            # Prefetch the next 32-bit Huffman word while decoding the pair.
+            word2_prefetch = tl.load(
+                encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams
+                + lane_index,
+            ).to(tl.uint32).to(tl.uint64)
             # Decode symbol 0, reconstruct its BF16 value, then apply the op.
             current = window >> shift
             value, length = decode_symbol(
@@ -126,12 +138,7 @@ def _pointwise_compressed_dense_impl(
             # Advance the 64-bit window and storage offset after processing two symbols.
             next_shift = shift1 + length1
             crosses_word = next_shift >= 32
-            word2 = tl.load(
-                encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams
-                + lane_index,
-                mask=crosses_word, other=0,
-            ).to(tl.uint32).to(tl.uint64)
-            next_window = (window >> 32) | (word2 << 32)
+            next_window = (window >> 32) | (word2_prefetch << 32)
             window = tl.where(crosses_word, next_window, window)
             word += crosses_word
             shift = tl.where(crosses_word, next_shift - 32, next_shift)

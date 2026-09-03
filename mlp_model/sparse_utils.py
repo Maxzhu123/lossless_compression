@@ -121,10 +121,11 @@ class SparseSGDM:
             mom = self.momentums[i]
             # Inplace update of momentum: mom = mom * self.momentum + g
 
-            # torch.add(g, mom, alpha=self.momentum, out=mom)
-            mom.mul_add_(self.momentum, g)
-            # print(f'{mom.nbytes / mom.dense_nbytes :.2g} ')
+            # torch.add(g, mom, alpha=0.9, out=mom)
+            # update = mom * (-self.lr)
+            # p.add_(update)
 
+            mom.mul_add_(self.momentum, g)
             # Fused update: result = -lr * mom + p.
             if isinstance(p, MyCompressed):
                 scale = torch.tensor(
