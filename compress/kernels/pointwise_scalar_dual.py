@@ -17,6 +17,10 @@ from .pointwise import (
 )
 
 
+DUAL_DECODE_AUTOTUNE_CONFIGS = [
+    triton.Config({}, num_warps=8, num_stages=3),
+]
+
 @triton.jit
 def _scalar_mul_add_compressed_compressed_matrix_impl(
     a_encoded, a_sign_mantissa, a_decode_table, a_center,
@@ -154,7 +158,7 @@ def _scalar_mul_add_compressed_compressed_matrix_impl(
 
             offset0 = block * BLOCK + step * N_LANES + lanes
             logical_n0 = n_tile * N_STEPS + step
-            logical_k0 = k_tile * N_LANES + ((lanes + (logical_n0 & 255)) & 255)
+            logical_k0 = k_tile * N_LANES + ((lanes + tl.where(N_STEPS == 256, step, logical_n0 & 255)) & 255)
             logical_offset0 = logical_n0 * MATRIX_K + logical_k0
             sm_a0 = tl.load(a_sign_mantissa + offset0, cache_modifier='.cg')
             sm_b0 = tl.load(b_sign_mantissa + offset0, cache_modifier='.cg')
@@ -193,7 +197,7 @@ def _scalar_mul_add_compressed_compressed_matrix_impl(
 
             offset1 = offset0 + N_LANES
             logical_n1 = logical_n0 + 1
-            logical_k1 = k_tile * N_LANES + ((lanes + (logical_n1 & 255)) & 255)
+            logical_k1 = k_tile * N_LANES + ((lanes + tl.where(N_STEPS == 256, step + 1, logical_n1 & 255)) & 255)
             logical_offset1 = logical_n1 * MATRIX_K + logical_k1
             sm_a1 = tl.load(a_sign_mantissa + offset1, cache_modifier='.cg')
             sm_b1 = tl.load(b_sign_mantissa + offset1, cache_modifier='.cg')
@@ -287,7 +291,7 @@ def _scalar_mul_add_compressed_compressed_matrix_impl(
 
 
 @triton.autotune(
-    configs=DECODE_AUTOTUNE_CONFIGS,
+    configs=DUAL_DECODE_AUTOTUNE_CONFIGS,
     key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS", "OUTPUT_POLICY"],
 )
 @triton.jit
