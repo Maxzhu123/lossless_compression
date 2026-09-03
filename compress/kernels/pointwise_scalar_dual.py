@@ -119,7 +119,15 @@ def _scalar_mul_add_compressed_compressed_matrix_impl(
         & ((k_tile + 1) * N_LANES <= MATRIX_K)
     )
     if full_generic:
-        for step in tl.range(0, N_STEPS, 2, loop_unroll_factor=2):
+        for step in tl.range(0, N_STEPS, 2, loop_unroll_factor=4):
+            a_word2_prefetch = tl.load(
+                a_encoded + tl.minimum(a_word + 2, FIXED_WORDS - 1) * n_streams
+                + stream,
+            ).to(tl.uint32).to(tl.uint64)
+            b_word2_prefetch = tl.load(
+                b_encoded + tl.minimum(b_word + 2, FIXED_WORDS - 1) * n_streams
+                + stream,
+            ).to(tl.uint32).to(tl.uint64)
             a0_is_fb = step >= a_start
             b0_is_fb = step >= b_start
 
@@ -198,24 +206,14 @@ def _scalar_mul_add_compressed_compressed_matrix_impl(
 
             a_next_shift = a_shift1 + a1_len
             a_crosses = a_next_shift >= 32
-            a_word2 = tl.load(
-                a_encoded + tl.minimum(a_word + 2, FIXED_WORDS - 1) * n_streams
-                + stream,
-                mask=a_crosses, other=0,
-            ).to(tl.uint32).to(tl.uint64)
-            a_next_window = (a_window >> 32) | (a_word2 << 32)
+            a_next_window = (a_window >> 32) | (a_word2_prefetch << 32)
             a_window = tl.where(a_crosses, a_next_window, a_window)
             a_word += a_crosses
             a_shift = tl.where(a_crosses, a_next_shift - 32, a_next_shift)
 
             b_next_shift = b_shift1 + b1_len
             b_crosses = b_next_shift >= 32
-            b_word2 = tl.load(
-                b_encoded + tl.minimum(b_word + 2, FIXED_WORDS - 1) * n_streams
-                + stream,
-                mask=b_crosses, other=0,
-            ).to(tl.uint32).to(tl.uint64)
-            b_next_window = (b_window >> 32) | (b_word2 << 32)
+            b_next_window = (b_window >> 32) | (b_word2_prefetch << 32)
             b_window = tl.where(b_crosses, b_next_window, b_window)
             b_word += b_crosses
             b_shift = tl.where(b_crosses, b_next_shift - 32, b_next_shift)
