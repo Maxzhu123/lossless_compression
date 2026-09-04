@@ -228,9 +228,12 @@ def _launch_scalar_mul_add_compressed_compressed(
     a_descriptor = data.fallback_descriptor if buffered else data.offsets
     b_descriptor = other.fallback_descriptor if buffered else other.offsets
 
-    a_count = int(data.fallback_count.item()) if buffered else data.offsets.numel()
-    b_count = int(other.fallback_count.item()) if buffered else other.offsets.numel()
     streams = blocks * lanes
+
+    # No host syncs for buffer-backed fallback metadata: kernels read the
+    # device-side fallback count and early-return when it is zero.
+    a_has_fallback = buffered or data.offsets.numel() > 0
+    b_has_fallback = buffered or other.offsets.numel() > 0
 
     # Direct per-stream fallback maps make the fallback tile pass O(fallback_count)
     # instead of O(blocks * fallback_count).
@@ -239,19 +242,19 @@ def _launch_scalar_mul_add_compressed_compressed(
     b_stream_starts = torch.full((streams,), steps, dtype=torch.int32, device=other.data.device)
     b_stream_offsets = torch.zeros(streams, dtype=torch.int32, device=other.data.device)
 
-    if a_count:
-        _setup_fallback_map_kernel[(a_count,)](
+    if a_has_fallback:
+        _setup_fallback_map_kernel[(triton.cdiv(streams, 1024),)](
             a_bad_streams, a_bad_starts, a_fb_offsets, a_metadata,
             a_descriptor, data.fallback_count,
             a_stream_starts, a_stream_offsets,
-            a_count, BUFFERED=buffered,
+            BUFFERED=buffered,
         )
-    if b_count:
-        _setup_fallback_map_kernel[(b_count,)](
+    if b_has_fallback:
+        _setup_fallback_map_kernel[(triton.cdiv(streams, 1024),)](
             b_bad_streams, b_bad_starts, b_fb_offsets, b_metadata,
             b_descriptor, other.fallback_count,
             b_stream_starts, b_stream_offsets,
-            b_count, BUFFERED=buffered,
+            BUFFERED=buffered,
         )
 
     fixed_meta = dict(
@@ -268,8 +271,17 @@ def _launch_scalar_mul_add_compressed_compressed(
         LOGICAL_NUMEL=data.logical_numel, **fixed_meta,
     )
 
-    if a_count:
-        pointwise_scalar_mul_add_compressed_compressed_fallback_matrix_kernel[(a_count,)](
+    fallback_meta = dict(
+        BUFFERED=buffered,
+        OUTPUT_POLICY=output_policy,
+        LOGICAL_NUMEL=data.logical_numel,
+        FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length_a,
+        BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
+        FIXED_WORDS=fixed_words,
+        TILE=64,
+    )
+    if a_has_fallback:
+        pointwise_scalar_mul_add_compressed_compressed_fallback_matrix_kernel[(triton.cdiv(streams, 64),)](
             data.data, data.sign_mantissa, a_shifted_decode, data.center,
             a_stream_starts, a_stream_offsets,
             other.data, other.sign_mantissa, b_shifted_decode, other.center,
@@ -282,16 +294,10 @@ def _launch_scalar_mul_add_compressed_compressed(
             b_descriptor, other.fallback_count,
             output, auxiliary, alpha,
             data.size, streams,
-            BUFFERED=buffered,
-            OUTPUT_POLICY=output_policy,
-            LOGICAL_NUMEL=data.logical_numel,
-            FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length_a,
-            BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
-            FIXED_WORDS=fixed_words,
-            TILE=64,
+            **fallback_meta,
         )
-    if b_count:
-        pointwise_scalar_mul_add_compressed_compressed_fallback_matrix_kernel[(b_count,)](
+    if b_has_fallback:
+        pointwise_scalar_mul_add_compressed_compressed_fallback_matrix_kernel[(triton.cdiv(streams, 64),)](
             data.data, data.sign_mantissa, a_shifted_decode, data.center,
             a_stream_starts, a_stream_offsets,
             other.data, other.sign_mantissa, b_shifted_decode, other.center,
@@ -304,13 +310,7 @@ def _launch_scalar_mul_add_compressed_compressed(
             b_descriptor, other.fallback_count,
             output, auxiliary, alpha,
             data.size, streams,
-            BUFFERED=buffered,
-            OUTPUT_POLICY=output_policy,
-            LOGICAL_NUMEL=data.logical_numel,
-            FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length_a,
-            BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
-            FIXED_WORDS=fixed_words,
-            TILE=64,
+            **fallback_meta,
         )
     return output, auxiliary
 

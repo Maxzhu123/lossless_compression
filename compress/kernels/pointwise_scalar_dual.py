@@ -19,25 +19,27 @@ def _setup_fallback_map_kernel(
     bad_streams, bad_starts, fallback_offsets, metadata,
     descriptor, fallback_count,
     stream_starts, stream_offsets,
-    n_fallback,
     BUFFERED: tl.constexpr,
 ):
-    idx = tl.program_id(0)
-    if idx >= n_fallback:
+    """Build per-stream fallback maps without host-side count synchronisation."""
+    pid = tl.program_id(0)
+    offs = pid * 1024 + tl.arange(0, 1024)
+    count = tl.load(fallback_count).to(tl.int32)
+    valid = offs < count
+    if pid * 1024 >= count:
         return
     if BUFFERED:
-        count = tl.load(fallback_count).to(tl.int32)
         base = tl.load(descriptor).to(tl.int32)
         base_words = base // 4
-        stream = tl.load(metadata + base_words + idx).to(tl.int32)
-        start = tl.load(bad_starts + base + 8 * count + idx).to(tl.int32)
-        offset = tl.load(metadata + base_words + count + idx).to(tl.int32)
+        stream = tl.load(metadata + base_words + offs, mask=valid, other=0).to(tl.int32)
+        start = tl.load(bad_starts + base + 8 * count + offs, mask=valid, other=0).to(tl.int32)
+        offset = tl.load(metadata + base_words + count + offs, mask=valid, other=0).to(tl.int32)
     else:
-        stream = tl.load(bad_streams + idx).to(tl.int32)
-        start = tl.load(bad_starts + idx).to(tl.int32)
-        offset = tl.load(fallback_offsets + idx).to(tl.int32)
-    tl.store(stream_starts + stream, start)
-    tl.store(stream_offsets + stream, offset)
+        stream = tl.load(bad_streams + offs, mask=valid, other=0).to(tl.int32)
+        start = tl.load(bad_starts + offs, mask=valid, other=0).to(tl.int32)
+        offset = tl.load(fallback_offsets + offs, mask=valid, other=0).to(tl.int32)
+    tl.store(stream_starts + stream, start, mask=valid)
+    tl.store(stream_offsets + stream, offset, mask=valid)
 
 
 @triton.jit
