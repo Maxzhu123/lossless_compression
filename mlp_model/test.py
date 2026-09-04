@@ -2,7 +2,7 @@ import torch
 from matplotlib import pyplot as plt
 
 from sparse_utils import MyCompressed
-from compress.code_storage import Distribution, DistType, NoiseLevel
+from compression.format import NoiseLevel, DistType, Distribution
 from compress.compress import TensorBuffer
 
 

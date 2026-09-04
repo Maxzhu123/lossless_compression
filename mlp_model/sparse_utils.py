@@ -3,7 +3,8 @@ from typing import Iterable, TYPE_CHECKING
 from torch import Tensor
 import math
 
-from compress.code_storage import CompressedTensor, Distribution, DistType, NoiseLevel
+from compress.comp_tensor import CompressedTensor
+from compress.compression.format import NoiseLevel, DistType, Distribution
 from compress.compress import (
     compress,
     compA_add_B,

@@ -15,7 +15,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from compress.code_storage import Distribution, DistType, NoiseLevel
+from compression.format import NoiseLevel, DistType, Distribution
 from compress.compress import compress, decompress, a_compA_add_compB
 from compress.tensor_buffer import TensorBuffer, Allocation
 

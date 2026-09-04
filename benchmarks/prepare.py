@@ -6,8 +6,8 @@ import torch
 
 from compress.compress import compress, decompress
 from compress.tensor_buffer import TensorBuffer
-from compress.code_storage import CompressedTensor, NoiseLevel, Distribution, DistType
-
+from compress.comp_tensor import CompressedTensor
+from compress.compression.format import NoiseLevel, DistType, Distribution
 
 SHAPE_OPTIONS = [50_000_000, 200_000_000]
 SHAPE_SEED = 0

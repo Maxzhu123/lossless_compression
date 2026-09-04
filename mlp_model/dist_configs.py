@@ -1,4 +1,4 @@
-from compress.code_storage import Distribution, DistType, NoiseLevel
+from compress.compression.format import NoiseLevel, DistType, Distribution
 
 # Weight Distribution
 weight_dist = Distribution(DistType.LAPLACE, noise_level=NoiseLevel.CLEAN)

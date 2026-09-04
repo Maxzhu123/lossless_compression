@@ -2,14 +2,14 @@
 from typing import TYPE_CHECKING
 import torch
 
-from .code_storage import Distribution, StorageLayout
+from .compression.format import StorageLayout, Distribution
 from .codec.runtime import compress_dense, decode_matrix_dense
 from .pointwise import ADD, MULTIPLY, SCALAR_MUL_ADD, pointwise_compressed_dense, pointwise_scale_add_compressed
 from .tensor_buffer import TensorBuffer
 
 if TYPE_CHECKING:
     from torch import Tensor
-    from .code_storage import CompressedTensor
+    from .comp_tensor import CompressedTensor
 
 def compress(
     data: Tensor,

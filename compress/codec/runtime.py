@@ -4,10 +4,10 @@ from dataclasses import replace
 import torch
 import triton
 
-from ..code_storage import (
-    CompressedTensor, Distribution, DistType, NoiseLevel, StorageLayout,
-)
-from ..huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
+from ..comp_tensor import (
+    CompressedTensor, )
+from ..compression.format import NoiseLevel, DistType, StorageLayout, Distribution
+from ..compression.huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
 from ..tensor_buffer import TensorBuffer
 from kernels.main_kernels import (
     _compact_bad_streams_kernel,

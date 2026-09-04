@@ -13,7 +13,7 @@ import statistics
 
 import torch
 
-from compress.code_storage import Distribution, DistType
+from compress.compression.format import DistType, Distribution
 from compress.compress import (
     compress,
     compA_add_B,

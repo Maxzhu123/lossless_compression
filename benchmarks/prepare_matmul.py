@@ -3,7 +3,7 @@ import statistics
 
 import torch
 
-from compress.code_storage import Distribution, DistType
+from compress.compression.format import DistType, Distribution
 from compress.codec.runtime import compress_dense
 from compress.compress import A_compB, decompress
 from compress.tensor_buffer import TensorBuffer
