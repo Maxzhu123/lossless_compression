@@ -13,7 +13,6 @@ from ..codec.primitives import decode_symbol, pack_bf16
 from .pointwise import _pointwise_location, _store_result
 
 
-
 @triton.jit
 def _prepare_dual_tables_and_maps_kernel(
     a_decode_table, a_center, a_shifted_decode,

@@ -199,6 +199,7 @@ def pointwise_compressed_dense_kernel(
             word += crosses_word
             shift = tl.where(crosses_word, next_shift - 32, next_shift)
 
+
 @triton.autotune(
     configs=SCATTER_FALLBACK_AUTOTUNE_CONFIGS,
     key=["n_elements", "N_LANES", "N_STEPS", "BLOCK"],
