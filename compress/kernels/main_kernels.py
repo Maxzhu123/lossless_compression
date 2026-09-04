@@ -1,7 +1,7 @@
 import triton
 from triton import language as tl
 
-from .codec.autotune import (
+from codec.autotune import (
     COMPACT_BAD_STREAMS_AUTOTUNE_CONFIGS,
     COMPACT_EXTRA_AUTOTUNE_CONFIGS,
     DECODE_AUTOTUNE_CONFIGS,
@@ -454,7 +454,7 @@ def _compact_extra_impl(
     key=["n_elements", "N_LANES", "N_STEPS", "BLOCK"],
 )
 @triton.jit
-def _compact_matrix_components_extra_kernel(
+def update_comp_compact_matrix_components_extra_kernel(
     source_bits, extra_streams, extra_starts,
     fallback_offsets, fallback_data, metadata_buffer,
     allocation_descriptor, final_counts, bad_count, n_elements,
