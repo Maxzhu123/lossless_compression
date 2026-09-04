@@ -15,7 +15,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from compress.code_storage import Distribution, DistType
+from compress.code_storage import Distribution, DistType, NoiseLevel
 from compress.compress import compress, decompress, a_compA_add_compB
 from compress.tensor_buffer import TensorBuffer, Allocation
 
@@ -67,7 +67,8 @@ def measure(mom, param, buffer, mom_buffer, label):
     correct = torch.equal(decompress(result).view(torch.int16), expected.view(torch.int16))
     free(result, buffer)
 
-    print(f"{label:12s}: {ms:8.3f} ms/call  correct={correct}")
+    assert correct, "Sparse update result is incorrect"
+    print(f"{label:12s}: {ms:8.3f} ms/call")
     return ms
 
 

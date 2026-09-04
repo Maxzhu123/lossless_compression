@@ -20,7 +20,9 @@ from ..kernels.pointwise_scalar import (
     pointwise_scalar_mul_add_dense_matrix_kernel,
 )
 from ..kernels.pointwise_scalar_dual import (
-    pointwise_scalar_mul_add_compressed_compressed_matrix_kernel,
+    _setup_fallback_map_kernel,
+    pointwise_scalar_mul_add_compressed_compressed_fallback_matrix_kernel,
+    pointwise_scalar_mul_add_compressed_compressed_fixed_matrix_kernel,
 )
 from ..tensor_buffer import TensorBuffer
 from .registry import PointwiseOp, SCALAR_MUL_ADD
@@ -178,7 +180,7 @@ def _launch_scalar_mul_add_compressed_dense(
 def _launch_scalar_mul_add_compressed_compressed(
     data, other, alpha, output_policy,
 ):
-    """Launch the one-pass fused two-compressed matrix kernel."""
+    """Launch fixed-main and fallback-tile passes for two compressed operands."""
     _, a_decode_table, rare_length_a = get_distribution_tables(data.distribution)
     _, b_decode_table, rare_length_b = get_distribution_tables(other.distribution)
     if rare_length_a != rare_length_b:
@@ -226,24 +228,90 @@ def _launch_scalar_mul_add_compressed_compressed(
     a_descriptor = data.fallback_descriptor if buffered else data.offsets
     b_descriptor = other.fallback_descriptor if buffered else other.offsets
 
-    pointwise_scalar_mul_add_compressed_compressed_matrix_kernel[(blocks,)](
-        data.data, data.sign_mantissa, a_shifted_decode, data.center,
-        a_bad_streams, a_bad_starts, a_fb_offsets, a_metadata,
-        a_descriptor, data.fallback_count,
-        data.fallback_buffer, data.fallback_base,
-        other.data, other.sign_mantissa, b_shifted_decode, other.center,
-        b_bad_streams, b_bad_starts, b_fb_offsets, b_metadata,
-        b_descriptor, other.fallback_count,
-        other.fallback_buffer, other.fallback_base,
-        output, auxiliary, alpha,
-        data.size, blocks * lanes,
-        BUFFERED=buffered,
+    a_count = int(data.fallback_count.item()) if buffered else data.offsets.numel()
+    b_count = int(other.fallback_count.item()) if buffered else other.offsets.numel()
+    streams = blocks * lanes
+
+    # Direct per-stream fallback maps make the fallback tile pass O(fallback_count)
+    # instead of O(blocks * fallback_count).
+    a_stream_starts = torch.full((streams,), steps, dtype=torch.int32, device=data.data.device)
+    a_stream_offsets = torch.zeros(streams, dtype=torch.int32, device=data.data.device)
+    b_stream_starts = torch.full((streams,), steps, dtype=torch.int32, device=other.data.device)
+    b_stream_offsets = torch.zeros(streams, dtype=torch.int32, device=other.data.device)
+
+    if a_count:
+        _setup_fallback_map_kernel[(a_count,)](
+            a_bad_streams, a_bad_starts, a_fb_offsets, a_metadata,
+            a_descriptor, data.fallback_count,
+            a_stream_starts, a_stream_offsets,
+            a_count, BUFFERED=buffered,
+        )
+    if b_count:
+        _setup_fallback_map_kernel[(b_count,)](
+            b_bad_streams, b_bad_starts, b_fb_offsets, b_metadata,
+            b_descriptor, other.fallback_count,
+            b_stream_starts, b_stream_offsets,
+            b_count, BUFFERED=buffered,
+        )
+
+    fixed_meta = dict(
         OUTPUT_POLICY=output_policy,
-        LOGICAL_NUMEL=data.logical_numel,
         FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length_a,
         BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
         FIXED_WORDS=fixed_words,
     )
+    pointwise_scalar_mul_add_compressed_compressed_fixed_matrix_kernel[(blocks,)](
+        data.data, data.sign_mantissa, a_shifted_decode, data.center,
+        other.data, other.sign_mantissa, b_shifted_decode, other.center,
+        output, auxiliary, alpha,
+        data.size, streams,
+        LOGICAL_NUMEL=data.logical_numel, **fixed_meta,
+    )
+
+    if a_count:
+        pointwise_scalar_mul_add_compressed_compressed_fallback_matrix_kernel[(a_count,)](
+            data.data, data.sign_mantissa, a_shifted_decode, data.center,
+            a_stream_starts, a_stream_offsets,
+            other.data, other.sign_mantissa, b_shifted_decode, other.center,
+            b_stream_starts, b_stream_offsets,
+            data.fallback_buffer, data.fallback_base,
+            other.fallback_buffer, other.fallback_base,
+            a_bad_streams, a_bad_starts, a_fb_offsets, a_metadata,
+            a_descriptor, data.fallback_count,
+            a_descriptor, data.fallback_count,
+            b_descriptor, other.fallback_count,
+            output, auxiliary, alpha,
+            data.size, streams,
+            BUFFERED=buffered,
+            OUTPUT_POLICY=output_policy,
+            LOGICAL_NUMEL=data.logical_numel,
+            FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length_a,
+            BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
+            FIXED_WORDS=fixed_words,
+            TILE=64,
+        )
+    if b_count:
+        pointwise_scalar_mul_add_compressed_compressed_fallback_matrix_kernel[(b_count,)](
+            data.data, data.sign_mantissa, a_shifted_decode, data.center,
+            a_stream_starts, a_stream_offsets,
+            other.data, other.sign_mantissa, b_shifted_decode, other.center,
+            b_stream_starts, b_stream_offsets,
+            data.fallback_buffer, data.fallback_base,
+            other.fallback_buffer, other.fallback_base,
+            b_bad_streams, b_bad_starts, b_fb_offsets, b_metadata,
+            b_descriptor, other.fallback_count,
+            a_descriptor, data.fallback_count,
+            b_descriptor, other.fallback_count,
+            output, auxiliary, alpha,
+            data.size, streams,
+            BUFFERED=buffered,
+            OUTPUT_POLICY=output_policy,
+            LOGICAL_NUMEL=data.logical_numel,
+            FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length_a,
+            BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
+            FIXED_WORDS=fixed_words,
+            TILE=64,
+        )
     return output, auxiliary
 
 
@@ -258,8 +326,9 @@ def pointwise_scale_add_compressed(
 ) -> torch.Tensor | CompressedTensor:
     """Apply ``alpha * data + other`` where both operands are compressed.
 
-    Uses the one-pass fused matrix kernel for blocked operands with the same
-    geometry, including both private and buffered fallback storage.
+    Uses the fused two-compressed matrix path (fixed-main and fallback-tile
+    passes) for blocked operands with the same geometry, including both
+    private and buffered fallback storage.
     """
     same_layout = data.layout == StorageLayout.COMPRESSED and other.layout == StorageLayout.COMPRESSED
     same_buffering = (data.fallback_descriptor is None) == (other.fallback_descriptor is None)
