@@ -99,6 +99,41 @@ def _shift_decoding_table_kernel(
     tl.store(shifted_decode + idx, shifted)
 
 
+@triton.jit
+def _shift_decoding_tables_kernel(
+    a_base_decode, a_center, a_shifted_decode,
+    b_base_decode, b_center, b_shifted_decode,
+    TABLE_SIZE: tl.constexpr, BLOCK: tl.constexpr,
+):
+    """Create two shifted decode tables in a single kernel launch."""
+    pid = tl.program_id(0)
+    idx = tl.arange(0, BLOCK)
+    if pid == 0:
+        center_value = tl.load(a_center).to(tl.int32)
+        zero_delta = (-127 - center_value) & 255
+        packed = tl.load(a_base_decode + idx).to(tl.int32)
+        length = packed & 255
+        symbol = (packed >> 8) & 255
+        is_zero = symbol == 0
+        delta = tl.where(symbol == 0, 0, symbol - (symbol <= zero_delta).to(tl.int32))
+        delta = tl.where(delta >= 128, delta - 256, delta)
+        exponent = tl.where(is_zero, -127, delta + center_value)
+        shifted = tl.where(length == 0, 0, length | (exponent << 8))
+        tl.store(a_shifted_decode + idx, shifted)
+    else:
+        center_value = tl.load(b_center).to(tl.int32)
+        zero_delta = (-127 - center_value) & 255
+        packed = tl.load(b_base_decode + idx).to(tl.int32)
+        length = packed & 255
+        symbol = (packed >> 8) & 255
+        is_zero = symbol == 0
+        delta = tl.where(symbol == 0, 0, symbol - (symbol <= zero_delta).to(tl.int32))
+        delta = tl.where(delta >= 128, delta - 256, delta)
+        exponent = tl.where(is_zero, -127, delta + center_value)
+        shifted = tl.where(length == 0, 0, length | (exponent << 8))
+        tl.store(b_shifted_decode + idx, shifted)
+
+
 
 @triton.jit
 def _encode_impl(

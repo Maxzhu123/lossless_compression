@@ -8,7 +8,7 @@ import triton
 from ..code_storage import CompressedTensor, StorageLayout
 from ..codec.runtime import compress_components, compress_dense, decode_matrix_dense, geometry
 from ..huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
-from ..trition_kernels import _shift_decoding_table_kernel
+from ..trition_kernels import _shift_decoding_table_kernel, _shift_decoding_tables_kernel
 from ..kernels.pointwise import (
     COMPRESSED_OUTPUT,
     DENSE_OUTPUT,
@@ -190,11 +190,8 @@ def _launch_scalar_mul_add_compressed_compressed(
     b_shifted_decode = torch.empty(
         1 << FIRST_BITS, dtype=torch.int32, device=data.data.device,
     )
-    _shift_decoding_table_kernel[(1,)](
+    _shift_decoding_tables_kernel[(2,)](
         a_decode_table, data.center, a_shifted_decode,
-        TABLE_SIZE=1 << FIRST_BITS, BLOCK=1 << FIRST_BITS,
-    )
-    _shift_decoding_table_kernel[(1,)](
         b_decode_table, other.center, b_shifted_decode,
         TABLE_SIZE=1 << FIRST_BITS, BLOCK=1 << FIRST_BITS,
     )
