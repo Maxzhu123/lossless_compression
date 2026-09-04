@@ -49,14 +49,14 @@ def _assert_bits_equal(left: torch.Tensor, right: torch.Tensor) -> None:
     )
 
 
-def _make_compressed_pair(n: int):
+def _make_compressed_pair(n: int, buffer: TensorBuffer):
     shape = SHAPE(n)
     generator = torch.Generator(device="cuda").manual_seed(n)
     p = torch.randn(shape, device="cuda", generator=generator).to(torch.bfloat16)
     mom = torch.randn(shape, device="cuda", generator=generator).to(torch.bfloat16)
     dist = Distribution(DistType.GAUSSIAN)
-    p_enc = compress(p, dist, None)
-    mom_enc = compress(mom, dist, None)
+    p_enc = compress(p, dist, buffer)
+    mom_enc = compress(mom, dist, buffer)
     return p, mom, p_enc, mom_enc, dist, shape
 
 
@@ -141,26 +141,27 @@ def _compare(first, second, release_first, release_second):
 
 
 def _benchmark_shape(n: int) -> tuple[float, float]:
-    out_buf = _buffer(SHAPE(n)[0] * SHAPE(n)[1])
-    p, mom, p_enc, mom_enc, dist, shape = _make_compressed_pair(n)
+    numel = SHAPE(n)[0] * SHAPE(n)[1]
+    buf = _buffer(numel)
+    p, mom, p_enc, mom_enc, dist, shape = _make_compressed_pair(n, buf)
     scale = torch.tensor([SCALE_VALUE], device="cuda", dtype=torch.float32)
 
     # Correctness.
     expected = (p.float() + mom.float() * scale).to(torch.bfloat16)
-    current_result = _current_update(p_enc, mom_enc, scale, out_buf)
+    current_result = _current_update(p_enc, mom_enc, scale, buf)
     _assert_bits_equal(decompress(current_result), expected)
-    _free(current_result, out_buf)
-    fused_result = _fused_update(p_enc, mom_enc, scale, out_buf)
+    _free(current_result, buf)
+    fused_result = _fused_update(p_enc, mom_enc, scale, buf)
     _assert_bits_equal(decompress(fused_result), expected)
-    _free(fused_result, out_buf)
+    _free(fused_result, buf)
 
-    current = lambda: _current_update(p_enc, mom_enc, scale, out_buf)
-    fused = lambda: _fused_update(p_enc, mom_enc, scale, out_buf)
+    current = lambda: _current_update(p_enc, mom_enc, scale, buf)
+    fused = lambda: _fused_update(p_enc, mom_enc, scale, buf)
     current_ms, fused_ms = _compare(
         current,
         fused,
-        lambda result: _free(result, out_buf),
-        lambda result: _free(result, out_buf),
+        lambda result: _free(result, buf),
+        lambda result: _free(result, buf),
     )
 
     print(
@@ -169,7 +170,9 @@ def _benchmark_shape(n: int) -> tuple[float, float]:
         f"reduction={(current_ms - fused_ms) / current_ms:6.2%}"
     )
 
-    out_buf.reset()
+    _free(p_enc, buf)
+    _free(mom_enc, buf)
+    buf.reset()
     del p, mom, p_enc, mom_enc, current_result, fused_result
     torch.cuda.empty_cache()
     return current_ms, fused_ms
