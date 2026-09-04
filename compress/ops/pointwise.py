@@ -285,7 +285,13 @@ def pointwise_scale_add_compressed(
     """
     same_layout = data.layout == StorageLayout.COMPRESSED and other.layout == StorageLayout.COMPRESSED
     same_buffering = (data.fallback_descriptor is None) == (other.fallback_descriptor is None)
-    if same_layout and same_buffering and geometry(data.distribution) == geometry(other.distribution):
+    # The two-compressed path requires both operands to use the same fallback
+    # storage mode; do not silently fall back to a mixed-buffer dense path.
+    assert same_buffering, (
+        "pointwise_scale_add_compressed requires both inputs to be buffer-backed "
+        "or both to be non-buffer-backed"
+    )
+    if same_layout and geometry(data.distribution) == geometry(other.distribution):
         result_distribution = distribution or data.distribution
         policy = DENSE_OUTPUT if dense_output else COMPRESSED_OUTPUT
         values, auxiliary = _launch_scalar_mul_add_compressed_compressed(
