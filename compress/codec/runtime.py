@@ -196,79 +196,81 @@ def compress_components(
         block_size=block_size, lanes=lanes, steps=steps, blocks=blocks,
     )
 
-    if buffer is not None:
-        # Keep fallback metadata and bytes inside one descriptor-backed arena region.
+    # Count overflow streams and bytes once.  For a shared buffer these counts
+    # are used asynchronously by the allocator; for private fallback they tell
+    # us how much exact-size storage to allocate.
+    counts = torch.zeros(4, dtype=torch.int32, device=source_values.device)
+    _count_bad_streams_kernel[(triton.cdiv(streams, 1024),)](
+        extra_starts, counts[:1], counts[1:2], streams, steps, BLOCK=1024,
+    )
+
+    buffered = buffer is not None
+    if buffered:
         if buffer.capacity_bytes % 4:
             raise ValueError("TensorBuffer capacity must be divisible by 4")
-        counts = torch.zeros(4, dtype=torch.int32, device=source_values.device)
-        _count_bad_streams_kernel[(triton.cdiv(streams, 1024),)](
-            extra_starts, counts[:1], counts[1:2], streams, steps, BLOCK=1024,
-        )
         allocation = buffer.allocate_with_items(counts[1:2], counts[:1], 9)
         metadata = buffer.data.view(torch.int32)
-        _compact_bad_streams(
-            extra_starts, metadata, buffer.data, metadata, metadata,
-            allocation.descriptor, counts[:1], counts[2:3], counts[3:],
-            streams, steps, buffered=True,
+        fallback_buffer = buffer.data
+        bad_streams_out = metadata
+        bad_starts_out = buffer.data
+        fallback_offsets_out = metadata
+        metadata_buffer = metadata
+        allocation_descriptor = allocation.descriptor
+        descriptor = allocation.descriptor
+        # counts[0] and counts[1] are the final counts used by the buffered
+        # metadata layout; counts[2] and counts[3] are zeroed compaction
+        # accumulators.
+        final_counts = counts[:1]
+        bad_count = counts[2:3]
+        fallback_total = counts[3:]
+        fallback_base = 0
+    else:
+        count, fallback_size = (int(value) for value in counts[:2].tolist())
+        bad_streams_out = torch.empty(count, dtype=torch.int32, device=source_values.device)
+        bad_starts_out = torch.empty(count, dtype=torch.uint8, device=source_values.device)
+        fallback_offsets_out = torch.empty(
+            count, dtype=torch.int32, device=source_values.device
         )
-        _compact_extra(
-            source_values, metadata, buffer.data, metadata, buffer.data,
-            metadata, allocation.descriptor, counts[:1], counts[2:3],
-            size, streams,
-            precomputed=precomputed, buffered=True,
-            logical_numel=logical_numel,
-            block_size=block_size, lanes=lanes, steps=steps,
+        fallback_buffer = torch.empty(
+            fallback_size, dtype=torch.int8, device=source_values.device
         )
-        result = CompressedTensor(
-            encoded, size, sign_mantissa,
-            fallback_buffer=buffer.data,
-            fallback_descriptor=allocation.descriptor,
-            buffer=buffer,
-            fallback_count=counts[:1], fallback_used=counts[1:2],
-            distribution=distribution, center=center, shape=shape,
-        )
-        return result
+        metadata_buffer = bad_streams_out
+        # Private compaction does not use the descriptor/final count path, so
+        # the zeroed counts[2] and counts[3] act as the atomic accumulators.
+        allocation_descriptor = counts[2:3]
+        descriptor = None
+        final_counts = counts[2:3]
+        bad_count = counts[2:3]
+        fallback_total = counts[3:]
+        fallback_base = 0
 
-    # Private fallback storage synchronizes once to allocate exact-size tensors.
-    counts = torch.zeros(2, dtype=torch.int32, device=source_values.device)
-    bad_count, fallback_total = counts[:1], counts[1:]
-    _count_bad_streams_kernel[(triton.cdiv(streams, 1024),)](
-        extra_starts, bad_count, fallback_total, streams, steps, BLOCK=1024,
-    )
-    count, fallback_size = (int(value) for value in counts.tolist())
-    bad_streams = torch.empty(count, dtype=torch.int32, device=source_values.device)
-    bad_starts = torch.empty(count, dtype=torch.uint8, device=source_values.device)
-    fallback_offsets = torch.empty(
-        count, dtype=torch.int32, device=source_values.device
-    )
-    fallback_data = torch.empty(
-        fallback_size, dtype=torch.int8, device=source_values.device
-    )
-    bad_count.zero_()
-    fallback_total.zero_()
     _compact_bad_streams(
-        extra_starts, bad_streams, bad_starts, fallback_offsets,
-        bad_streams, bad_count, bad_count, bad_count, fallback_total,
-        streams, steps, buffered=False,
+        extra_starts, bad_streams_out, bad_starts_out, fallback_offsets_out,
+        metadata_buffer, allocation_descriptor, final_counts,
+        bad_count, fallback_total, streams, steps,
+        buffered=buffered,
     )
     _compact_extra(
-        source_values, bad_streams, bad_starts, fallback_offsets,
-        fallback_data, bad_streams, bad_count, bad_count, bad_count,
-        size, streams,
-        precomputed=precomputed, buffered=False,
+        source_values, bad_streams_out, bad_starts_out, fallback_offsets_out,
+        fallback_buffer, metadata_buffer, allocation_descriptor,
+        final_counts, bad_count, size, streams,
+        precomputed=precomputed, buffered=buffered,
         logical_numel=logical_numel,
         block_size=block_size, lanes=lanes, steps=steps,
     )
-    result = CompressedTensor(
+    return CompressedTensor(
         encoded, size, sign_mantissa,
-        bad_streams, bad_starts, fallback_offsets,
-        fallback_buffer=fallback_data, fallback_base=0,
+        offsets=None if buffered else bad_streams_out,
+        fallback_starts=None if buffered else bad_starts_out,
+        fallback_offsets=None if buffered else fallback_offsets_out,
+        fallback_buffer=fallback_buffer,
+        fallback_descriptor=descriptor,
         buffer=buffer,
-        fallback_count=bad_count, fallback_used=fallback_total,
+        fallback_base=fallback_base,
+        fallback_count=counts[:1] if buffered else bad_count,
+        fallback_used=counts[1:2] if buffered else fallback_total,
         distribution=distribution, center=center, shape=shape,
     )
-    return result
-
 
 def compress_dense(
     data, distribution, buffer: TensorBuffer | None = None, *,
