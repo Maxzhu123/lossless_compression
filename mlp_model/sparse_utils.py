@@ -98,18 +98,21 @@ class MyCompressed(Tensor):
 
 
 class SparseSGDM:
-    def __init__(self, params: Iterable[MyCompressed | Tensor], lr, momentum=0.9):
+    def __init__(self, params: Iterable[MyCompressed | Tensor], lr, momentum=0.9,
+                 buffer: TensorBuffer|None=None, compressed=True):
         for p in params:
             assert isinstance(p, (MyCompressed, Tensor)), "params must be a list of MySparse or Tensor"
         self.params = list(params)
         self.lr = lr
         self.momentum = torch.tensor(momentum, dtype=torch.float32, device="cuda")
+        self.compressed = compressed
 
-        # # One momentum tensor per parameter.
+        # One momentum tensor per parameter.
         self.momentums = []
         for p in self.params:
             mom = torch.zeros(p.shape, dtype=p.dtype, device=p.device)
-            mom = MyCompressed(mom, buffer=None)
+            if compressed:
+                mom = MyCompressed(mom, buffer=buffer)
             self.momentums.append(mom)
 
     @torch.no_grad()
@@ -121,29 +124,31 @@ class SparseSGDM:
             mom = self.momentums[i]
             # Inplace update of momentum: mom = mom * self.momentum + g
 
-            # torch.add(g, mom, alpha=0.9, out=mom)
-            # update = mom * (-self.lr)
-            # p.add_(update)
-
-            mom.mul_add_(self.momentum, g)
-            # Fused update: result = -lr * mom + p.
-            if isinstance(p, MyCompressed):
-                scale = torch.tensor(
-                    [-self.lr], dtype=torch.float32, device=p.device,
-                )
-                prev = p.x
-                p.x = a_compA_add_compB(
-                    mom.x,
-                    scale,
-                    prev,
-                    dense_output=False,
-                    buffer=prev.buffer,
-                    distribution=prev.distribution,
-                )
-                prev.free()
+            if self.compressed:
+                mom.mul_add_(self.momentum, g)
+                # Fused update: result = -lr * mom + p.
+                if isinstance(p, MyCompressed):
+                    scale = torch.tensor(
+                        [-self.lr], dtype=torch.float32, device=p.device,
+                    )
+                    prev = p.x
+                    p.x = a_compA_add_compB(
+                        mom.x,
+                        scale,
+                        prev,
+                        dense_output=False,
+                        buffer=prev.buffer,
+                        distribution=prev.distribution,
+                    )
+                    prev.free()
+                else:
+                    update = mom.decompress() * (-self.lr)
+                    p.add_(update)
             else:
-                update = mom.decompress() * (-self.lr)
+                torch.add(g, mom, alpha=0.9, out=mom)
+                update = mom * (-self.lr)
                 p.add_(update)
+
 
     def zero_grad(self):
         for p in self.params:

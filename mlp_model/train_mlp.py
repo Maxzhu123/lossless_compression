@@ -58,12 +58,13 @@ def main():
     G.manual_seed(0)
 
     if BUFFER:
-        buffer = TensorBuffer(1_000_000)
+        buffer = TensorBuffer(2000_000_000)
     else:
         buffer = None
 
     model = Model(8, 4096, 21504, 4096, G, buffer=buffer)
-    optimiser = SparseSGDM(model.sparse_parameters(), lr=0.001, momentum=0.9)
+    optimiser = SparseSGDM(model.sparse_parameters(), lr=0.001, momentum=0.9,
+                           buffer=buffer, compressed=True)
 
     x = torch.randn(12000, 4096, dtype=torch.bfloat16, device="cuda", generator=G)
     y_hat = x.norm(dim=0)
@@ -80,7 +81,7 @@ def main():
     torch.cuda.reset_peak_memory_stats()
     torch.cuda.synchronize()
     st = time.perf_counter()
-    for i in range(21):
+    for i in range(11):
         y = model(x, buffer=buffer)
         loss = (y - y_hat).pow(2).mean()
         # print(visualize_buffer(buffer))
@@ -92,7 +93,7 @@ def main():
 
         if i % 10 == 0:
             print(f'{i} loss = {loss.item():.4f}')
-            c_print(visualize_buffer(buffer), color="yellow")
+            # c_print(visualize_buffer(buffer), color="yellow")
 
     torch.cuda.synchronize()
     end = time.perf_counter()

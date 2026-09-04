@@ -276,6 +276,11 @@ def pointwise_scale_add_compressed(
             buffer, data.shape, precomputed=True,
             logical_numel=data.logical_numel,
         )
+
+        # print( result.memory_size()/(result.logical_numel*2))
+        # print(result.memory_buffer_size())
+        # exit(5)
+
         if data.layout == StorageLayout.COMPRESSED:
             result = replace(result, layout=data.layout)
         return result
