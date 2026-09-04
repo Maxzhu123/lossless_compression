@@ -4,10 +4,10 @@ import time
 from random import Random
 import torch
 
-from compress.compress import compress, decompress
-from compress.tensor_buffer import TensorBuffer
-from compress.comp_tensor import CompressedTensor
-from compress.compression.format import NoiseLevel, DistType, Distribution
+from LCT.compress import compress, decompress
+from LCT.tensor_buffer import TensorBuffer
+from LCT.comp_tensor import CompressedTensor
+from LCT.compression.format import NoiseLevel, DistType, Distribution
 
 SHAPE_OPTIONS = [50_000_000, 200_000_000]
 SHAPE_SEED = 0

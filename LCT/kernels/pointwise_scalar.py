@@ -1,4 +1,8 @@
-"""Generic Triton templates for pointwise compressed-tensor operations."""
+"""Dedicated fused scalar multiply-add pointwise kernels.
+
+Kept separate from the binary pointwise kernels so the existing add/multiply
+hot path does not pay any scalar/alpha overhead.
+"""
 
 import triton
 from triton import language as tl
@@ -8,56 +12,10 @@ from ..codec.autotune import (
     SCATTER_FALLBACK_AUTOTUNE_CONFIGS,
 )
 from ..codec.primitives import decode_symbol, pack_bf16
-
-
-DENSE_OUTPUT = tl.constexpr(0)
-COMPRESSED_OUTPUT = tl.constexpr(1)
-
-
-@triton.jit
-def _store_result(
-    result, output, auxiliary, storage_offset, logical_offset,
-    logical_mask, storage_mask,
-    OUTPUT_POLICY: tl.constexpr,
-):
-    """Round an operation result to BF16 and emit dense or component output."""
-    result = result.to(tl.bfloat16)
-    if OUTPUT_POLICY == DENSE_OUTPUT:
-        tl.store(output + logical_offset, result, mask=logical_mask, cache_modifier='.cs')
-    else:
-        result = tl.where(logical_mask, result, 0.0).to(tl.bfloat16)
-        bits = result.to(tl.int16, bitcast=True).to(tl.int32)
-        sign_mantissa = (bits & 0x7F) | ((bits >> 8) & 0x80)
-        exponent = (bits >> 7) & 0xFF
-        tl.store(
-            output + storage_offset, sign_mantissa.to(tl.uint8),
-            mask=storage_mask,
-        )
-        tl.store(
-            auxiliary + logical_offset, exponent.to(tl.uint8),
-            mask=logical_mask,
-        )
-
-
-@triton.jit
-def _pointwise_location(
-    block, step, lane, n_elements,
-    LOGICAL_NUMEL: tl.constexpr,
-    BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
-):
-    """Map one storage-stream position to its flattened logical offset (1D).
-
-    The row swizzle ``(n & 255)`` is hoisted: ``(block*N_STEPS+step) & 255``
-    equals ``(block_shift + step) & 255`` with ``block_shift`` loop-invariant,
-    so callers in hot loops should prefer the hoisted form below.
-    """
-    storage_offset = block * BLOCK + step * N_LANES + lane
-    storage_valid = storage_offset < n_elements
-    logical_n = block * N_STEPS + step
-    logical_k = (lane + (((block * N_STEPS) + step) & 255)) & 255
-    logical_offset = logical_n * N_LANES + logical_k
-    logical_valid = logical_offset < LOGICAL_NUMEL
-    return storage_offset, logical_offset, storage_valid, logical_valid
+from .pointwise import (
+    _pointwise_location,
+    _store_result,
+)
 
 
 @triton.autotune(
@@ -65,20 +23,20 @@ def _pointwise_location(
     key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS", "OUTPUT_POLICY"],
 )
 @triton.jit
-def pointwise_compressed_dense_matrix_kernel(
+def pointwise_scalar_mul_add_dense_kernel(
     encoded, sign_mantissa, other, output, auxiliary, decode_table,
-    n_elements, n_streams, center,
-    OP: tl.constexpr, OUTPUT_POLICY: tl.constexpr,
+    n_elements, n_streams, center, alpha,
+    OUTPUT_POLICY: tl.constexpr,
     LOGICAL_NUMEL: tl.constexpr,
     FIRST_MASK: tl.constexpr, RARE_LENGTH: tl.constexpr,
     BLOCK: tl.constexpr, N_LANES: tl.constexpr,
     N_STEPS: tl.constexpr, FIXED_WORDS: tl.constexpr,
 ):
+    """Apply ``output = alpha * decoded + other``."""
     # One program handles one codec block; each lane decodes one fixed stream.
     block = tl.program_id(0)
     lanes = tl.arange(0, N_LANES)
     lane_index = block * N_LANES + lanes
-    # word/shift track the current position inside the 64-bit fixed-payload window.
     word = tl.zeros((N_LANES,), tl.int32)
     shift = tl.zeros((N_LANES,), tl.int32)
     word0 = tl.load(encoded + word * n_streams + lane_index)
@@ -86,26 +44,20 @@ def pointwise_compressed_dense_matrix_kernel(
     window = word0.to(tl.uint32).to(tl.uint64)
     window |= word1.to(tl.uint32).to(tl.uint64) << 32
     center_value = tl.load(center).to(tl.int32)
+    alpha_value = tl.load(alpha).to(tl.float32)
 
-    # Fast path: fully-contained blocks skip all per-element validity checks.
-    # Hoisted swizzle: shift depends only on step + loop-invariant block_shift.
-    block_shift = (block * N_STEPS) & 255
     if (block + 1) * BLOCK <= LOGICAL_NUMEL:
         storage_offset = block * BLOCK + lanes
         true_mask = tl.full((N_LANES,), True, tl.int1)
-        for step in tl.range(0, N_STEPS, 2, loop_unroll_factor=2):
+        # Hoisted swizzle: shift depends only on step + loop-invariant block_shift.
+        block_shift = (block * N_STEPS) & 255
+        for step in tl.range(0, N_STEPS, 2, flatten=True, warp_specialize=True):
             logical_n0 = block * N_STEPS + step
             logical_n1 = logical_n0 + 1
             logical_k0 = (lanes + ((block_shift + step) & 255)) & 255
             logical_k1 = (lanes + ((block_shift + step + 1) & 255)) & 255
             logical_offset0 = logical_n0 * N_LANES + logical_k0
             logical_offset1 = logical_n1 * N_LANES + logical_k1
-            # Prefetch the next 32-bit Huffman word while decoding the pair.
-            word2_prefetch = tl.load(
-                encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams
-                + lane_index,
-            ).to(tl.uint32).to(tl.uint64)
-            # Decode symbol 0, reconstruct its BF16 value, then apply the op.
             current = window >> shift
             value, length = decode_symbol(
                 current, decode_table, center_value,
@@ -117,11 +69,9 @@ def pointwise_compressed_dense_matrix_kernel(
             )
             right = tl.load(other + logical_offset0, cache_modifier='.cg')
             _store_result(
-                OP(left, right), output, auxiliary, storage_offset,
+                tl.math.fma(left, alpha_value, right), output, auxiliary, storage_offset,
                 logical_offset0, true_mask, true_mask, OUTPUT_POLICY,
             )
-
-            # Decode symbol 1 at the next bit offset and process it the same way.
             shift1 = shift + length
             current1 = window >> shift1
             value1, length1 = decode_symbol(
@@ -134,15 +84,18 @@ def pointwise_compressed_dense_matrix_kernel(
             )
             right1 = tl.load(other + logical_offset1, cache_modifier='.cg')
             _store_result(
-                OP(left1, right1), output, auxiliary,
+                tl.math.fma(left1, alpha_value, right1), output, auxiliary,
                 storage_offset + N_LANES, logical_offset1,
                 true_mask, true_mask, OUTPUT_POLICY,
             )
-
-            # Advance the 64-bit window and storage offset after processing two symbols.
             next_shift = shift1 + length1
             crosses_word = next_shift >= 32
-            next_window = (window >> 32) | (word2_prefetch << 32)
+            word2 = tl.load(
+                encoded + tl.minimum(word + 2, FIXED_WORDS - 1) * n_streams
+                + lane_index,
+                mask=crosses_word, other=0,
+            ).to(tl.uint32).to(tl.uint64)
+            next_window = (window >> 32) | (word2 << 32)
             window = tl.where(crosses_word, next_window, window)
             word += crosses_word
             shift = tl.where(crosses_word, next_shift - 32, next_shift)
@@ -164,10 +117,9 @@ def pointwise_compressed_dense_matrix_kernel(
             )
             right = tl.load(other + logical_offset, mask=valid, other=0.0, cache_modifier='.cg')
             _store_result(
-                OP(left, right), output, auxiliary, offset, logical_offset,
+                tl.math.fma(left, alpha_value, right), output, auxiliary, offset, logical_offset,
                 valid, storage_valid, OUTPUT_POLICY,
             )
-
             shift1 = shift + tl.where(storage_valid, length, 0)
             offset1, logical_offset1, storage_valid1, valid1 = _pointwise_location(
                 block, step + 1, lanes, n_elements, LOGICAL_NUMEL,
@@ -183,10 +135,9 @@ def pointwise_compressed_dense_matrix_kernel(
             )
             right1 = tl.load(other + logical_offset1, mask=valid1, other=0.0, cache_modifier='.cg')
             _store_result(
-                OP(left1, right1), output, auxiliary, offset1, logical_offset1,
+                tl.math.fma(left1, alpha_value, right1), output, auxiliary, offset1, logical_offset1,
                 valid1, storage_valid1, OUTPUT_POLICY,
             )
-
             next_shift = shift1 + tl.where(storage_valid1, length1, 0)
             crosses_word = next_shift >= 32
             word2 = tl.load(
@@ -204,18 +155,18 @@ def pointwise_compressed_dense_matrix_kernel(
     key=["n_elements", "N_LANES", "N_STEPS", "BLOCK"],
 )
 @triton.jit
-def pointwise_compressed_dense_matrix_fallback_kernel(
+def pointwise_scalar_mul_add_dense_fallback_kernel(
     bad_streams, bad_starts, fallback_offsets,
     fallback_buffer, fallback_base, metadata, descriptor, fallback_count,
-    sign_mantissa, other, output, auxiliary, n_elements,
-    OP: tl.constexpr, OUTPUT_POLICY: tl.constexpr, BUFFERED: tl.constexpr,
+    sign_mantissa, other, output, auxiliary, n_elements, alpha,
+    OUTPUT_POLICY: tl.constexpr, BUFFERED: tl.constexpr,
     LOGICAL_NUMEL: tl.constexpr,
     TILE: tl.constexpr, BLOCK: tl.constexpr,
     N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
 ):
-    """Recompute pointwise results for stream tails stored in fallback storage."""
     pid = tl.program_id(0)
     tile = pid * TILE + tl.arange(0, TILE)
+    alpha_value = tl.load(alpha).to(tl.float32)
     count = tl.load(fallback_count).to(tl.int32)
     if pid * TILE >= count:
         return
@@ -235,9 +186,7 @@ def pointwise_compressed_dense_matrix_fallback_kernel(
     else:
         stream = tl.load(bad_streams + tile, mask=valid, other=0)
         start = tl.load(bad_starts + tile, mask=valid, other=N_STEPS)
-        fallback_offset = tl.load(
-            fallback_offsets + tile, mask=valid, other=0,
-        )
+        fallback_offset = tl.load(fallback_offsets + tile, mask=valid, other=0)
     stream = stream.to(tl.int32)
     start = start.to(tl.int32)
     fallback_offset = fallback_offset.to(tl.int32)
@@ -263,18 +212,6 @@ def pointwise_compressed_dense_matrix_fallback_kernel(
         )
         right = tl.load(other + logical_offset, mask=logical_active, other=0.0, cache_modifier='.cg')
         _store_result(
-            OP(left, right), output, auxiliary, offset, logical_offset,
+            tl.math.fma(left, alpha_value, right), output, auxiliary, offset, logical_offset,
             logical_active, active, OUTPUT_POLICY,
         )
-
-
-@triton.jit
-def add_op(left, right):
-    """Add operands inside a specialized pointwise kernel."""
-    return left + right
-
-
-@triton.jit
-def multiply_op(left, right):
-    """Multiply operands inside a specialized pointwise kernel."""
-    return left * right

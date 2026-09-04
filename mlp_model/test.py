@@ -2,8 +2,8 @@ import torch
 from matplotlib import pyplot as plt
 
 from sparse_utils import MyCompressed
-from compression.format import NoiseLevel, DistType, Distribution
-from compress.compress import TensorBuffer
+from LCT.compression.format import NoiseLevel, DistType, Distribution
+from LCT.compress import TensorBuffer
 
 
 buffer = TensorBuffer(100_000_000)
@@ -23,4 +23,3 @@ _, exp = torch.frexp(h.flatten())
 plt.hist(exp[:10000].cpu().float(), bins=50, density=True)
 # plt.xlim(-10, 5)
 plt.show()
-

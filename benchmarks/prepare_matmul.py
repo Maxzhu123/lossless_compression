@@ -3,10 +3,10 @@ import statistics
 
 import torch
 
-from compress.compression.format import DistType, Distribution
-from compress.codec.runtime import compress_dense
-from compress.compress import A_compB, decompress
-from compress.tensor_buffer import TensorBuffer
+from LCT.compression.format import DistType, Distribution
+from LCT.codec.runtime import compress_dense
+from LCT.compress import A_compB, decompress
+from LCT.tensor_buffer import TensorBuffer
 
 
 # Benchmark matrix sizes as (n, 4n): the dense activation is [n, 4n] and the

@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from .compression.format import StorageLayout, Distribution
-from .codec.runtime import compress_dense, decode_matrix_dense
+from .codec.runtime import compress_dense, decode_dense
 from .pointwise import ADD, MULTIPLY, SCALAR_MUL_ADD, pointwise_compressed_dense, pointwise_scale_add_compressed
 from .tensor_buffer import TensorBuffer
 
@@ -25,7 +25,7 @@ def compress(
 def decompress(data: CompressedTensor) -> Tensor:
     """ Decode a tensor produced by :func:`compress`."""
     if data.layout == StorageLayout.COMPRESSED:
-        return decode_matrix_dense(data)
+        return decode_dense(data)
     return data.data.reshape(data.shape)
 
 

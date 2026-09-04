@@ -267,7 +267,7 @@ def _encode_impl(
     key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS"],
 )
 @triton.jit
-def _encode_matrix_components_kernel(
+def _encode_components_kernel(
     source_bits, sign_mantissa, encoded, encode_table,
     center, extra_starts, n_elements, n_streams,
     LOGICAL_NUMEL: tl.constexpr,
@@ -288,7 +288,7 @@ def _encode_matrix_components_kernel(
     key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS"],
 )
 @triton.jit
-def _encode_matrix_kernel(
+def _encode_kernel(
     source_bits, sign_mantissa, encoded, encode_table,
     center, extra_starts, n_elements, n_streams,
     LOGICAL_NUMEL: tl.constexpr,
@@ -454,7 +454,7 @@ def _compact_extra_impl(
     key=["n_elements", "N_LANES", "N_STEPS", "BLOCK"],
 )
 @triton.jit
-def _compact_matrix_components_extra_kernel(
+def _compact_components_extra_kernel(
     source_bits, extra_streams, extra_starts,
     fallback_offsets, fallback_data, metadata_buffer,
     allocation_descriptor, final_counts, bad_count, n_elements,
@@ -477,7 +477,7 @@ def _compact_matrix_components_extra_kernel(
     key=["n_elements", "N_LANES", "N_STEPS", "BLOCK"],
 )
 @triton.jit
-def _compact_matrix_extra_kernel(
+def _compact_extra_kernel(
     source_bits, extra_streams, extra_starts,
     fallback_offsets, fallback_data, metadata_buffer,
     allocation_descriptor, final_counts, bad_count, n_elements,
@@ -509,7 +509,7 @@ def _pack_bf16(value, sm):
     key=["n_elements", "N_STEPS", "FIXED_WORDS", "ON_DEMAND"],
 )
 @triton.jit
-def _decode_matrix_kernel(
+def _decode_kernel(
     encoded, sign_mantissa, output,
     decode_table, n_elements, n_streams, center,
     LOGICAL_NUMEL: tl.constexpr,

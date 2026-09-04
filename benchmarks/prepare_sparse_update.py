@@ -13,14 +13,14 @@ import statistics
 
 import torch
 
-from compress.compression.format import DistType, Distribution
-from compress.compress import (
+from LCT.compression.format import DistType, Distribution
+from LCT.compress import (
     compress,
     compA_add_B,
     a_compA_add_compB,
     decompress,
 )
-from compress.tensor_buffer import Allocation, TensorBuffer
+from LCT.tensor_buffer import Allocation, TensorBuffer
 
 
 SIZES = [512, 1024, 2048, 4096]

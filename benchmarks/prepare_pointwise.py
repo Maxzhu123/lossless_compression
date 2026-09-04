@@ -4,10 +4,10 @@ import statistics
 
 import torch
 
-from compress.compression.format import DistType, Distribution
-from compress.compress import compress, decompress
-from compress.pointwise import pointwise_compressed_dense, POINTWISE_OPS
-from compress.tensor_buffer import Allocation, TensorBuffer
+from LCT.compression.format import DistType, Distribution
+from LCT.compress import compress, decompress
+from LCT.pointwise import pointwise_compressed_dense, POINTWISE_OPS
+from LCT.tensor_buffer import Allocation, TensorBuffer
 
 
 SIZES = [512, 1024, 2048, 4096]

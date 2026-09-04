@@ -15,9 +15,9 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from compression.format import NoiseLevel, DistType, Distribution
-from compress.compress import compress, decompress, a_compA_add_compB
-from compress.tensor_buffer import TensorBuffer, Allocation
+from LCT.compression.format import NoiseLevel, DistType, Distribution
+from LCT.compress import compress, decompress, a_compA_add_compB
+from LCT.tensor_buffer import TensorBuffer, Allocation
 
 HERE = Path(__file__).resolve().parent
 SHAPE = (4096, 8192)

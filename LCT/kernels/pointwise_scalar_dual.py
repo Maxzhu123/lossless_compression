@@ -94,7 +94,7 @@ def _prepare_dual_tables_and_maps_kernel(
     key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS", "OUTPUT_POLICY"],
 )
 @triton.jit
-def pointwise_scalar_mul_add_compressed_compressed_mapped_matrix_kernel(
+def pointwise_scalar_mul_add_compressed_compressed_mapped_kernel(
     a_encoded, a_sign_mantissa, a_decode_table, a_center,
     a_stream_starts, a_stream_offsets,
     a_bad_streams, a_bad_starts, a_fallback_offsets, a_metadata,

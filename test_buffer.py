@@ -1,10 +1,10 @@
-"""CUDA self-tests for :mod:`compress.tensor_buffer.TensorBuffer`."""
+"""CUDA self-tests for :mod:`LCT.tensor_buffer.TensorBuffer`."""
 
 from random import Random
 
 import torch
 
-from compress.tensor_buffer import (
+from LCT.tensor_buffer import (
     Allocation,
     TensorBuffer,
     _ALIGNMENT,

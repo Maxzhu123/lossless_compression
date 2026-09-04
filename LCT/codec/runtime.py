@@ -13,12 +13,12 @@ from kernels.main_kernels import (
     _compact_bad_streams_kernel,
     _shift_encoding_table_kernel,
     _shift_decoding_table_kernel,
-    _compact_matrix_components_extra_kernel,
-    _compact_matrix_extra_kernel,
+    _compact_components_extra_kernel,
+    _compact_extra_kernel,
     _count_bad_streams_kernel,
-    _decode_matrix_kernel,
-    _encode_matrix_components_kernel,
-    _encode_matrix_kernel,
+    _decode_kernel,
+    _encode_components_kernel,
+    _encode_kernel,
     _estimate_center_kernel,
     _scatter_blocked_fallback_kernel,
 )
@@ -78,14 +78,14 @@ def _launch_encode(
 ):
     """Launch the 1D encode kernel for raw BF16 or precomputed components."""
     if precomputed:
-        _encode_matrix_components_kernel[(blocks,)](
+        _encode_components_kernel[(blocks,)](
             source_values, sign_mantissa, encoded, encode_table, center,
             extra_starts, size, streams, LOGICAL_NUMEL=logical_numel,
             FIXED_WORDS=fixed_words, BLOCK=block_size,
             N_LANES=lanes, N_STEPS=steps,
         )
     else:
-        _encode_matrix_kernel[(blocks,)](
+        _encode_kernel[(blocks,)](
             source_values, sign_mantissa, encoded, encode_table, center,
             extra_starts, size, streams, LOGICAL_NUMEL=logical_numel,
             FIXED_WORDS=fixed_words, BLOCK=block_size,
@@ -122,7 +122,7 @@ def _compact_extra(
     """Compact fallback tail values for a buffered or private fallback path."""
     compact_grid = (triton.cdiv(streams, 32),)
     if precomputed:
-        _compact_matrix_components_extra_kernel[compact_grid](
+        _compact_components_extra_kernel[compact_grid](
             source_values, bad_streams, bad_starts, fallback_offsets,
             fallback_data, metadata_buffer, allocation_descriptor,
             final_counts, bad_count, size,
@@ -131,7 +131,7 @@ def _compact_extra(
             N_LANES=lanes, N_STEPS=steps, TILE=32,
         )
     else:
-        _compact_matrix_extra_kernel[compact_grid](
+        _compact_extra_kernel[compact_grid](
             source_values, bad_streams, bad_starts, fallback_offsets,
             fallback_data, metadata_buffer, allocation_descriptor,
             final_counts, bad_count, size,
@@ -305,7 +305,7 @@ def compress_dense(
     return replace(result, shape=shape, layout=StorageLayout.COMPRESSED)
 
 
-def decode_matrix_dense(data: CompressedTensor) -> torch.Tensor:
+def decode_dense(data: CompressedTensor) -> torch.Tensor:
     """Decode blocked storage directly into its original logical tensor shape."""
     logical_numel = data.logical_numel
     _, decode_table, rare_length = get_distribution_tables(data.distribution)
@@ -320,8 +320,8 @@ def decode_matrix_dense(data: CompressedTensor) -> torch.Tensor:
     blocks = triton.cdiv(data.size, block_size)
     streams = blocks * lanes
     output = torch.empty(logical_numel, dtype=torch.int16, device=data.data.device)
-    # Use the optimized normal-Triton decode kernel (no Gluon needed).
-    _decode_matrix_kernel[(blocks,)](
+
+    _decode_kernel[(blocks,)](
         data.data, data.sign_mantissa, output, shifted_decode,
         data.size, streams, data.center,
         LOGICAL_NUMEL=logical_numel,

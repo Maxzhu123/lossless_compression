@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import time
 from cprint import c_print
 
-from compress.tensor_buffer import TensorBuffer, visualize_buffer
+from LCT.tensor_buffer import TensorBuffer, visualize_buffer
 from sparse_utils import MyCompressed, SparseSGDM
 from mlps import FFN
 from dist_configs import weight_dist
@@ -107,4 +107,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

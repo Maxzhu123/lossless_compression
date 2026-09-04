@@ -7,22 +7,22 @@ import triton
 from .comp_tensor import CompressedTensor
 from .compression.format import StorageLayout
 from .compression.huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
-from .codec.runtime import compress_components, compress_dense, decode_matrix_dense, geometry
+from .codec.runtime import compress_components, compress_dense, decode_dense, geometry
 from .kernels.main_kernels import _shift_decoding_table_kernel
 from .kernels.pointwise import (
     COMPRESSED_OUTPUT,
     DENSE_OUTPUT,
-    pointwise_compressed_dense_matrix_fallback_kernel,
-    pointwise_compressed_dense_matrix_kernel,
+    pointwise_compressed_dense_fallback_kernel,
+    pointwise_compressed_dense_kernel,
     add_op, multiply_op
 )
 from .kernels.pointwise_scalar import (
-    pointwise_scalar_mul_add_dense_matrix_fallback_kernel,
-    pointwise_scalar_mul_add_dense_matrix_kernel,
+    pointwise_scalar_mul_add_dense_fallback_kernel,
+    pointwise_scalar_mul_add_dense_kernel,
 )
 from .kernels.pointwise_scalar_dual import (
     _prepare_dual_tables_and_maps_kernel,
-    pointwise_scalar_mul_add_compressed_compressed_mapped_matrix_kernel,
+    pointwise_scalar_mul_add_compressed_compressed_mapped_kernel,
 )
 from .tensor_buffer import TensorBuffer
 
@@ -62,7 +62,7 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
         BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
         FIXED_WORDS=fixed_words,
     )
-    pointwise_compressed_dense_matrix_kernel[(blocks,)](
+    pointwise_compressed_dense_kernel[(blocks,)](
         *main_args, LOGICAL_NUMEL=data.logical_numel, **main_meta,
     )
     if data.fallback_descriptor is not None:
@@ -78,7 +78,7 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
             N_LANES=lanes, N_STEPS=steps,
         )
         fallback_grid = (triton.cdiv(blocks * lanes, 64),)
-        pointwise_compressed_dense_matrix_fallback_kernel[fallback_grid](
+        pointwise_compressed_dense_fallback_kernel[fallback_grid](
             *fallback_args, LOGICAL_NUMEL=data.logical_numel, **fallback_meta,
         )
     elif data.offsets.numel():
@@ -94,7 +94,7 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
             N_LANES=lanes, N_STEPS=steps,
         )
         fallback_grid = (triton.cdiv(data.offsets.numel(), 64),)
-        pointwise_compressed_dense_matrix_fallback_kernel[fallback_grid](
+        pointwise_compressed_dense_fallback_kernel[fallback_grid](
             *fallback_args, LOGICAL_NUMEL=data.logical_numel, **fallback_meta,
         )
     return output, auxiliary
@@ -137,7 +137,7 @@ def _launch_scalar_mul_add_compressed_dense(
         BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
         FIXED_WORDS=fixed_words,
     )
-    pointwise_scalar_mul_add_dense_matrix_kernel[(blocks,)](
+    pointwise_scalar_mul_add_dense_kernel[(blocks,)](
         *main_args, LOGICAL_NUMEL=data.logical_numel, **main_meta,
     )
     if data.fallback_descriptor is not None:
@@ -153,7 +153,7 @@ def _launch_scalar_mul_add_compressed_dense(
             N_LANES=lanes, N_STEPS=steps,
         )
         fallback_grid = (triton.cdiv(blocks * lanes, 64),)
-        pointwise_scalar_mul_add_dense_matrix_fallback_kernel[fallback_grid](
+        pointwise_scalar_mul_add_dense_fallback_kernel[fallback_grid](
             *fallback_args, LOGICAL_NUMEL=data.logical_numel, **fallback_meta,
         )
     elif data.offsets.numel():
@@ -169,7 +169,7 @@ def _launch_scalar_mul_add_compressed_dense(
             N_LANES=lanes, N_STEPS=steps,
         )
         fallback_grid = (triton.cdiv(data.offsets.numel(), 64),)
-        pointwise_scalar_mul_add_dense_matrix_fallback_kernel[fallback_grid](
+        pointwise_scalar_mul_add_dense_fallback_kernel[fallback_grid](
             *fallback_args, LOGICAL_NUMEL=data.logical_numel, **fallback_meta,
         )
     return output, auxiliary
@@ -250,7 +250,7 @@ def _launch_scalar_mul_add_compressed_compressed(
         BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
         FIXED_WORDS=fixed_words,
     )
-    pointwise_scalar_mul_add_compressed_compressed_mapped_matrix_kernel[(blocks,)](
+    pointwise_scalar_mul_add_compressed_compressed_mapped_kernel[(blocks,)](
         data.data, data.sign_mantissa, a_shifted_decode, data.center,
         a_stream_starts, a_stream_offsets,
         a_bad_streams, a_bad_starts, a_fb_offsets, a_metadata,
@@ -316,7 +316,7 @@ def pointwise_scale_add_compressed(
     if other.layout == StorageLayout.RAW:
         other_dense = other.data.reshape(other.shape)
     else:
-        other_dense = decode_matrix_dense(other)
+        other_dense = decode_dense(other)
     return pointwise_compressed_dense(
         data, other_dense, SCALAR_MUL_ADD, alpha=alpha,
         dense_output=dense_output, buffer=buffer, distribution=distribution,

@@ -3,9 +3,9 @@ from typing import Iterable, TYPE_CHECKING
 from torch import Tensor
 import math
 
-from compress.comp_tensor import CompressedTensor
-from compress.compression.format import NoiseLevel, DistType, Distribution
-from compress.compress import (
+from LCT.comp_tensor import CompressedTensor
+from LCT.compression.format import NoiseLevel, DistType, Distribution
+from LCT.compress import (
     compress,
     compA_add_B,
     a_compA_add_compB,
@@ -14,7 +14,7 @@ from compress.compress import (
 )
 from dist_configs import momentum_dist
 if TYPE_CHECKING:
-    from compress.tensor_buffer import TensorBuffer
+    from LCT.tensor_buffer import TensorBuffer
 
 
 class MyCompressed(Tensor):

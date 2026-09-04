@@ -7,7 +7,7 @@ from sparse_utils import MyCompressed
 from dist_configs import act_dist
 
 if TYPE_CHECKING:
-    from compress.tensor_buffer import TensorBuffer
+    from LCT.tensor_buffer import TensorBuffer
     from torch import Tensor
 
 class FFN(Function):
