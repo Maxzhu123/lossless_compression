@@ -3,19 +3,8 @@
 from dataclasses import dataclass
 
 import torch
-import triton
 
-
-@triton.jit
-def add_op(left, right):
-    """Add operands inside a specialized pointwise kernel."""
-    return left + right
-
-
-@triton.jit
-def multiply_op(left, right):
-    """Multiply operands inside a specialized pointwise kernel."""
-    return left * right
+from kernels.pointwise import add_op, multiply_op
 
 
 @dataclass(frozen=True)

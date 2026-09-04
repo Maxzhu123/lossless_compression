@@ -266,3 +266,15 @@ def pointwise_compressed_dense_matrix_fallback_kernel(
             OP(left, right), output, auxiliary, offset, logical_offset,
             logical_active, active, OUTPUT_POLICY,
         )
+
+
+@triton.jit
+def add_op(left, right):
+    """Add operands inside a specialized pointwise kernel."""
+    return left + right
+
+
+@triton.jit
+def multiply_op(left, right):
+    """Multiply operands inside a specialized pointwise kernel."""
+    return left * right

@@ -69,9 +69,6 @@ class Distribution:
             raise ValueError("zero_prob must be finite and between 0 and 1")
         self.param = float(max(0.25, round(param / 0.25) * 0.25))
         self.mean = float(round(mean / 0.25) * 0.25)
-        # self.zero_prob = round(
-        #     max(0.0, min(1.0, round(zero_prob / 0.05) * 0.05)), 2
-        # )
         self.zero_prob = round(max(0.0, min(1.0, zero_prob)), 2)
 
     def __str__(self) -> str:
