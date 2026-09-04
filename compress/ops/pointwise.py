@@ -23,6 +23,7 @@ from ..kernels.pointwise_scalar_dual import (
     _setup_fallback_map_kernel,
     pointwise_scalar_mul_add_compressed_compressed_fallback_matrix_kernel,
     pointwise_scalar_mul_add_compressed_compressed_fixed_matrix_kernel,
+    pointwise_scalar_mul_add_compressed_compressed_matrix_kernel,
 )
 from ..tensor_buffer import TensorBuffer
 from .registry import PointwiseOp, SCALAR_MUL_ADD
@@ -226,6 +227,30 @@ def _launch_scalar_mul_add_compressed_compressed(
     b_fb_offsets = other.fallback_offsets if not buffered else b_metadata
     a_descriptor = data.fallback_descriptor if buffered else data.offsets
     b_descriptor = other.fallback_descriptor if buffered else other.offsets
+
+    # For private fallback with only a handful of overflow streams, the old
+    # single-pass kernel is faster because it avoids extra launches and the
+    # duplicate whole-lane re-decode required by the separate fallback pass.
+    if not buffered and data.offsets.numel() + other.offsets.numel() <= 64:
+        pointwise_scalar_mul_add_compressed_compressed_matrix_kernel[(blocks,)](
+            data.data, data.sign_mantissa, a_shifted_decode, data.center,
+            a_bad_streams, a_bad_starts, a_fb_offsets, a_metadata,
+            a_descriptor, data.fallback_count,
+            data.fallback_buffer, data.fallback_base,
+            other.data, other.sign_mantissa, b_shifted_decode, other.center,
+            b_bad_streams, b_bad_starts, b_fb_offsets, b_metadata,
+            b_descriptor, other.fallback_count,
+            other.fallback_buffer, other.fallback_base,
+            output, auxiliary, alpha,
+            data.size, blocks * lanes,
+            BUFFERED=False,
+            OUTPUT_POLICY=output_policy,
+            LOGICAL_NUMEL=data.logical_numel,
+            FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length_a,
+            BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
+            FIXED_WORDS=fixed_words,
+        )
+        return output, auxiliary
 
     streams = blocks * lanes
 
