@@ -13,15 +13,15 @@ ENCODE_AUTOTUNE_CONFIGS = [
     triton.Config({}, num_warps=4, num_stages=3, maxnreg=64),
 ]
 COMPACT_BAD_STREAMS_AUTOTUNE_CONFIGS = [
-    triton.Config({}, num_warps=1, num_stages=2),
-    triton.Config({}, num_warps=2, num_stages=2),
-    triton.Config({}, num_warps=2, num_stages=3),
+    triton.Config({"BLOCK": 1024}, num_warps=1, num_stages=2),
+    triton.Config({"BLOCK": 1024}, num_warps=2, num_stages=2),
+    triton.Config({"BLOCK": 1024}, num_warps=2, num_stages=3),
 ]
 COMPACT_EXTRA_AUTOTUNE_CONFIGS = [
-    triton.Config({}, num_warps=1, num_stages=2),
-    triton.Config({}, num_warps=2, num_stages=2),
-    triton.Config({}, num_warps=4, num_stages=2),
-    triton.Config({}, num_warps=2, num_stages=3),
+    triton.Config({"TILE": 32}, num_warps=1, num_stages=2),
+    triton.Config({"TILE": 32}, num_warps=2, num_stages=2),
+    triton.Config({"TILE": 32}, num_warps=4, num_stages=2),
+    triton.Config({"TILE": 32}, num_warps=2, num_stages=3),
 ]
 SCATTER_FALLBACK_AUTOTUNE_CONFIGS = [
     triton.Config({}, num_warps=1, num_stages=2),

@@ -9,6 +9,7 @@ from codec.autotune import (
     ESTIMATE_CENTER_AUTOTUNE_CONFIGS,
     SCATTER_FALLBACK_AUTOTUNE_CONFIGS,
 )
+from .primitives import pack_bf16
 
 
 @triton.autotune(
@@ -491,15 +492,6 @@ def _compact_extra_kernel(
     )
 
 
-@triton.jit
-def _pack_bf16(value, sm):
-    return (
-        (((value.to(tl.int32) + 127) & 255) << 7)
-        | (sm.to(tl.int32) & 0x7F)
-        | ((sm.to(tl.int32) & 0x80) << 8)
-    )
-
-
 @triton.autotune(
     configs=DECODE_AUTOTUNE_CONFIGS,
     key=["n_elements", "N_STEPS", "FIXED_WORDS", "ON_DEMAND"],
@@ -752,5 +744,5 @@ def _scatter_blocked_fallback_kernel(
             mask=active, other=0,
         ).to(tl.int32)
         sm = tl.load(sign_mantissa + storage_offset, mask=active, other=0)
-        packed = _pack_bf16(exponent, sm)
+        packed = pack_bf16(exponent, sm)
         tl.store(output + logical_offset, packed.to(tl.int16), mask=active)

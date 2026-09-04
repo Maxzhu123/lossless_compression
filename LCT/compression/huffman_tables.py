@@ -241,6 +241,7 @@ def _build_huffman_tables_from_lengths(probabilities, max_length=FIRST_BITS, max
 
     return encode, decode, esc_length
 
+
 def get_distribution_tables(dist: Distribution):
     """Return cached tables for a distribution, independent of noise level."""
     if not isinstance(dist, Distribution):

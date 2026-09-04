@@ -1,13 +1,9 @@
 """Exponent probabilities induced by the benchmark value distributions."""
 
 import math
-
 import numpy as np
 
-try:
-    from scipy.integrate import quad as _quad
-except ImportError:  # pragma: no cover - scipy is optional
-    _quad = None
+from scipy.integrate import quad
 
 
 def _shifted_magnitude_cdf(base_magnitude_cdf, mean):
@@ -49,23 +45,7 @@ def _interval_probability(pdf, low, high):
     """Integrate a magnitude PDF over the BF16 magnitude bin [low, high]."""
     if high == low:
         return 0.0
-    if _quad is not None:
-        return _quad(pdf, low, high, epsabs=1e-12, epsrel=1e-10, limit=200)[0]
-    # Fallback Gauss-Legendre quadrature, used only if scipy isn't installed.
-    nodes, weights = np.polynomial.legendre.leggauss(64)
-    if math.isinf(high):
-        # Map [0, 1] to [low, +inf) with x = low / (1 - t).
-        t = 0.5 * (nodes + 1.0)
-        x = low / (1.0 - t)
-        dt = 0.5
-        w = weights * dt
-        jac = low / ((1.0 - t) ** 2)
-        return float(np.sum(w * jac * pdf(x)))
-    mid = 0.5 * (low + high)
-    half = 0.5 * (high - low)
-    x = mid + half * nodes
-    w = half * weights
-    return float(np.sum(w * pdf(x)))
+    return quad(pdf, low, high, epsabs=1e-12, epsrel=1e-10, limit=200)[0]
 
 
 def _exponent_probabilities(magnitude_pdf, zero_prob=0.0):

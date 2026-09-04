@@ -11,7 +11,7 @@ from ..codec.autotune import (
     DECODE_AUTOTUNE_CONFIGS,
     SCATTER_FALLBACK_AUTOTUNE_CONFIGS,
 )
-from ..codec.primitives import decode_symbol, pack_bf16
+from .primitives import decode_symbol, pack_bf16
 from .pointwise import (
     _pointwise_location,
     _store_result,

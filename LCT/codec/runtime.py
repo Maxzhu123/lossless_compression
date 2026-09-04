@@ -102,11 +102,12 @@ def _compact_bad_streams(
     buffered,
 ):
     """Compact overflow-stream metadata for a buffered or private fallback path."""
-    _compact_bad_streams_kernel[(triton.cdiv(streams, 1024),)](
+    compact_grid = lambda meta: (triton.cdiv(streams, meta["BLOCK"]),)
+    _compact_bad_streams_kernel[compact_grid](
         extra_starts, bad_streams_out, bad_starts_out, fallback_offsets_out,
         metadata_buffer, allocation_descriptor, final_counts,
         bad_count, fallback_total, streams, steps,
-        BUFFERED=buffered, BLOCK=1024,
+        BUFFERED=buffered,
     )
 
 
@@ -120,7 +121,7 @@ def _compact_extra(
     block_size, lanes, steps,
 ):
     """Compact fallback tail values for a buffered or private fallback path."""
-    compact_grid = (triton.cdiv(streams, 32),)
+    compact_grid = lambda meta: (triton.cdiv(streams, meta["TILE"]),)
     if precomputed:
         _compact_components_extra_kernel[compact_grid](
             source_values, bad_streams, bad_starts, fallback_offsets,
@@ -128,7 +129,7 @@ def _compact_extra(
             final_counts, bad_count, size,
             BUFFERED=buffered, LOGICAL_NUMEL=logical_numel,
             BLOCK=block_size,
-            N_LANES=lanes, N_STEPS=steps, TILE=32,
+            N_LANES=lanes, N_STEPS=steps,
         )
     else:
         _compact_extra_kernel[compact_grid](
@@ -137,7 +138,7 @@ def _compact_extra(
             final_counts, bad_count, size,
             BUFFERED=buffered, LOGICAL_NUMEL=logical_numel,
             BLOCK=block_size,
-            N_LANES=lanes, N_STEPS=steps, TILE=32,
+            N_LANES=lanes, N_STEPS=steps,
         )
 
 
@@ -200,8 +201,9 @@ def compress_components(
     # are used asynchronously by the allocator; for private fallback they tell
     # us how much exact-size storage to allocate.
     counts = torch.zeros(4, dtype=torch.int32, device=source_values.device)
-    _count_bad_streams_kernel[(triton.cdiv(streams, 1024),)](
-        extra_starts, counts[:1], counts[1:2], streams, steps, BLOCK=1024,
+    count_grid = lambda meta: (triton.cdiv(streams, meta["BLOCK"]),)
+    _count_bad_streams_kernel[count_grid](
+        extra_starts, counts[:1], counts[1:2], streams, steps,
     )
 
     buffered = buffer is not None
