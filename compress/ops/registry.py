@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import torch
 
-from kernels.pointwise import add_op, multiply_op
+from ..kernels.pointwise import add_op, multiply_op
 
 
 @dataclass(frozen=True)
