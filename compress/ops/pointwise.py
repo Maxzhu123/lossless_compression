@@ -21,9 +21,6 @@ from ..kernels.pointwise_scalar import (
 )
 from ..kernels.pointwise_scalar_dual import (
     _setup_both_fallback_map_kernel,
-    _setup_fallback_map_kernel,
-    pointwise_scalar_mul_add_compressed_compressed_fallback_matrix_kernel,
-    pointwise_scalar_mul_add_compressed_compressed_fixed_matrix_kernel,
     pointwise_scalar_mul_add_compressed_compressed_mapped_matrix_kernel,
 )
 from ..tensor_buffer import TensorBuffer
