@@ -1,6 +1,6 @@
 """GPU-resident first-fit allocator for descriptor-based CUDA buffers."""
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 import torch
 import triton
 from triton import language as tl

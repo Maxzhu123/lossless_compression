@@ -1,6 +1,6 @@
+from typing import TYPE_CHECKING
 from dataclasses import dataclass, field, fields
 import math
-from typing import TYPE_CHECKING
 import torch
 
 from .compression.format import StorageLayout, Distribution

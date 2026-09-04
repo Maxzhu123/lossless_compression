@@ -24,7 +24,7 @@ def _prepare_dual_tables_and_maps_kernel(
     b_descriptor, b_fallback_count,
     b_stream_starts, b_stream_offsets,
     N_SHIFT: tl.constexpr,
-    TABLE_SIZE: tl.constexpr, BLOCK: tl.constexpr,
+    BLOCK: tl.constexpr,
     BUFFERED: tl.constexpr,
 ):
     """Shift both decode tables and build both fallback maps in one launch."""

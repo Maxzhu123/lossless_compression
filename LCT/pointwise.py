@@ -237,7 +237,6 @@ def _launch_scalar_mul_add_compressed_compressed(
         b_descriptor, other.fallback_count,
         b_stream_starts, b_stream_offsets,
         N_SHIFT=2,
-        TABLE_SIZE=1 << FIRST_BITS,
         BLOCK=1 << FIRST_BITS,
         BUFFERED=buffered,
     )

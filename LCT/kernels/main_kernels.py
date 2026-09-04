@@ -1,7 +1,7 @@
 import triton
 from triton import language as tl
 
-from codec.autotune import (
+from ..codec.autotune import (
     COMPACT_BAD_STREAMS_AUTOTUNE_CONFIGS,
     COMPACT_EXTRA_AUTOTUNE_CONFIGS,
     DECODE_AUTOTUNE_CONFIGS,

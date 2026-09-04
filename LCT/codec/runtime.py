@@ -4,8 +4,7 @@ from dataclasses import replace
 import torch
 import triton
 
-from ..comp_tensor import (
-    CompressedTensor, )
+from ..comp_tensor import CompressedTensor
 from ..compression.format import NoiseLevel, DistType, StorageLayout, Distribution
 from ..compression.huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
 from ..tensor_buffer import TensorBuffer
