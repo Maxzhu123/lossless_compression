@@ -8,7 +8,7 @@ import triton
 from ..code_storage import CompressedTensor, StorageLayout
 from ..codec.runtime import compress_components, compress_dense, decode_matrix_dense, geometry
 from ..huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
-from ..trition_kernels import _shift_decoding_table_kernel, _shift_decoding_tables_kernel
+from ..trition_kernels import _shift_decoding_table_kernel
 from ..kernels.pointwise import (
     COMPRESSED_OUTPUT,
     DENSE_OUTPUT,
@@ -220,11 +220,6 @@ def _launch_scalar_mul_add_compressed_compressed(
 
     streams = blocks * lanes
 
-    # No host syncs for buffer-backed fallback metadata: kernels read the
-    # device-side fallback count and early-return when it is zero.
-    a_has_fallback = buffered or data.offsets.numel() > 0
-    b_has_fallback = buffered or other.offsets.numel() > 0
-
     # Direct per-stream fallback maps make the fallback tile pass O(fallback_count)
     # instead of O(blocks * fallback_count).
     a_stream_starts = torch.full((streams,), steps, dtype=torch.int32, device=data.data.device)
@@ -232,27 +227,20 @@ def _launch_scalar_mul_add_compressed_compressed(
     b_stream_starts = torch.full((streams,), steps, dtype=torch.int32, device=other.data.device)
     b_stream_offsets = torch.zeros(streams, dtype=torch.int32, device=other.data.device)
 
-    if a_has_fallback or b_has_fallback:
-        _prepare_dual_tables_and_maps_kernel[(2 + triton.cdiv(streams, 1024),)](
-            a_decode_table, data.center, a_shifted_decode,
-            b_decode_table, other.center, b_shifted_decode,
-            a_bad_streams, a_bad_starts, a_fb_offsets, a_metadata,
-            a_descriptor, data.fallback_count,
-            a_stream_starts, a_stream_offsets,
-            b_bad_streams, b_bad_starts, b_fb_offsets, b_metadata,
-            b_descriptor, other.fallback_count,
-            b_stream_starts, b_stream_offsets,
-            N_SHIFT=2,
-            TABLE_SIZE=1 << FIRST_BITS,
-            BLOCK=1 << FIRST_BITS,
-            BUFFERED=buffered,
-        )
-    else:
-        _shift_decoding_tables_kernel[(2,)](
-            a_decode_table, data.center, a_shifted_decode,
-            b_decode_table, other.center, b_shifted_decode,
-            TABLE_SIZE=1 << FIRST_BITS, BLOCK=1 << FIRST_BITS,
-        )
+    _prepare_dual_tables_and_maps_kernel[(2 + triton.cdiv(streams, 1024),)](
+        a_decode_table, data.center, a_shifted_decode,
+        b_decode_table, other.center, b_shifted_decode,
+        a_bad_streams, a_bad_starts, a_fb_offsets, a_metadata,
+        a_descriptor, data.fallback_count,
+        a_stream_starts, a_stream_offsets,
+        b_bad_streams, b_bad_starts, b_fb_offsets, b_metadata,
+        b_descriptor, other.fallback_count,
+        b_stream_starts, b_stream_offsets,
+        N_SHIFT=2,
+        TABLE_SIZE=1 << FIRST_BITS,
+        BLOCK=1 << FIRST_BITS,
+        BUFFERED=buffered,
+    )
 
     mapped_meta = dict(
         BUFFERED=buffered,
