@@ -99,8 +99,6 @@ def _shift_decoding_table_kernel(
     tl.store(shifted_decode + idx, shifted)
 
 
-
-
 @triton.jit
 def _encode_impl(
     source_bits, sign_mantissa, encoded, encode_table,
