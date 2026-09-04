@@ -204,8 +204,6 @@ def pointwise_scalar_mul_add_compressed_compressed_fallback_matrix_kernel(
     b_stream_starts, b_stream_offsets,
     a_fallback_buffer, a_fallback_base,
     b_fallback_buffer, b_fallback_base,
-    bad_streams, bad_starts, fallback_offsets, metadata,
-    descriptor, fallback_count,
     a_descriptor, a_fallback_count,
     b_descriptor, b_fallback_count,
     output, auxiliary, alpha,
@@ -218,31 +216,25 @@ def pointwise_scalar_mul_add_compressed_compressed_fallback_matrix_kernel(
     N_STEPS: tl.constexpr, FIXED_WORDS: tl.constexpr,
     TILE: tl.constexpr,
 ):
-    """Correct fused output for fallback streams in parallel tiles.
+    """Correct fused output for fallback streams in one stream-driven pass.
 
-    Each program processes ``TILE`` fallback streams and rewrites the whole
-    lane.  Streams shared by both fallback lists are processed twice; both
-    passes write the same final value, so the result is idempotent.
+    Every stream is examined through its per-stream start/offset maps.  A tile
+    returns early when it contains no fallback streams; otherwise those streams
+    are rewritten with the fully correct fused value.
     """
     pid = tl.program_id(0)
     tile = pid * TILE + tl.arange(0, TILE)
-    count = tl.load(fallback_count).to(tl.int32)
-    if pid * TILE >= count:
-        return
-    valid = tile < count
-
-    if BUFFERED:
-        base = tl.load(descriptor).to(tl.int32)
-        base_words = base // 4
-        stream = tl.load(metadata + base_words + tile, mask=valid, other=0)
-    else:
-        stream = tl.load(bad_streams + tile, mask=valid, other=0)
-    stream = stream.to(tl.int32)
+    valid = tile < n_streams
+    stream = tile
 
     a_start = tl.load(a_stream_starts + stream, mask=valid, other=N_STEPS).to(tl.int32)
     a_offset = tl.load(a_stream_offsets + stream, mask=valid, other=0).to(tl.int32)
     b_start = tl.load(b_stream_starts + stream, mask=valid, other=N_STEPS).to(tl.int32)
     b_offset = tl.load(b_stream_offsets + stream, mask=valid, other=0).to(tl.int32)
+
+    needs_fix = valid & ((a_start < N_STEPS) | (b_start < N_STEPS))
+    if tl.sum(needs_fix.to(tl.int32)) == 0:
+        return
 
     if BUFFERED:
         a_real_base = tl.load(a_descriptor).to(tl.int32) + 9 * tl.load(a_fallback_count).to(tl.int32)
@@ -284,8 +276,8 @@ def pointwise_scalar_mul_add_compressed_compressed_fallback_matrix_kernel(
             b_window >> b_shift, b_decode_table, b_center_value,
             FIRST_MASK, RARE_LENGTH,
         )
-        a_is_fb = valid & (step >= a_start)
-        b_is_fb = valid & (step >= b_start)
+        a_is_fb = needs_fix & (step >= a_start)
+        b_is_fb = needs_fix & (step >= b_start)
         a_fb = tl.load(
             a_fallback_buffer + a_real_base + a_offset + (step - a_start),
             mask=a_is_fb, other=0,
@@ -305,12 +297,12 @@ def pointwise_scalar_mul_add_compressed_compressed_fallback_matrix_kernel(
         logical_offset = logical_n * N_LANES + logical_k
         storage_valid = storage_offset < n_elements
         logical_valid = logical_offset < LOGICAL_NUMEL
-        active = valid & storage_valid & logical_valid
-        sm_a = tl.load(a_sign_mantissa + storage_offset, mask=storage_valid & valid, other=0)
-        sm_b = tl.load(b_sign_mantissa + storage_offset, mask=storage_valid & valid, other=0)
+        active = needs_fix & storage_valid & logical_valid
+        storage_active = needs_fix & storage_valid
+        sm_a = tl.load(a_sign_mantissa + storage_offset, mask=storage_active, other=0)
+        sm_b = tl.load(b_sign_mantissa + storage_offset, mask=storage_active, other=0)
         a_left = pack_bf16(a_value, sm_a).to(tl.int16).to(tl.bfloat16, bitcast=True)
         b_left = pack_bf16(b_value, sm_b).to(tl.int16).to(tl.bfloat16, bitcast=True)
-        storage_active = valid & storage_valid
         _store_result(
             tl.math.fma(a_left, alpha_value, b_left), output, auxiliary,
             storage_offset, logical_offset, active, storage_active, OUTPUT_POLICY,
@@ -320,7 +312,6 @@ def pointwise_scalar_mul_add_compressed_compressed_fallback_matrix_kernel(
             a_word, a_shift, a_window, a_length,
             a_encoded, n_streams, stream, FIXED_WORDS,
         )
-
         b_word, b_shift, b_window = _advance_decode(
             b_word, b_shift, b_window, b_length,
             b_encoded, n_streams, stream, FIXED_WORDS,

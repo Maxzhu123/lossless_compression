@@ -100,7 +100,6 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
         )
     return output, auxiliary
 
-
 def _launch_scalar_mul_add_compressed_dense(
     data, other, alpha, output_policy,
 ):
@@ -280,7 +279,7 @@ def _launch_scalar_mul_add_compressed_compressed(
         FIXED_WORDS=fixed_words,
         TILE=64,
     )
-    if a_has_fallback:
+    if a_has_fallback or b_has_fallback:
         pointwise_scalar_mul_add_compressed_compressed_fallback_matrix_kernel[(triton.cdiv(streams, 64),)](
             data.data, data.sign_mantissa, a_shifted_decode, data.center,
             a_stream_starts, a_stream_offsets,
@@ -288,24 +287,6 @@ def _launch_scalar_mul_add_compressed_compressed(
             b_stream_starts, b_stream_offsets,
             data.fallback_buffer, data.fallback_base,
             other.fallback_buffer, other.fallback_base,
-            a_bad_streams, a_bad_starts, a_fb_offsets, a_metadata,
-            a_descriptor, data.fallback_count,
-            a_descriptor, data.fallback_count,
-            b_descriptor, other.fallback_count,
-            output, auxiliary, alpha,
-            data.size, streams,
-            **fallback_meta,
-        )
-    if b_has_fallback:
-        pointwise_scalar_mul_add_compressed_compressed_fallback_matrix_kernel[(triton.cdiv(streams, 64),)](
-            data.data, data.sign_mantissa, a_shifted_decode, data.center,
-            a_stream_starts, a_stream_offsets,
-            other.data, other.sign_mantissa, b_shifted_decode, other.center,
-            b_stream_starts, b_stream_offsets,
-            data.fallback_buffer, data.fallback_base,
-            other.fallback_buffer, other.fallback_base,
-            b_bad_streams, b_bad_starts, b_fb_offsets, b_metadata,
-            b_descriptor, other.fallback_count,
             a_descriptor, data.fallback_count,
             b_descriptor, other.fallback_count,
             output, auxiliary, alpha,
