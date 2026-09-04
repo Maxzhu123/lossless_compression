@@ -8,7 +8,7 @@ from ..comp_tensor import CompressedTensor
 from ..compression.format import NoiseLevel, DistType, StorageLayout, Distribution
 from ..compression.huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
 from ..tensor_buffer import TensorBuffer
-from kernels.main_kernels import (
+from ..kernels.main_kernels import (
     _compact_bad_streams_kernel,
     _shift_encoding_table_kernel,
     _shift_decoding_table_kernel,
