@@ -36,7 +36,7 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
     )
     _shift_decoding_table_kernel[(1,)](
         decode_table, data.center, shifted_decode,
-        TABLE_SIZE=1 << FIRST_BITS, BLOCK=1 << FIRST_BITS,
+        BLOCK=1 << FIRST_BITS,
     )
     block_size, lanes, steps, fixed_words = geometry(data.distribution)
     blocks = triton.cdiv(data.size, block_size)
@@ -111,7 +111,7 @@ def _launch_scalar_mul_add_compressed_dense(
     )
     _shift_decoding_table_kernel[(1,)](
         decode_table, data.center, shifted_decode,
-        TABLE_SIZE=1 << FIRST_BITS, BLOCK=1 << FIRST_BITS,
+        BLOCK=1 << FIRST_BITS,
     )
     block_size, lanes, steps, fixed_words = geometry(data.distribution)
     blocks = triton.cdiv(data.size, block_size)

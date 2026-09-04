@@ -71,7 +71,7 @@ def _estimate_center(source, size, *, precomputed, ignore_zero=False):
 
 
 def _launch_encode(
-    source_values, sign_mantissa, encoded, encode_table, center, extra_starts,
+    source_values, sign_mantissa, encoded, encode_table, extra_starts,
     size, streams, *,
     precomputed, logical_numel,
     fixed_words, block_size, lanes, steps, blocks,
@@ -79,15 +79,15 @@ def _launch_encode(
     """Launch the 1D encode kernel for raw BF16 or precomputed components."""
     if precomputed:
         _encode_components_kernel[(blocks,)](
-            source_values, sign_mantissa, encoded, encode_table, center,
-            extra_starts, size, streams, LOGICAL_NUMEL=logical_numel,
+            source_values, sign_mantissa, encoded, encode_table, extra_starts,
+            size, streams, LOGICAL_NUMEL=logical_numel,
             FIXED_WORDS=fixed_words, BLOCK=block_size,
             N_LANES=lanes, N_STEPS=steps,
         )
     else:
         _encode_kernel[(blocks,)](
-            source_values, sign_mantissa, encoded, encode_table, center,
-            extra_starts, size, streams, LOGICAL_NUMEL=logical_numel,
+            source_values, sign_mantissa, encoded, encode_table, extra_starts,
+            size, streams, LOGICAL_NUMEL=logical_numel,
             FIXED_WORDS=fixed_words, BLOCK=block_size,
             N_LANES=lanes, N_STEPS=steps,
         )
@@ -189,8 +189,8 @@ def compress_components(
         streams, dtype=torch.uint8, device=source_values.device
     )
     _launch_encode(
-        source_values, sign_mantissa, encoded, shifted_encode, center,
-        extra_starts, size, streams,
+        source_values, sign_mantissa, encoded, shifted_encode, extra_starts,
+        size, streams,
         precomputed=precomputed,
         logical_numel=logical_numel, fixed_words=fixed_words,
         block_size=block_size, lanes=lanes, steps=steps, blocks=blocks,
@@ -314,7 +314,7 @@ def decode_dense(data: CompressedTensor) -> torch.Tensor:
     )
     _shift_decoding_table_kernel[(1,)](
         decode_table, data.center, shifted_decode,
-        TABLE_SIZE=1 << FIRST_BITS, BLOCK=1 << FIRST_BITS,
+        BLOCK=1 << FIRST_BITS,
     )
     block_size, lanes, steps, fixed_words = geometry(data.distribution)
     blocks = triton.cdiv(data.size, block_size)

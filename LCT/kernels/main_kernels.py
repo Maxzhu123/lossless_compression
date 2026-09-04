@@ -82,7 +82,7 @@ def _shift_encoding_table_kernel(
 @triton.jit
 def _shift_decoding_table_kernel(
     base_decode, center, shifted_decode,
-    TABLE_SIZE: tl.constexpr, BLOCK: tl.constexpr,
+    BLOCK: tl.constexpr,
 ):
     """Create a decode table that stores unbiased exponents directly."""
     idx = tl.arange(0, BLOCK)
@@ -102,7 +102,7 @@ def _shift_decoding_table_kernel(
 @triton.jit
 def _encode_impl(
     source_bits, sign_mantissa, encoded, encode_table,
-    center, extra_starts,
+    extra_starts,
     n_elements, n_streams,
     PRECOMPUTED: tl.constexpr,
     LOGICAL_NUMEL: tl.constexpr,
@@ -267,15 +267,15 @@ def _encode_impl(
 @triton.jit
 def _encode_components_kernel(
     source_bits, sign_mantissa, encoded, encode_table,
-    center, extra_starts, n_elements, n_streams,
+    extra_starts, n_elements, n_streams,
     LOGICAL_NUMEL: tl.constexpr,
     FIXED_WORDS: tl.constexpr,
     BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
 ):
     """Encode flattened precomputed exponent planes into 1D storage."""
     _encode_impl(
-        source_bits, sign_mantissa, encoded, encode_table, center,
-        extra_starts, n_elements, n_streams, True,
+        source_bits, sign_mantissa, encoded, encode_table, extra_starts,
+        n_elements, n_streams, True,
         LOGICAL_NUMEL,
         FIXED_WORDS, BLOCK, N_LANES, N_STEPS,
     )
@@ -288,15 +288,15 @@ def _encode_components_kernel(
 @triton.jit
 def _encode_kernel(
     source_bits, sign_mantissa, encoded, encode_table,
-    center, extra_starts, n_elements, n_streams,
+    extra_starts, n_elements, n_streams,
     LOGICAL_NUMEL: tl.constexpr,
     FIXED_WORDS: tl.constexpr,
     BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
 ):
     """Encode a flattened tensor through the 1D codec mapping."""
     _encode_impl(
-        source_bits, sign_mantissa, encoded, encode_table, center,
-        extra_starts, n_elements, n_streams, False,
+        source_bits, sign_mantissa, encoded, encode_table, extra_starts,
+        n_elements, n_streams, False,
         LOGICAL_NUMEL,
         FIXED_WORDS, BLOCK, N_LANES, N_STEPS,
     )
@@ -373,8 +373,6 @@ def _compact_bad_streams_kernel(
             dense_offset,
             mask=bad,
         )
-
-
 
 
 @triton.jit
@@ -693,6 +691,7 @@ def _decode_kernel(
             word += crosses_word
             shift = tl.where(crosses_word, next_shift - 32, next_shift)
             storage_offset += 2 * N_LANES
+
 
 @triton.autotune(
     configs=SCATTER_FALLBACK_AUTOTUNE_CONFIGS,
