@@ -22,7 +22,8 @@ from kernels.main_kernels import (
     _estimate_center_kernel,
     _scatter_blocked_fallback_kernel,
 )
-BLOCK_SIZE = 65536              # CLEAN block size; MEDIUM/HIGH use half.
+# Base settings
+BLOCK_SYMBOLS = 65536           # Number of elements in a block
 LANES = 256                     # Parallel streams in every block.
 LANE_BITS = 800                 # Storage size per stream.
 
@@ -32,30 +33,30 @@ CENTER_SAMPLE_SIZE = 4096       # Number of samples used to estimate mean
 def geometry(distribution: Distribution):
     """Setup geometry used for compression.
         Each lane is stored in fixed_bits bit budget (returned as 32 bit words).
-        Number of symbols in each lane is steps = block_size  / lanes.
-        Average number of bits per symbol is (fixed_bits * lanes) / block_size
+        Number of symbols in each lane is steps = block_symbols / lanes.
+        Average number of bits per symbol is (fixed_bits * lanes) / block_symbols
         Longer sequences use the fallback buffer.
     """
-    clean_steps = BLOCK_SIZE // LANES
+    clean_steps = BLOCK_SYMBOLS // LANES
     lanes = LANES
     if distribution.noise_level == NoiseLevel.CLEAN:
-        block_size = BLOCK_SIZE
+        block_symbols = BLOCK_SYMBOLS
         lane_bits = (
             LANE_BITS
             if distribution.family != DistType.GAUSSIAN
             else LANE_BITS - 32
         )
     elif distribution.noise_level == NoiseLevel.MEDIUM:
-        block_size = BLOCK_SIZE // 2
+        block_symbols = BLOCK_SYMBOLS // 2
         clean_steps //= 2
         lane_bits = LANE_BITS - 6 * 32
     elif distribution.noise_level == NoiseLevel.HIGH:
-        block_size = BLOCK_SIZE // 2
+        block_symbols = BLOCK_SYMBOLS // 2
         clean_steps //= 2
         lane_bits = LANE_BITS - 3 * 32
     else:
         raise ValueError(f"Unknown noise level: {distribution.noise_level}")
-    return block_size, lanes, clean_steps, lane_bits // 32
+    return block_symbols, lanes, clean_steps, lane_bits // 32
 
 
 def _estimate_center(source, size, *, precomputed, ignore_zero=False):
@@ -74,21 +75,21 @@ def _launch_encode(
     source_values, sign_mantissa, encoded, encode_table, extra_starts,
     size, streams, *,
     precomputed, logical_numel,
-    fixed_words, block_size, lanes, steps, blocks,
+    fixed_words, block_symbols, lanes, steps, blocks,
 ):
     """Launch the 1D encode kernel for raw BF16 or precomputed components."""
     if precomputed:
         _encode_components_kernel[(blocks,)](
             source_values, sign_mantissa, encoded, encode_table, extra_starts,
             size, streams, LOGICAL_NUMEL=logical_numel,
-            FIXED_WORDS=fixed_words, BLOCK=block_size,
+            FIXED_WORDS=fixed_words, BLOCK=block_symbols,
             N_LANES=lanes, N_STEPS=steps,
         )
     else:
         _encode_kernel[(blocks,)](
             source_values, sign_mantissa, encoded, encode_table, extra_starts,
             size, streams, LOGICAL_NUMEL=logical_numel,
-            FIXED_WORDS=fixed_words, BLOCK=block_size,
+            FIXED_WORDS=fixed_words, BLOCK=block_symbols,
             N_LANES=lanes, N_STEPS=steps,
         )
 
@@ -118,7 +119,7 @@ def _compact_extra(
     size, streams, *,
     precomputed, buffered,
     logical_numel,
-    block_size, lanes, steps,
+    block_symbols, lanes, steps,
 ):
     """Compact fallback tail values for a buffered or private fallback path."""
     compact_grid = lambda meta: (triton.cdiv(streams, meta["TILE"]),)
@@ -128,7 +129,7 @@ def _compact_extra(
             fallback_data, metadata_buffer, allocation_descriptor,
             final_counts, bad_count, size,
             BUFFERED=buffered, LOGICAL_NUMEL=logical_numel,
-            BLOCK=block_size,
+            BLOCK=block_symbols,
             N_LANES=lanes, N_STEPS=steps,
         )
     else:
@@ -137,7 +138,7 @@ def _compact_extra(
             fallback_data, metadata_buffer, allocation_descriptor,
             final_counts, bad_count, size,
             BUFFERED=buffered, LOGICAL_NUMEL=logical_numel,
-            BLOCK=block_size,
+            BLOCK=block_symbols,
             N_LANES=lanes, N_STEPS=steps,
         )
 
@@ -167,8 +168,8 @@ def compress_components(
         logical_numel: Flattened logical element count (1D storage mapping).
     """
     # Geometry fixes the independent stream count and per-stream bit budget.
-    block_size, lanes, steps, fixed_words = geometry(distribution)
-    blocks = triton.cdiv(size, block_size)
+    block_symbols, lanes, steps, fixed_words = geometry(distribution)
+    blocks = triton.cdiv(size, block_symbols)
     streams = blocks * lanes
     if center is None:
         center = _estimate_center(
@@ -194,7 +195,7 @@ def compress_components(
         size, streams,
         precomputed=precomputed,
         logical_numel=logical_numel, fixed_words=fixed_words,
-        block_size=block_size, lanes=lanes, steps=steps, blocks=blocks,
+        block_symbols=block_symbols, lanes=lanes, steps=steps, blocks=blocks,
     )
 
     # Count overflow streams and bytes once.  For a shared buffer these counts
@@ -258,7 +259,7 @@ def compress_components(
         final_counts, bad_count, size, streams,
         precomputed=precomputed, buffered=buffered,
         logical_numel=logical_numel,
-        block_size=block_size, lanes=lanes, steps=steps,
+        block_symbols=block_symbols, lanes=lanes, steps=steps,
     )
     return CompressedTensor(
         encoded, size, sign_mantissa,
@@ -282,13 +283,13 @@ def compress_dense(
     shape = tuple(data.shape)
     source = data.contiguous().view(-1)
     logical_numel = source.numel()
-    block_size, lanes, steps, fixed_words = geometry(distribution)
+    block_symbols, lanes, steps, fixed_words = geometry(distribution)
     # Always use the flattened 1D layout: the codec operates on the
     # contiguous row-major stream and the original shape is restored by
     # reshape on decode. Flattening removes the old 2D tile padding and lets
     # every tensor use the single-tile fast path in the kernels.
-    blocks = triton.cdiv(logical_numel, block_size)
-    storage_numel = blocks * block_size
+    blocks = triton.cdiv(logical_numel, block_symbols)
+    storage_numel = blocks * block_symbols
     streams = blocks * lanes
     minimum_bytes = storage_numel + (streams * fixed_words + 4) * 4
     if allow_raw and minimum_bytes > logical_numel * data.element_size():
@@ -318,8 +319,8 @@ def decode_dense(data: CompressedTensor) -> torch.Tensor:
         decode_table, data.center, shifted_decode,
         BLOCK=1 << FIRST_BITS,
     )
-    block_size, lanes, steps, fixed_words = geometry(data.distribution)
-    blocks = triton.cdiv(data.size, block_size)
+    block_symbols, lanes, steps, fixed_words = geometry(data.distribution)
+    blocks = triton.cdiv(data.size, block_symbols)
     streams = blocks * lanes
     output = torch.empty(logical_numel, dtype=torch.int16, device=data.data.device)
 
@@ -328,13 +329,13 @@ def decode_dense(data: CompressedTensor) -> torch.Tensor:
         data.size, streams, data.center,
         LOGICAL_NUMEL=logical_numel,
         FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length,
-        BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
+        BLOCK=block_symbols, N_LANES=lanes, N_STEPS=steps,
         FIXED_WORDS=fixed_words,
         ON_DEMAND=logical_numel > 100_000_000,
     )
     scatter_meta = dict(
         LOGICAL_NUMEL=logical_numel,
-        TILE=64, BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
+        TILE=64, BLOCK=block_symbols, N_LANES=lanes, N_STEPS=steps,
     )
     if data.fallback_descriptor is not None:
         metadata = data.fallback_buffer.view(torch.int32)

@@ -38,8 +38,8 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
         decode_table, data.center, shifted_decode,
         BLOCK=1 << FIRST_BITS,
     )
-    block_size, lanes, steps, fixed_words = geometry(data.distribution)
-    blocks = triton.cdiv(data.size, block_size)
+    block_symbols, lanes, steps, fixed_words = geometry(data.distribution)
+    blocks = triton.cdiv(data.size, block_symbols)
     if output_policy == DENSE_OUTPUT:
         output = torch.empty(
             data.logical_numel,
@@ -59,7 +59,7 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
     main_meta = dict(
         OP=operation.triton_fn, OUTPUT_POLICY=output_policy,
         FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length,
-        BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
+        BLOCK=block_symbols, N_LANES=lanes, N_STEPS=steps,
         FIXED_WORDS=fixed_words,
     )
     pointwise_compressed_dense_kernel[(blocks,)](
@@ -74,7 +74,7 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
         )
         fallback_meta = dict(
             OP=operation.triton_fn, OUTPUT_POLICY=output_policy,
-            BUFFERED=True, TILE=64, BLOCK=block_size,
+            BUFFERED=True, TILE=64, BLOCK=block_symbols,
             N_LANES=lanes, N_STEPS=steps,
         )
         fallback_grid = (triton.cdiv(blocks * lanes, 64),)
@@ -90,7 +90,7 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
         )
         fallback_meta = dict(
             OP=operation.triton_fn, OUTPUT_POLICY=output_policy,
-            BUFFERED=False, TILE=64, BLOCK=block_size,
+            BUFFERED=False, TILE=64, BLOCK=block_symbols,
             N_LANES=lanes, N_STEPS=steps,
         )
         fallback_grid = (triton.cdiv(data.offsets.numel(), 64),)
@@ -113,8 +113,8 @@ def _launch_scalar_mul_add_compressed_dense(
         decode_table, data.center, shifted_decode,
         BLOCK=1 << FIRST_BITS,
     )
-    block_size, lanes, steps, fixed_words = geometry(data.distribution)
-    blocks = triton.cdiv(data.size, block_size)
+    block_symbols, lanes, steps, fixed_words = geometry(data.distribution)
+    blocks = triton.cdiv(data.size, block_symbols)
     if output_policy == DENSE_OUTPUT:
         output = torch.empty(
             data.logical_numel,
@@ -134,7 +134,7 @@ def _launch_scalar_mul_add_compressed_dense(
     main_meta = dict(
         OUTPUT_POLICY=output_policy,
         FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length,
-        BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
+        BLOCK=block_symbols, N_LANES=lanes, N_STEPS=steps,
         FIXED_WORDS=fixed_words,
     )
     pointwise_scalar_mul_add_dense_kernel[(blocks,)](
@@ -149,7 +149,7 @@ def _launch_scalar_mul_add_compressed_dense(
         )
         fallback_meta = dict(
             OUTPUT_POLICY=output_policy,
-            BUFFERED=True, TILE=64, BLOCK=block_size,
+            BUFFERED=True, TILE=64, BLOCK=block_symbols,
             N_LANES=lanes, N_STEPS=steps,
         )
         fallback_grid = (triton.cdiv(blocks * lanes, 64),)
@@ -165,7 +165,7 @@ def _launch_scalar_mul_add_compressed_dense(
         )
         fallback_meta = dict(
             OUTPUT_POLICY=output_policy,
-            BUFFERED=False, TILE=64, BLOCK=block_size,
+            BUFFERED=False, TILE=64, BLOCK=block_symbols,
             N_LANES=lanes, N_STEPS=steps,
         )
         fallback_grid = (triton.cdiv(data.offsets.numel(), 64),)
@@ -190,8 +190,8 @@ def _launch_scalar_mul_add_compressed_compressed(
     b_shifted_decode = torch.empty(
         1 << FIRST_BITS, dtype=torch.int32, device=data.data.device,
     )
-    block_size, lanes, steps, fixed_words = geometry(data.distribution)
-    blocks = triton.cdiv(data.size, block_size)
+    block_symbols, lanes, steps, fixed_words = geometry(data.distribution)
+    blocks = triton.cdiv(data.size, block_symbols)
 
     if output_policy == DENSE_OUTPUT:
         output = torch.empty(
@@ -247,7 +247,7 @@ def _launch_scalar_mul_add_compressed_compressed(
         OUTPUT_POLICY=output_policy,
         LOGICAL_NUMEL=data.logical_numel,
         FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length_a,
-        BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
+        BLOCK=block_symbols, N_LANES=lanes, N_STEPS=steps,
         FIXED_WORDS=fixed_words,
     )
     pointwise_scalar_mul_add_compressed_compressed_mapped_kernel[(blocks,)](
