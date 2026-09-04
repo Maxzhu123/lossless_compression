@@ -20,7 +20,7 @@ from ..kernels.pointwise_scalar import (
     pointwise_scalar_mul_add_dense_matrix_kernel,
 )
 from ..kernels.pointwise_scalar_dual import (
-    _setup_both_fallback_map_kernel,
+    _prepare_dual_tables_and_maps_kernel,
     pointwise_scalar_mul_add_compressed_compressed_mapped_matrix_kernel,
 )
 from ..tensor_buffer import TensorBuffer
@@ -190,11 +190,6 @@ def _launch_scalar_mul_add_compressed_compressed(
     b_shifted_decode = torch.empty(
         1 << FIRST_BITS, dtype=torch.int32, device=data.data.device,
     )
-    _shift_decoding_tables_kernel[(2,)](
-        a_decode_table, data.center, a_shifted_decode,
-        b_decode_table, other.center, b_shifted_decode,
-        TABLE_SIZE=1 << FIRST_BITS, BLOCK=1 << FIRST_BITS,
-    )
     block_size, lanes, steps, fixed_words = geometry(data.distribution)
     blocks = triton.cdiv(data.size, block_size)
 
@@ -238,14 +233,25 @@ def _launch_scalar_mul_add_compressed_compressed(
     b_stream_offsets = torch.zeros(streams, dtype=torch.int32, device=other.data.device)
 
     if a_has_fallback or b_has_fallback:
-        _setup_both_fallback_map_kernel[(triton.cdiv(streams, 1024),)](
+        _prepare_dual_tables_and_maps_kernel[(2 + triton.cdiv(streams, 1024),)](
+            a_decode_table, data.center, a_shifted_decode,
+            b_decode_table, other.center, b_shifted_decode,
             a_bad_streams, a_bad_starts, a_fb_offsets, a_metadata,
             a_descriptor, data.fallback_count,
             a_stream_starts, a_stream_offsets,
             b_bad_streams, b_bad_starts, b_fb_offsets, b_metadata,
             b_descriptor, other.fallback_count,
             b_stream_starts, b_stream_offsets,
+            N_SHIFT=2,
+            TABLE_SIZE=1 << FIRST_BITS,
+            BLOCK=1 << FIRST_BITS,
             BUFFERED=buffered,
+        )
+    else:
+        _shift_decoding_tables_kernel[(2,)](
+            a_decode_table, data.center, a_shifted_decode,
+            b_decode_table, other.center, b_shifted_decode,
+            TABLE_SIZE=1 << FIRST_BITS, BLOCK=1 << FIRST_BITS,
         )
 
     mapped_meta = dict(

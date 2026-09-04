@@ -15,18 +15,46 @@ from .pointwise import _pointwise_location, _store_result
 
 
 @triton.jit
-def _setup_both_fallback_map_kernel(
+def _prepare_dual_tables_and_maps_kernel(
+    a_decode_table, a_center, a_shifted_decode,
+    b_decode_table, b_center, b_shifted_decode,
     a_bad_streams, a_bad_starts, a_fallback_offsets, a_metadata,
     a_descriptor, a_fallback_count,
     a_stream_starts, a_stream_offsets,
     b_bad_streams, b_bad_starts, b_fallback_offsets, b_metadata,
     b_descriptor, b_fallback_count,
     b_stream_starts, b_stream_offsets,
+    N_SHIFT: tl.constexpr,
+    TABLE_SIZE: tl.constexpr, BLOCK: tl.constexpr,
     BUFFERED: tl.constexpr,
 ):
-    """Build per-stream maps for both operands in one kernel launch."""
+    """Shift both decode tables and build both fallback maps in one launch."""
     pid = tl.program_id(0)
-    offs = pid * 1024 + tl.arange(0, 1024)
+    idx = tl.arange(0, BLOCK)
+
+    if pid < N_SHIFT:
+        if pid == 0:
+            base_decode = a_decode_table
+            center = a_center
+            shifted_decode = a_shifted_decode
+        else:
+            base_decode = b_decode_table
+            center = b_center
+            shifted_decode = b_shifted_decode
+        center_value = tl.load(center).to(tl.int32)
+        zero_delta = (-127 - center_value) & 255
+        packed = tl.load(base_decode + idx).to(tl.int32)
+        length = packed & 255
+        symbol = (packed >> 8) & 255
+        is_zero = symbol == 0
+        delta = tl.where(symbol == 0, 0, symbol - (symbol <= zero_delta).to(tl.int32))
+        delta = tl.where(delta >= 128, delta - 256, delta)
+        exponent = tl.where(is_zero, -127, delta + center_value)
+        shifted = tl.where(length == 0, 0, length | (exponent << 8))
+        tl.store(shifted_decode + idx, shifted)
+        return
+
+    offs = (pid - N_SHIFT) * 1024 + tl.arange(0, 1024)
 
     a_count = tl.load(a_fallback_count).to(tl.int32)
     a_valid = offs < a_count
