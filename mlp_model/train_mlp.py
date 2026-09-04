@@ -7,9 +7,10 @@ from cprint import c_print
 from compress.tensor_buffer import TensorBuffer, visualize_buffer
 from sparse_utils import MyCompressed, SparseSGDM
 from mlps import FFN
+from dist_configs import weight_dist
 
 COMPRESSED = True
-BUFFER = True
+BUFFER = False
 c_print(f"Compressed: {COMPRESSED}", color="bright_blue")
 c_print(f"Buffer: {BUFFER}", color="bright_blue")
 
@@ -23,14 +24,14 @@ class FFNLayer(nn.Module):
         nn.init.xavier_uniform_(W2, generator=G)
 
         if COMPRESSED:
-            self.W1 = MyCompressed(W1, buffer=buffer)
-            self.W2 = MyCompressed(W2, buffer=buffer)
+            self.W1 = MyCompressed(W1, buffer=buffer, dist=weight_dist)
+            self.W2 = MyCompressed(W2, buffer=buffer, dist=weight_dist)
         else:
             self.W1 = W1
             self.W2 = W2
 
     def forward(self, x, buffer:TensorBuffer):
-        out = FFN.apply(x, self.W1, self.W2, buffer)
+        out = FFN.apply(x, self.W1, self.W2, buffer, COMPRESSED)
         return out
 
     def sparse_parameters(self):
@@ -57,14 +58,14 @@ def main():
     G = torch.Generator(device="cuda")
     G.manual_seed(0)
 
-    if BUFFER:
-        buffer = TensorBuffer(2000_000_000)
+    if BUFFER and COMPRESSED:
+        buffer = TensorBuffer(500_000_000)
     else:
         buffer = None
 
     model = Model(8, 4096, 21504, 4096, G, buffer=buffer)
     optimiser = SparseSGDM(model.sparse_parameters(), lr=0.001, momentum=0.9,
-                           buffer=buffer, compressed=True)
+                           buffer=buffer, compressed=COMPRESSED)
 
     x = torch.randn(12000, 4096, dtype=torch.bfloat16, device="cuda", generator=G)
     y_hat = x.norm(dim=0)
@@ -93,7 +94,7 @@ def main():
 
         if i % 10 == 0:
             print(f'{i} loss = {loss.item():.4f}')
-            # c_print(visualize_buffer(buffer), color="yellow")
+            c_print(visualize_buffer(buffer), color="yellow")
 
     torch.cuda.synchronize()
     end = time.perf_counter()

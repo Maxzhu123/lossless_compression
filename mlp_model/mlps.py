@@ -4,7 +4,7 @@ import torch
 from torch.autograd import Function
 
 from sparse_utils import MyCompressed
-from compress.code_storage import CompressedTensor, Distribution, DistType, NoiseLevel
+from dist_configs import act_dist
 
 if TYPE_CHECKING:
     from compress.tensor_buffer import TensorBuffer
@@ -18,17 +18,17 @@ class FFN(Function):
     """
 
     @staticmethod
-    def forward(ctx, x, W1, W2, buffer: TensorBuffer=None):
+    def forward(ctx, x, W1, W2, buffer: TensorBuffer|None=None, compressed: bool=False):
         """Run the dense FFN forward pass and save tensors for backward."""
         z = x @ W1.T
         h = z.relu_()
         output = h @ W2.T
 
-        # dist = Distribution(DistType.LAPLACE, noise_level=NoiseLevel.CLEAN, param=0.75, zero_prob=0.5)
-        # h = MyCompressed(h, buffer=buffer, dist=dist)
+        if compressed:
+            h = MyCompressed(h, buffer=buffer, dist=act_dist)
 
         ctx.save_for_backward(x, W1, W2, h)
-
+        ctx.compressed = compressed
         return output
 
     @staticmethod
@@ -38,8 +38,9 @@ class FFN(Function):
 
         x, W1, W2, h = ctx.saved_tensors
 
-        # h = cast(MyCompressed, h)
-        # h = h.decompress_free()
+        if ctx.compressed:
+            h = cast(MyCompressed, h)
+            h = h.decompress_free()
 
         grad_z = grad_output @ W2
         grad_W2 = grad_output.T @ h
