@@ -22,16 +22,14 @@ def multiply_op(left, right):
 class PointwiseOp:
     """Pair an in-kernel operation with its PyTorch correctness reference."""
     name: str
-    arity: int
     triton_fn: object
     torch_fn: object
 
 
-ADD = PointwiseOp("add", 2, add_op, torch.add)
-MULTIPLY = PointwiseOp("multiply", 2, multiply_op, torch.mul)
+ADD = PointwiseOp("add", add_op, torch.add)
+MULTIPLY = PointwiseOp("multiply", multiply_op, torch.mul)
 SCALAR_MUL_ADD = PointwiseOp(
     "scalar_mul_add",
-    2,
     None,
     lambda left, right, alpha=1.0: (
         (left.float() * alpha + right.float()).to(torch.bfloat16)

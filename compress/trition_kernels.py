@@ -326,8 +326,13 @@ def _count_bad_streams_kernel(
     tl.atomic_add(fallback_total, total_len, mask=total_len != 0)
 
 
+@triton.autotune(
+    configs=COMPACT_BAD_STREAMS_AUTOTUNE_CONFIGS,
+    key=["n_streams", "steps"],
+    restore_value=["bad_count", "fallback_total"],
+)
 @triton.jit
-def _compact_bad_streams_impl(
+def _compact_bad_streams_kernel(
     extra_starts,
     bad_streams_out, bad_starts_out, fallback_offsets_out,
     metadata_buffer, allocation_descriptor, final_counts,
@@ -371,25 +376,6 @@ def _compact_bad_streams_impl(
         )
 
 
-@triton.autotune(
-    configs=COMPACT_BAD_STREAMS_AUTOTUNE_CONFIGS,
-    key=["n_streams", "steps"],
-    restore_value=["bad_count", "fallback_total"],
-)
-@triton.jit
-def _compact_bad_streams_kernel(
-    extra_starts, bad_streams_out, bad_starts_out, fallback_offsets_out,
-    metadata_buffer, allocation_descriptor, final_counts,
-    bad_count, fallback_total, n_streams, steps,
-    BUFFERED: tl.constexpr, BLOCK: tl.constexpr,
-):
-    """Compact fallback metadata for universal blocked storage."""
-    _compact_bad_streams_impl(
-        extra_starts, bad_streams_out, bad_starts_out, fallback_offsets_out,
-        metadata_buffer, allocation_descriptor, final_counts,
-        bad_count, fallback_total, n_streams, steps,
-        BUFFERED, BLOCK,
-    )
 
 
 @triton.jit

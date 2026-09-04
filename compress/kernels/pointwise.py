@@ -60,8 +60,12 @@ def _pointwise_location(
     return storage_offset, logical_offset, storage_valid, logical_valid
 
 
+@triton.autotune(
+    configs=DECODE_AUTOTUNE_CONFIGS,
+    key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS", "OUTPUT_POLICY"],
+)
 @triton.jit
-def _pointwise_compressed_dense_impl(
+def pointwise_compressed_dense_matrix_kernel(
     encoded, sign_mantissa, other, output, auxiliary, decode_table,
     n_elements, n_streams, center,
     OP: tl.constexpr, OUTPUT_POLICY: tl.constexpr,
@@ -195,32 +199,12 @@ def _pointwise_compressed_dense_impl(
             word += crosses_word
             shift = tl.where(crosses_word, next_shift - 32, next_shift)
 
-
 @triton.autotune(
-    configs=DECODE_AUTOTUNE_CONFIGS,
-    key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS", "OUTPUT_POLICY"],
+    configs=SCATTER_FALLBACK_AUTOTUNE_CONFIGS,
+    key=["n_elements", "N_LANES", "N_STEPS", "BLOCK"],
 )
 @triton.jit
-def pointwise_compressed_dense_matrix_kernel(
-    encoded, sign_mantissa, other, output, auxiliary, decode_table,
-    n_elements, n_streams, center,
-    OP: tl.constexpr, OUTPUT_POLICY: tl.constexpr,
-    LOGICAL_NUMEL: tl.constexpr,
-    FIRST_MASK: tl.constexpr, RARE_LENGTH: tl.constexpr,
-    BLOCK: tl.constexpr, N_LANES: tl.constexpr,
-    N_STEPS: tl.constexpr, FIXED_WORDS: tl.constexpr,
-):
-    """Apply a pointwise policy to flattened 1D storage."""
-    _pointwise_compressed_dense_impl(
-        encoded, sign_mantissa, other, output, auxiliary, decode_table,
-        n_elements, n_streams, center, OP, OUTPUT_POLICY,
-        LOGICAL_NUMEL,
-        FIRST_MASK, RARE_LENGTH, BLOCK, N_LANES, N_STEPS, FIXED_WORDS,
-    )
-
-
-@triton.jit
-def _pointwise_compressed_dense_fallback_impl(
+def pointwise_compressed_dense_matrix_fallback_kernel(
     bad_streams, bad_starts, fallback_offsets,
     fallback_buffer, fallback_base, metadata, descriptor, fallback_count,
     sign_mantissa, other, output, auxiliary, n_elements,
@@ -282,28 +266,3 @@ def _pointwise_compressed_dense_fallback_impl(
             OP(left, right), output, auxiliary, offset, logical_offset,
             logical_active, active, OUTPUT_POLICY,
         )
-
-
-@triton.autotune(
-    configs=SCATTER_FALLBACK_AUTOTUNE_CONFIGS,
-    key=["n_elements", "N_LANES", "N_STEPS", "BLOCK"],
-)
-@triton.jit
-def pointwise_compressed_dense_matrix_fallback_kernel(
-    bad_streams, bad_starts, fallback_offsets,
-    fallback_buffer, fallback_base, metadata, descriptor, fallback_count,
-    sign_mantissa, other, output, auxiliary, n_elements,
-    OP: tl.constexpr, OUTPUT_POLICY: tl.constexpr, BUFFERED: tl.constexpr,
-    LOGICAL_NUMEL: tl.constexpr,
-    TILE: tl.constexpr, BLOCK: tl.constexpr,
-    N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
-):
-    """Correct flattened-storage pointwise results from fallback tails."""
-    _pointwise_compressed_dense_fallback_impl(
-        bad_streams, bad_starts, fallback_offsets, fallback_buffer,
-        fallback_base, metadata, descriptor, fallback_count,
-        sign_mantissa, other, output, auxiliary, n_elements,
-        OP, OUTPUT_POLICY, BUFFERED,
-        LOGICAL_NUMEL,
-        TILE, BLOCK, N_LANES, N_STEPS,
-    )

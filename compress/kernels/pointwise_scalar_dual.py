@@ -9,20 +9,17 @@ and compressed component output.
 import triton
 from triton import language as tl
 
-from ..codec.autotune import DECODE_AUTOTUNE_CONFIGS
+from ..codec.autotune import DUAL_DECODE_AUTOTUNE_CONFIGS
 from ..codec.primitives import decode_symbol, pack_bf16
-from .pointwise import (
-    _pointwise_location,
-    _store_result,
+from .pointwise import _pointwise_location, _store_result
+
+
+@triton.autotune(
+    configs=DUAL_DECODE_AUTOTUNE_CONFIGS,
+    key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS", "OUTPUT_POLICY"],
 )
-
-
-DUAL_DECODE_AUTOTUNE_CONFIGS = [
-    triton.Config({}, num_warps=8, num_stages=3),
-]
-
 @triton.jit
-def _scalar_mul_add_compressed_compressed_matrix_impl(
+def pointwise_scalar_mul_add_compressed_compressed_matrix_kernel(
     a_encoded, a_sign_mantissa, a_decode_table, a_center,
     a_bad_streams, a_bad_starts, a_fallback_offsets, a_metadata,
     a_descriptor, a_fallback_count,
@@ -281,44 +278,3 @@ def _scalar_mul_add_compressed_compressed_matrix_impl(
             b_window = tl.where(b_crosses, b_next_window, b_window)
             b_word += b_crosses
             b_shift = tl.where(b_crosses, b_shift1 - 32, b_shift1)
-
-
-
-@triton.autotune(
-    configs=DUAL_DECODE_AUTOTUNE_CONFIGS,
-    key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS", "OUTPUT_POLICY"],
-)
-@triton.jit
-def pointwise_scalar_mul_add_compressed_compressed_matrix_kernel(
-    a_encoded, a_sign_mantissa, a_decode_table, a_center,
-    a_bad_streams, a_bad_starts, a_fallback_offsets, a_metadata,
-    a_descriptor, a_fallback_count,
-    a_fallback_buffer, a_fallback_base,
-    b_encoded, b_sign_mantissa, b_decode_table, b_center,
-    b_bad_streams, b_bad_starts, b_fallback_offsets, b_metadata,
-    b_descriptor, b_fallback_count,
-    b_fallback_buffer, b_fallback_base,
-    output, auxiliary, alpha,
-    n_elements, n_streams,
-    BUFFERED: tl.constexpr,
-    OUTPUT_POLICY: tl.constexpr,
-    LOGICAL_NUMEL: tl.constexpr,
-    FIRST_MASK: tl.constexpr, RARE_LENGTH: tl.constexpr,
-    BLOCK: tl.constexpr, N_LANES: tl.constexpr,
-    N_STEPS: tl.constexpr, FIXED_WORDS: tl.constexpr,
-):
-    _scalar_mul_add_compressed_compressed_matrix_impl(
-        a_encoded, a_sign_mantissa, a_decode_table, a_center,
-        a_bad_streams, a_bad_starts, a_fallback_offsets, a_metadata,
-        a_descriptor, a_fallback_count,
-        a_fallback_buffer, a_fallback_base,
-        b_encoded, b_sign_mantissa, b_decode_table, b_center,
-        b_bad_streams, b_bad_starts, b_fallback_offsets, b_metadata,
-        b_descriptor, b_fallback_count,
-        b_fallback_buffer, b_fallback_base,
-        output, auxiliary, alpha,
-        n_elements, n_streams,
-        BUFFERED, OUTPUT_POLICY,
-        LOGICAL_NUMEL,
-        FIRST_MASK, RARE_LENGTH, BLOCK, N_LANES, N_STEPS, FIXED_WORDS,
-    )

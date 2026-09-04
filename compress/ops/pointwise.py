@@ -300,20 +300,17 @@ def pointwise_compressed_dense(
     buffer: TensorBuffer | None = None,
     distribution=None,
 ) -> torch.Tensor | CompressedTensor:
-    """Apply a registered compressed+dense operation.
-
-    Dense results return directly; component results reuse the shared encoder.
+    """ Apply a compressed + dense pointwise operation.
+        If dense_output, returns a dense tensor. Otherwise, returns a compressed tensor.
     """
-    if operation.arity != 2:
-        raise ValueError(f"{operation.name} is not a binary operation")
+    # Both tensors must have the same shape.
     if tuple(other.shape) != data.shape:
         raise ValueError(f"{operation.name} expects tensors with the same shape")
 
+    # Keep the input distribution/geometry unless the caller overrides it.
     result_distribution = distribution or data.distribution
     if operation.name == "scalar_mul_add" and alpha is None:
-        alpha = torch.tensor(
-            [1.0], dtype=torch.float32, device=data.data.device,
-        )
+        raise ValueError("scalar_mul_add requires an alpha argument")
     if (
         data.layout == StorageLayout.COMPRESSED
         and not dense_output
@@ -323,7 +320,8 @@ def pointwise_compressed_dense(
             "matrix compressed output must preserve the input stream geometry"
         )
 
-    if data.offsets is None and data.fallback_descriptor is None:
+    # Raw fast path: no codec streams, operate on dense payload directly.
+    if data.layout == StorageLayout.RAW:
         if operation.name == "scalar_mul_add":
             result = operation.torch_fn(data.data.reshape(data.shape), other, alpha)
         else:
@@ -332,6 +330,7 @@ def pointwise_compressed_dense(
             return result
         return compress_dense(result, result_distribution, buffer)
 
+    # Launch the fused pointwise kernel and write dense or component output.
     policy = DENSE_OUTPUT if dense_output else COMPRESSED_OUTPUT
     if operation.name == "scalar_mul_add":
         values, auxiliary = _launch_scalar_mul_add_compressed_dense(
@@ -343,6 +342,8 @@ def pointwise_compressed_dense(
         )
     if dense_output:
         return values.reshape(data.shape)
+
+    # Reuse the shared Huffman encoder on the fused kernel's exponent output.
     result = compress_components(
         auxiliary, values, data.size, result_distribution,
         buffer, data.shape, precomputed=True,

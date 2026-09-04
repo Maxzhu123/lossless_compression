@@ -77,10 +77,12 @@ def _benchmark(n: int, operation) -> tuple[float, float]:
     output_buffer = _buffer(source.numel())
     encoded = compress(source, Distribution(DistType.GAUSSIAN), buffer)
     restored = decompress(encoded)
+    alpha = torch.tensor([1.0], device="cuda", dtype=torch.float32)
+    op_kwargs = {} if operation.name != "scalar_mul_add" else {"alpha": alpha}
     expected = operation.torch_fn(restored, other)
-    actual = pointwise_compressed_dense(encoded, other, operation)
+    actual = pointwise_compressed_dense(encoded, other, operation, **op_kwargs)
     compressed_result = pointwise_compressed_dense(
-        encoded, other, operation,
+        encoded, other, operation, **op_kwargs,
         dense_output=False, buffer=output_buffer,
     )
     _assert_bits_equal(source, restored)
@@ -89,7 +91,7 @@ def _benchmark(n: int, operation) -> tuple[float, float]:
     _free(compressed_result, output_buffer)
 
     dense = lambda: operation.torch_fn(decompress(encoded), other)
-    fused = lambda: pointwise_compressed_dense(encoded, other, operation)
+    fused = lambda: pointwise_compressed_dense(encoded, other, operation, **op_kwargs)
     iterations = 100
     dense_ms, fused_dense_ms = _compare(dense, fused, iterations)
     print(
@@ -99,7 +101,7 @@ def _benchmark(n: int, operation) -> tuple[float, float]:
 
     unfused = lambda: compress(fused(), encoded.distribution, output_buffer)
     fused_compressed = lambda: pointwise_compressed_dense(
-        encoded, other, operation,
+        encoded, other, operation, **op_kwargs,
         dense_output=False, buffer=output_buffer,
     )
     release = lambda value: _free(value, output_buffer)

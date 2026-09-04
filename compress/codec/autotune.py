@@ -35,3 +35,6 @@ DECODE_AUTOTUNE_CONFIGS = [
     triton.Config({}, num_warps=2, num_stages=2, maxnreg=64),
     triton.Config({}, num_warps=2, num_stages=3, maxnreg=64),
 ]
+DUAL_DECODE_AUTOTUNE_CONFIGS = [
+    triton.Config({}, num_warps=8, num_stages=3),
+]
