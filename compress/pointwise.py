@@ -1,30 +1,29 @@
 """Registry-driven pointwise operations for compressed tensors."""
 
-from dataclasses import replace
-
+from dataclasses import replace, dataclass
 import torch
 import triton
 
-from ..code_storage import CompressedTensor, StorageLayout
-from ..codec.runtime import compress_components, compress_dense, decode_matrix_dense, geometry
-from ..huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
-from kernels.main_kernels import _shift_decoding_table_kernel
-from ..kernels.pointwise import (
+from .code_storage import CompressedTensor, StorageLayout
+from .codec.runtime import compress_components, compress_dense, decode_matrix_dense, geometry
+from .huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
+from .kernels.main_kernels import _shift_decoding_table_kernel
+from .kernels.pointwise import (
     COMPRESSED_OUTPUT,
     DENSE_OUTPUT,
     pointwise_compressed_dense_matrix_fallback_kernel,
     pointwise_compressed_dense_matrix_kernel,
+    add_op, multiply_op
 )
-from ..kernels.pointwise_scalar import (
+from .kernels.pointwise_scalar import (
     pointwise_scalar_mul_add_dense_matrix_fallback_kernel,
     pointwise_scalar_mul_add_dense_matrix_kernel,
 )
-from ..kernels.pointwise_scalar_dual import (
+from .kernels.pointwise_scalar_dual import (
     _prepare_dual_tables_and_maps_kernel,
     pointwise_scalar_mul_add_compressed_compressed_mapped_matrix_kernel,
 )
-from ..tensor_buffer import TensorBuffer
-from .registry import PointwiseOp, SCALAR_MUL_ADD
+from .tensor_buffer import TensorBuffer
 
 
 def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
@@ -99,6 +98,7 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
         )
     return output, auxiliary
 
+
 def _launch_scalar_mul_add_compressed_dense(
     data, other, alpha, output_policy,
 ):
@@ -172,7 +172,6 @@ def _launch_scalar_mul_add_compressed_dense(
             *fallback_args, LOGICAL_NUMEL=data.logical_numel, **fallback_meta,
         )
     return output, auxiliary
-
 
 
 def _launch_scalar_mul_add_compressed_compressed(
@@ -385,3 +384,26 @@ def pointwise_compressed_dense(
     if data.layout == StorageLayout.COMPRESSED:
         result = replace(result, layout=data.layout)
     return result
+
+
+@dataclass(frozen=True)
+class PointwiseOp:
+    """Pair an in-kernel operation with its PyTorch correctness reference."""
+    name: str
+    triton_fn: object
+    torch_fn: object
+
+
+ADD = PointwiseOp("add", add_op, torch.add)
+MULTIPLY = PointwiseOp("multiply", multiply_op, torch.mul)
+SCALAR_MUL_ADD = PointwiseOp(
+    "scalar_mul_add",
+    None,
+    lambda left, right, alpha=1.0: (
+        (left.float() * alpha + right.float()).to(torch.bfloat16)
+    ),
+)
+POINTWISE_OPS = {
+    operation.name: operation
+    for operation in (ADD, MULTIPLY, SCALAR_MUL_ADD)
+}

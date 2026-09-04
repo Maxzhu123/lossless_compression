@@ -4,8 +4,7 @@ import torch
 
 from .code_storage import Distribution, StorageLayout
 from .codec.runtime import compress_dense, decode_matrix_dense
-from .ops.pointwise import pointwise_compressed_dense, pointwise_scale_add_compressed
-from .ops.registry import ADD, MULTIPLY, SCALAR_MUL_ADD
+from .pointwise import ADD, MULTIPLY, SCALAR_MUL_ADD, pointwise_compressed_dense, pointwise_scale_add_compressed
 from .tensor_buffer import TensorBuffer
 
 if TYPE_CHECKING:

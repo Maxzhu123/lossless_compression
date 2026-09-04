@@ -6,8 +6,7 @@ import torch
 
 from compress.code_storage import Distribution, DistType
 from compress.compress import compress, decompress
-from compress.ops.pointwise import pointwise_compressed_dense
-from compress.ops.registry import POINTWISE_OPS
+from compress.pointwise import pointwise_compressed_dense, POINTWISE_OPS
 from compress.tensor_buffer import Allocation, TensorBuffer
 
 
