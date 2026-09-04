@@ -20,9 +20,11 @@ from ..kernels.pointwise_scalar import (
     pointwise_scalar_mul_add_dense_matrix_kernel,
 )
 from ..kernels.pointwise_scalar_dual import (
+    _setup_both_fallback_map_kernel,
     _setup_fallback_map_kernel,
     pointwise_scalar_mul_add_compressed_compressed_fallback_matrix_kernel,
     pointwise_scalar_mul_add_compressed_compressed_fixed_matrix_kernel,
+    pointwise_scalar_mul_add_compressed_compressed_mapped_matrix_kernel,
 )
 from ..tensor_buffer import TensorBuffer
 from .registry import PointwiseOp, SCALAR_MUL_ADD
@@ -241,58 +243,40 @@ def _launch_scalar_mul_add_compressed_compressed(
     b_stream_starts = torch.full((streams,), steps, dtype=torch.int32, device=other.data.device)
     b_stream_offsets = torch.zeros(streams, dtype=torch.int32, device=other.data.device)
 
-    if a_has_fallback:
-        _setup_fallback_map_kernel[(triton.cdiv(streams, 1024),)](
+    if a_has_fallback or b_has_fallback:
+        _setup_both_fallback_map_kernel[(triton.cdiv(streams, 1024),)](
             a_bad_streams, a_bad_starts, a_fb_offsets, a_metadata,
             a_descriptor, data.fallback_count,
             a_stream_starts, a_stream_offsets,
-            BUFFERED=buffered,
-        )
-    if b_has_fallback:
-        _setup_fallback_map_kernel[(triton.cdiv(streams, 1024),)](
             b_bad_streams, b_bad_starts, b_fb_offsets, b_metadata,
             b_descriptor, other.fallback_count,
             b_stream_starts, b_stream_offsets,
             BUFFERED=buffered,
         )
 
-    fixed_meta = dict(
-        OUTPUT_POLICY=output_policy,
-        FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length_a,
-        BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
-        FIXED_WORDS=fixed_words,
-    )
-    pointwise_scalar_mul_add_compressed_compressed_fixed_matrix_kernel[(blocks,)](
-        data.data, data.sign_mantissa, a_shifted_decode, data.center,
-        other.data, other.sign_mantissa, b_shifted_decode, other.center,
-        output, auxiliary, alpha,
-        data.size, streams,
-        LOGICAL_NUMEL=data.logical_numel, **fixed_meta,
-    )
-
-    fallback_meta = dict(
+    mapped_meta = dict(
         BUFFERED=buffered,
         OUTPUT_POLICY=output_policy,
         LOGICAL_NUMEL=data.logical_numel,
         FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length_a,
         BLOCK=block_size, N_LANES=lanes, N_STEPS=steps,
         FIXED_WORDS=fixed_words,
-        TILE=64,
     )
-    if a_has_fallback or b_has_fallback:
-        pointwise_scalar_mul_add_compressed_compressed_fallback_matrix_kernel[(triton.cdiv(streams, 64),)](
-            data.data, data.sign_mantissa, a_shifted_decode, data.center,
-            a_stream_starts, a_stream_offsets,
-            other.data, other.sign_mantissa, b_shifted_decode, other.center,
-            b_stream_starts, b_stream_offsets,
-            data.fallback_buffer, data.fallback_base,
-            other.fallback_buffer, other.fallback_base,
-            a_descriptor, data.fallback_count,
-            b_descriptor, other.fallback_count,
-            output, auxiliary, alpha,
-            data.size, streams,
-            **fallback_meta,
-        )
+    pointwise_scalar_mul_add_compressed_compressed_mapped_matrix_kernel[(blocks,)](
+        data.data, data.sign_mantissa, a_shifted_decode, data.center,
+        a_stream_starts, a_stream_offsets,
+        a_bad_streams, a_bad_starts, a_fb_offsets, a_metadata,
+        a_descriptor, data.fallback_count,
+        data.fallback_buffer, data.fallback_base,
+        other.data, other.sign_mantissa, b_shifted_decode, other.center,
+        b_stream_starts, b_stream_offsets,
+        b_bad_streams, b_bad_starts, b_fb_offsets, b_metadata,
+        b_descriptor, other.fallback_count,
+        other.fallback_buffer, other.fallback_base,
+        output, auxiliary, alpha,
+        data.size, streams,
+        **mapped_meta,
+    )
     return output, auxiliary
 
 
