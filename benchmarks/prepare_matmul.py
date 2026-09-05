@@ -1,11 +1,9 @@
 """Correctness checks and benchmarks for dense @ compressed matmul."""
 import statistics
-
 import torch
 
 from LCT.comp_format import DistType, Distribution
-from LCT.codec.runtime import compress_dense
-from LCT.compress import A_compB, decompress
+from LCT.compress import A_compB, decompress, compress
 from LCT.tensor_buffer import TensorBuffer
 
 
@@ -72,7 +70,7 @@ def _benchmark(n: int) -> tuple[float, float]:
     ).to(torch.bfloat16)
 
     buffer = _buffer(weight.numel() * weight.element_size())
-    encoded = compress_dense(
+    encoded = compress(
         weight, Distribution(DistType.GAUSSIAN, 0.25),
         buffer, allow_raw=False,
     )

@@ -10,16 +10,10 @@ Planned fused path:
 """
 
 import statistics
-
 import torch
 
 from LCT.comp_format import DistType, Distribution
-from LCT.compress import (
-    compress,
-    compA_add_B,
-    a_compA_add_compB,
-    decompress,
-)
+from LCT.compress import compress, compA_add_B, a_compA_add_compB, decompress
 from LCT.tensor_buffer import Allocation, TensorBuffer
 
 

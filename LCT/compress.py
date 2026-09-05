@@ -18,11 +18,12 @@ def compress(
     data: Tensor,
     distribution: Distribution | None = None,
     buffer: TensorBuffer | None = None,
+    allow_raw: bool = False,
 ) -> CompressedTensor:
     """ Losslessly encode the exponent byte of a CUDA bfloat16 tensor."""
     if distribution is None:
         distribution = Distribution()
-    return compress_dense(data, distribution, buffer)
+    return compress_dense(data, distribution, buffer, allow_raw=allow_raw)
 
 
 def decompress(data: CompressedTensor) -> Tensor:

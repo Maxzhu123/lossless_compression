@@ -1,6 +1,6 @@
 """Registry-driven pointwise operations for compressed tensors."""
 
-from dataclasses import replace, dataclass
+from dataclasses import dataclass
 import torch
 import triton
 
@@ -307,12 +307,6 @@ def pointwise_scale_add_compressed(
             logical_numel=data.logical_numel,
         )
 
-        # print( result.memory_size()/(result.logical_numel*2))
-        # print(result.memory_buffer_size())
-        # exit(5)
-
-        if data.layout == StorageLayout.COMPRESSED:
-            result = replace(result, layout=data.layout)
         return result
 
     if other.layout == StorageLayout.RAW:
@@ -384,8 +378,6 @@ def pointwise_compressed_dense(
         buffer, data.shape, precomputed=True,
         logical_numel=data.logical_numel,
     )
-    if data.layout == StorageLayout.COMPRESSED:
-        result = replace(result, layout=data.layout)
     return result
 
 

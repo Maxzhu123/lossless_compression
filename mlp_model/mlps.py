@@ -3,8 +3,8 @@ from typing import TYPE_CHECKING, cast
 import torch
 from torch.autograd import Function
 
-from sparse_utils import MyCompressed
-from dist_configs import act_dist
+from LCT.LCTensor import MyCompressed
+from dist_configs import act_dist, act_relu_dist
 
 if TYPE_CHECKING:
     from LCT.tensor_buffer import TensorBuffer
@@ -53,7 +53,8 @@ class FFN(Function):
         output = h @ W2.T
 
         if compressed:
-            h = MyCompressed(h, buffer=buffer, dist=act_dist)
+            x = MyCompressed(x, buffer=buffer, dist=act_dist)
+            h = MyCompressed(h, buffer=buffer, dist=act_relu_dist)
 
         ctx.save_for_backward(x, W1, W2, h)
         ctx.compressed = compressed
@@ -67,6 +68,7 @@ class FFN(Function):
         x, W1, W2, h = ctx.saved_tensors
 
         if ctx.compressed:
+            x = x.decompress_free()
             h = h.decompress_free()
 
         grad_z = grad_output @ W2

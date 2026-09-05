@@ -5,7 +5,8 @@ import time
 from cprint import c_print
 
 from LCT.tensor_buffer import TensorBuffer, visualize_buffer
-from sparse_utils import MyCompressed, SparseSGDM
+from LCT.LCTensor import MyCompressed
+from sparse_utils import SparseSGDM
 from mlps import FFN, RMSNorm
 from dist_configs import weight_dist
 
@@ -48,7 +49,7 @@ class Model(nn.Module):
 
     def forward(self, x, buffer: TensorBuffer):
         for layer in self.layers:
-            x = layer(x, buffer=buffer)
+            x = x + layer(x, buffer=buffer)
         return x
 
     def sparse_parameters(self):

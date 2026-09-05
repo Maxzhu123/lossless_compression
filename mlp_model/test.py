@@ -1,7 +1,7 @@
 import torch
 from matplotlib import pyplot as plt
 
-from sparse_utils import MyCompressed
+from LCTensor import MyCompressed
 from LCT.comp_format import DistType, Distribution, NoiseLevel
 from LCT.compress import TensorBuffer
 

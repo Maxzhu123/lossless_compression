@@ -1,6 +1,5 @@
 """Shared host-side compression and decompression pipeline."""
 
-from dataclasses import replace
 import torch
 import triton
 
@@ -272,11 +271,13 @@ def compress_components(
         fallback_count=counts[:1] if buffered else bad_count,
         fallback_used=counts[1:2] if buffered else fallback_total,
         distribution=distribution, center=center, shape=shape,
+        layout=StorageLayout.COMPRESSED,
     )
+
 
 def compress_dense(
     data, distribution, buffer: TensorBuffer | None = None, *,
-    allow_raw=True,
+    allow_raw=False,
 ):
     """Compress any tensor through the flattened 1D blocked storage mapping."""
     shape = tuple(data.shape)
@@ -285,8 +286,7 @@ def compress_dense(
     block_symbols, lanes, steps, fixed_words = geometry(distribution)
     # Always use the flattened 1D layout: the codec operates on the
     # contiguous row-major stream and the original shape is restored by
-    # reshape on decode. Flattening removes the old 2D tile padding and lets
-    # every tensor use the single-tile fast path in the kernels.
+    # reshape on decode.
     blocks = triton.cdiv(logical_numel, block_symbols)
     storage_numel = blocks * block_symbols
     streams = blocks * lanes
@@ -305,9 +305,7 @@ def compress_dense(
         distribution, buffer, shape, precomputed=False,
         logical_numel=logical_numel,
     )
-    return replace(
-        result, shape=shape, layout=StorageLayout.COMPRESSED,
-    )
+    return result
 
 
 def decode_dense(data: CompressedTensor) -> torch.Tensor:
