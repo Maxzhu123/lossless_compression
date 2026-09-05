@@ -14,7 +14,7 @@ from LCT.compress import (
 from dist_configs import momentum_dist
 if TYPE_CHECKING:
     from LCT.tensor_buffer import TensorBuffer
-    from LCT.compression.format import Distribution
+    from LCT.comp_format import Distribution
 
 
 class MyCompressed(Tensor):

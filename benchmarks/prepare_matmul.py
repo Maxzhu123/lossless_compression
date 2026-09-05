@@ -3,7 +3,7 @@ import statistics
 
 import torch
 
-from LCT.compression.format import DistType, Distribution
+from LCT.comp_format import DistType, Distribution
 from LCT.codec.runtime import compress_dense
 from LCT.compress import A_compB, decompress
 from LCT.tensor_buffer import TensorBuffer

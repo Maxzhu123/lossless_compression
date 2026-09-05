@@ -2,7 +2,7 @@ import torch
 from matplotlib import pyplot as plt
 
 from sparse_utils import MyCompressed
-from LCT.compression.format import NoiseLevel, DistType, Distribution
+from LCT.comp_format import DistType, Distribution, NoiseLevel
 from LCT.compress import TensorBuffer
 
 
@@ -13,7 +13,11 @@ zero_frac = (h == 0).float().mean()
 print(f'{zero_frac = :.2%}')
 print(f'{h.nbytes // 1024 = } KB')
 
-dist = Distribution(DistType.EMPIRICAL, noise_level=NoiseLevel.CLEAN, zero_prob=0.02)
+dist = Distribution(
+    DistType.EMPIRICAL,
+    noise_level=NoiseLevel.CLEAN,
+    zero_prob=0.02,
+)
 h_comp = MyCompressed(h, dist=dist, buffer=buffer)
 print(f'{h_comp.nbytes // 1024 = } KB')
 

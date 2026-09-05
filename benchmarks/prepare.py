@@ -7,7 +7,7 @@ import torch
 from LCT.compress import compress, decompress
 from LCT.tensor_buffer import TensorBuffer
 from LCT.comp_tensor import CompressedTensor
-from LCT.compression.format import NoiseLevel, DistType, Distribution
+from LCT.comp_format import DistType, Distribution, NoiseLevel
 
 SHAPE_OPTIONS = [50_000_000, 200_000_000]
 SHAPE_SEED = 0
@@ -86,17 +86,21 @@ def _bf16_ratio(exponent_ratio: float) -> float:
 # Each case: (name, distribution, max_total_bf16_ratio, weight)
 DIST_EMPIRICAL_CLEAN = Distribution(DistType.EMPIRICAL)
 DIST_EMPIRICAL_MEDIUM = Distribution(
-    DistType.EMPIRICAL, noise_level=NoiseLevel.MEDIUM
+    DistType.EMPIRICAL,
+    noise_level=NoiseLevel.MEDIUM,
 )
 DIST_EMPIRICAL_HIGH = Distribution(
-    DistType.EMPIRICAL, noise_level=NoiseLevel.HIGH
+    DistType.EMPIRICAL,
+    noise_level=NoiseLevel.HIGH,
 )
 DIST_GAUSSIAN_CLEAN = Distribution(DistType.GAUSSIAN)
 DIST_GAUSSIAN_MEDIUM = Distribution(
-    DistType.GAUSSIAN, noise_level=NoiseLevel.MEDIUM
+    DistType.GAUSSIAN,
+    noise_level=NoiseLevel.MEDIUM,
 )
 DIST_GAUSSIAN_HIGH = Distribution(
-    DistType.GAUSSIAN, noise_level=NoiseLevel.HIGH
+    DistType.GAUSSIAN,
+    noise_level=NoiseLevel.HIGH,
 )
 DIST_LAPLACE_CLEAN = Distribution(DistType.LAPLACE)
 

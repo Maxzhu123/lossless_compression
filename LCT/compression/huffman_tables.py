@@ -9,7 +9,7 @@ from .probabilities import (
     gaussian_probabilities,
     laplace_probabilities,
 )
-from .format import DistType, Distribution
+from ..comp_format import DistType, Distribution
 
 FIRST_BITS = 10
 FIRST_MASK = (1 << FIRST_BITS) - 1

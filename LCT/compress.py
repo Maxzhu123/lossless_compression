@@ -2,9 +2,15 @@
 from typing import TYPE_CHECKING
 import torch
 
-from .compression.format import StorageLayout, Distribution
+from .comp_format import Distribution, StorageLayout
 from .codec.runtime import compress_dense, decode_dense
-from .pointwise import ADD, MULTIPLY, SCALAR_MUL_ADD, pointwise_compressed_dense, pointwise_scale_add_compressed
+from .codec.pointwise import (
+    ADD,
+    MULTIPLY,
+    SCALAR_MUL_ADD,
+    pointwise_compressed_dense,
+    pointwise_scale_add_compressed,
+)
 from .tensor_buffer import TensorBuffer
 
 if TYPE_CHECKING:

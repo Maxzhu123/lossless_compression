@@ -4,9 +4,9 @@ import statistics
 
 import torch
 
-from LCT.compression.format import DistType, Distribution
+from LCT.comp_format import DistType, Distribution
 from LCT.compress import compress, decompress
-from LCT.pointwise import pointwise_compressed_dense, POINTWISE_OPS
+from LCT.codec.pointwise import pointwise_compressed_dense, POINTWISE_OPS
 from LCT.tensor_buffer import Allocation, TensorBuffer
 
 
@@ -74,7 +74,9 @@ def _benchmark(n: int, operation) -> tuple[float, float]:
     other = torch.randn_like(source)
     buffer = _buffer(source.numel())
     output_buffer = _buffer(source.numel())
-    encoded = compress(source, Distribution(DistType.GAUSSIAN), buffer)
+    encoded = compress(
+        source, Distribution(DistType.GAUSSIAN), buffer,
+    )
     restored = decompress(encoded)
     alpha = torch.tensor([1.0], device="cuda", dtype=torch.float32)
     op_kwargs = {} if operation.name != "scalar_mul_add" else {"alpha": alpha}

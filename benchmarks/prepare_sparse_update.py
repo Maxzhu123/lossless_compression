@@ -13,7 +13,7 @@ import statistics
 
 import torch
 
-from LCT.compression.format import DistType, Distribution
+from LCT.comp_format import DistType, Distribution
 from LCT.compress import (
     compress,
     compA_add_B,

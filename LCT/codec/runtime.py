@@ -5,7 +5,7 @@ import torch
 import triton
 
 from ..comp_tensor import CompressedTensor
-from ..compression.format import NoiseLevel, DistType, StorageLayout, Distribution
+from ..comp_format import NoiseLevel, DistType, StorageLayout, Distribution
 from ..compression.huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
 from ..tensor_buffer import TensorBuffer
 from ..kernels.main_kernels import (
@@ -294,7 +294,8 @@ def compress_dense(
     if allow_raw and minimum_bytes > logical_numel * data.element_size():
         return CompressedTensor(
             source, logical_numel, buffer=buffer,
-            distribution=distribution, shape=shape, layout=StorageLayout.RAW,
+            distribution=distribution, shape=shape,
+            layout=StorageLayout.RAW,
         )
     sign_mantissa = torch.empty(
         storage_numel, dtype=torch.uint8, device=source.device
@@ -304,7 +305,9 @@ def compress_dense(
         distribution, buffer, shape, precomputed=False,
         logical_numel=logical_numel,
     )
-    return replace(result, shape=shape, layout=StorageLayout.COMPRESSED)
+    return replace(
+        result, shape=shape, layout=StorageLayout.COMPRESSED,
+    )
 
 
 def decode_dense(data: CompressedTensor) -> torch.Tensor:

@@ -3,7 +3,7 @@ from dataclasses import dataclass, field, fields
 import math
 import torch
 
-from .compression.format import StorageLayout, Distribution
+from .comp_format import Distribution, StorageLayout
 
 if TYPE_CHECKING:
     from .tensor_buffer import TensorBuffer

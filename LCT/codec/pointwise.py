@@ -4,27 +4,27 @@ from dataclasses import replace, dataclass
 import torch
 import triton
 
-from .comp_tensor import CompressedTensor
-from .compression.format import StorageLayout
-from .compression.huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
-from .codec.runtime import compress_components, compress_dense, decode_dense, geometry
-from .kernels.main_kernels import _shift_decoding_table_kernel
-from .kernels.pointwise import (
+from ..comp_tensor import CompressedTensor
+from ..comp_format import StorageLayout
+from ..compression.huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
+from .runtime import compress_components, compress_dense, decode_dense, geometry
+from ..kernels.main_kernels import _shift_decoding_table_kernel
+from ..kernels.pointwise import (
     COMPRESSED_OUTPUT,
     DENSE_OUTPUT,
     pointwise_compressed_dense_fallback_kernel,
     pointwise_compressed_dense_kernel,
     add_op, multiply_op
 )
-from .kernels.pointwise_scalar import (
+from ..kernels.pointwise_scalar import (
     pointwise_scalar_mul_add_dense_fallback_kernel,
     pointwise_scalar_mul_add_dense_kernel,
 )
-from .kernels.pointwise_scalar_dual import (
+from ..kernels.pointwise_scalar_dual import (
     _prepare_dual_tables_and_maps_kernel,
     pointwise_scalar_mul_add_compressed_compressed_mapped_kernel,
 )
-from .tensor_buffer import TensorBuffer
+from ..tensor_buffer import TensorBuffer
 
 
 def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
@@ -282,7 +282,10 @@ def pointwise_scale_add_compressed(
     passes) for blocked operands with the same geometry, including both
     private and buffered fallback storage.
     """
-    same_layout = data.layout == StorageLayout.COMPRESSED and other.layout == StorageLayout.COMPRESSED
+    same_layout = (
+        data.layout == StorageLayout.COMPRESSED
+        and other.layout == StorageLayout.COMPRESSED
+    )
     same_buffering = (data.fallback_descriptor is None) == (other.fallback_descriptor is None)
     # The two-compressed path requires both operands to use the same fallback
     # storage mode; do not silently fall back to a mixed-buffer dense path.
