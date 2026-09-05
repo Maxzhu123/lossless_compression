@@ -99,14 +99,20 @@ def activation_distribution(
     num_batches: int,
     bin_width: float = BIN_WIDTH,
     limit: float = LIMIT,
-) -> tuple[dict[str, Tensor], Tensor, dict[str, tuple[Tensor, Tensor]]]:
-    """Aggregate histograms for semantic activation points in Nemotron."""
+) -> tuple[
+    dict[str, Tensor],
+    Tensor,
+    dict[str, tuple[Tensor, Tensor]],
+    dict[str, Tensor],
+]:
+    """Aggregate histograms and exact-zero counts for semantic activations."""
     if num_batches <= 0:
         raise ValueError("num_batches must be positive")
     if not categories:
         raise ValueError("categories must not be empty")
 
     counts: dict[str, Tensor | None] = {label: None for label in categories}
+    zero_counts: dict[str, Tensor | None] = {label: None for label in categories}
     minima: dict[str, Tensor | None] = {label: None for label in categories}
     maxima: dict[str, Tensor | None] = {label: None for label in categories}
     edges: Tensor | None = None
@@ -143,10 +149,16 @@ def activation_distribution(
             bin_width=bin_width,
             limit=limit,
         )
+        batch_zero_count = tensor.eq(0).sum(dtype=torch.int64)
         counts[label] = (
             batch_counts
             if counts[label] is None
             else counts[label] + batch_counts
+        )
+        zero_counts[label] = (
+            batch_zero_count
+            if zero_counts[label] is None
+            else zero_counts[label] + batch_zero_count
         )
         minima[label] = (
             batch_minimum
@@ -207,18 +219,22 @@ def activation_distribution(
     if (
         edges is None
         or any(value is None for value in counts.values())
+        or any(value is None for value in zero_counts.values())
         or any(value is None for value in minima.values())
         or any(value is None for value in maxima.values())
     ):
         raise RuntimeError("One or more activation hooks did not capture any outputs")
 
     histograms = {label: value for label, value in counts.items() if value is not None}
+    exact_zero_counts = {
+        label: value for label, value in zero_counts.items() if value is not None
+    }
     extrema = {
         label: (minima[label], maxima[label])
         for label in categories
         if minima[label] is not None and maxima[label] is not None
     }
-    return histograms, edges, extrema
+    return histograms, edges, extrema, exact_zero_counts
 
 
 def save_activation_results(
@@ -226,6 +242,7 @@ def save_activation_results(
     histograms: Mapping[str, Tensor],
     edges: Tensor,
     extrema: Mapping[str, tuple[Tensor, Tensor]],
+    zero_counts: Mapping[str, Tensor],
     categories: Mapping[str, ActivationCategory],
     *,
     model_name: str,
@@ -235,8 +252,11 @@ def save_activation_results(
     bin_width: float,
     limit: float,
 ) -> None:
-    """Save activation histograms and run metadata as CPU tensors."""
+    """Save activation histograms, exact-zero counts, and run metadata."""
+    if set(zero_counts) != set(histograms):
+        raise ValueError("zero_counts and histograms must have matching labels")
     result = {
+        "format_version": 3,
         "model_name": model_name,
         "num_batches": num_batches,
         "sequence_length": sequence_length,
@@ -254,6 +274,10 @@ def save_activation_results(
         "histograms": {
             label: counts.detach().cpu()
             for label, counts in histograms.items()
+        },
+        "zero_counts": {
+            label: count.detach().cpu()
+            for label, count in zero_counts.items()
         },
         "edges": edges.detach().cpu(),
         "extrema": {
@@ -313,7 +337,7 @@ def main() -> None:
         sequences_per_batch=SEQUENCES_PER_BATCH,
         device=device,
     )
-    histograms, edges, extrema = activation_distribution(
+    histograms, edges, extrema, zero_counts = activation_distribution(
         model,
         batches,
         ACTIVATION_CATEGORIES,
@@ -322,15 +346,17 @@ def main() -> None:
     for label, (minimum, maximum) in extrema.items():
         counts = histograms[label]
         overflow_fraction = float((counts[0] + counts[-1]) / counts.sum())
+        zero_fraction = float(zero_counts[label] / counts.sum())
         print(
             f"{label}: min={minimum.item():.6g}, max={maximum.item():.6g}, "
-            f"outside fit range={overflow_fraction:.3%}"
+            f"outside fit range={overflow_fraction:.3%}, exact zeros={zero_fraction:.3%}"
         )
     save_activation_results(
         RESULTS_PATH,
         histograms,
         edges,
         extrema,
+        zero_counts,
         ACTIVATION_CATEGORIES,
         model_name=MODEL_NAME,
         num_batches=NUM_BATCHES,
