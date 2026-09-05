@@ -6,7 +6,7 @@ from cprint import c_print
 
 from LCT.tensor_buffer import TensorBuffer, visualize_buffer
 from sparse_utils import MyCompressed, SparseSGDM
-from mlps import FFN
+from mlps import FFN, RMSNorm
 from dist_configs import weight_dist
 
 COMPRESSED = True
@@ -31,6 +31,7 @@ class FFNLayer(nn.Module):
             self.W2 = W2
 
     def forward(self, x, buffer:TensorBuffer):
+        x = RMSNorm.apply(x, None, buffer, COMPRESSED)
         out = FFN.apply(x, self.W1, self.W2, buffer, COMPRESSED)
         return out
 
@@ -47,7 +48,7 @@ class Model(nn.Module):
 
     def forward(self, x, buffer: TensorBuffer):
         for layer in self.layers:
-            x = x + layer(F.rms_norm(x, normalized_shape=(x.shape[-1],)), buffer=buffer)
+            x = layer(x, buffer=buffer)
         return x
 
     def sparse_parameters(self):

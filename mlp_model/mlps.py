@@ -10,6 +10,34 @@ if TYPE_CHECKING:
     from LCT.tensor_buffer import TensorBuffer
     from torch import Tensor
 
+
+class RMSNorm(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, eps=None, buffer=None, compressed=False):
+        if eps is None:
+            eps = torch.finfo(x.dtype).eps
+
+        y, rstd = torch.ops.aten._fused_rms_norm.default(
+            x, [x.shape[-1]], None, eps,
+        )
+
+        if compressed:
+            x = MyCompressed(x, buffer=buffer, dist=act_dist)
+        ctx.save_for_backward(x, rstd)
+        ctx.compressed = compressed
+        return y
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, rstd = ctx.saved_tensors
+        if ctx.compressed:
+            x = x.decompress_free()
+        grad_x, grad_weight = torch.ops.aten._fused_rms_norm_backward.default(
+            grad_output, x, [x.shape[-1]], rstd, None, [True, False]
+        )
+        return grad_x, None, None, None
+
+
 class FFN(Function):
     """Dense baseline autograd FFN for comparison.
 
@@ -39,7 +67,6 @@ class FFN(Function):
         x, W1, W2, h = ctx.saved_tensors
 
         if ctx.compressed:
-            h = cast(MyCompressed, h)
             h = h.decompress_free()
 
         grad_z = grad_output @ W2

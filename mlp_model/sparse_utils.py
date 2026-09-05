@@ -62,6 +62,11 @@ class MyCompressed(Tensor):
     def dense_nbytes(self):
         return math.prod(self.x.shape) * 2 # bfloat16 is 2 bytes
 
+    @property
+    def layout(self):
+        """Return the storage layout of this compressed tensor."""
+        return "LCT compressed"
+
     def __repr__(self):
         return f"MySparse({self.x})"
 

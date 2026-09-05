@@ -30,16 +30,6 @@ class CompressedTensor:
     shape: tuple[int, ...] = ()  # Original tensor shape.
     layout: StorageLayout = StorageLayout.RAW
 
-    @property
-    def logical_numel(self) -> int:
-        """Return the number of elements exposed by the logical tensor shape."""
-        return math.prod(self.shape)
-
-    @property
-    def storage_numel(self) -> int:
-        """Return the element count represented by compressed storage."""
-        return self.size
-
     def memory_size(self) -> int:
         """Return GPU allocation bytes owned by one compressed tensor.
         """
@@ -63,7 +53,6 @@ class CompressedTensor:
             total += int(self.fallback_descriptor[1].item())
         return total
 
-
     def free(self) -> None:
         """Release this tensor's fallback allocation, if buffer-backed."""
         if self.fallback_descriptor is None or self.buffer is None:
@@ -71,3 +60,13 @@ class CompressedTensor:
         from .tensor_buffer import Allocation
 
         self.buffer.free(Allocation(self.fallback_descriptor, self.buffer))
+
+    @property
+    def logical_numel(self) -> int:
+        """Return the number of elements exposed by the logical tensor shape."""
+        return math.prod(self.shape)
+
+    @property
+    def storage_numel(self) -> int:
+        """Return the element count represented by compressed storage."""
+        return self.size
