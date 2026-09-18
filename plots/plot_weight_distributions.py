@@ -53,8 +53,43 @@ def shared_limit(edges, groups, coverage):
     return limit
 
 
+def smooth_counts(counts, edges, sigma_bins, *, zero_count=0, zero_bin=None,
+                  minimum=None, maximum=None):
+    """Gaussian smoothing of histogram mass, preserving exact zeros separately."""
+    values = counts.astype(np.float64, copy=True)
+    if not np.isfinite(sigma_bins) or sigma_bins < 0:
+        raise ValueError('smoothing_bins must be finite and nonnegative')
+    if sigma_bins == 0:
+        return values
+    if zero_count:
+        if zero_bin is None or values[zero_bin] < zero_count:
+            raise ValueError('Exact-zero count does not match the zero bin')
+        values[zero_bin] -= zero_count
+    total = values.sum()
+    radius = min(int(math.ceil(4*sigma_bins)), (len(values)-1)//2)
+    offsets = np.arange(-radius, radius+1)
+    kernel = np.exp(-0.5*(offsets/sigma_bins)**2)
+    kernel /= kernel.sum()
+    smoothed = np.convolve(values, kernel, mode='same')
+    # Restrict smoothing to observed support; ReLU activations stay nonnegative.
+    centers = (edges[:-1]+edges[1:])/2
+    if minimum is not None:
+        smoothed[centers < minimum] = 0
+    if maximum is not None:
+        smoothed[centers > maximum] = 0
+    remaining = smoothed.sum()
+    if remaining:
+        smoothed *= total/remaining
+    elif total:
+        smoothed = values  # E.g. a constant value narrower than one bin.
+    if zero_count:
+        smoothed[zero_bin] += zero_count
+    assert np.isclose(smoothed.sum(), counts.sum())
+    return smoothed
+
+
 def plot_distributions(path, output, min_elements=500_000_000, coverage=0.999999,
-                       *, group_kind='weight', value_label='Weight value'):
+                       *, group_kind='weight', value_label='Weight value', smoothing_bins=3.0):
     if not 0 < coverage <= 1:
         raise ValueError('coverage must be in (0,1]')
     data, edges, groups = load_groups(path, min_elements, group_kind)
@@ -63,15 +98,25 @@ def plot_distributions(path, output, min_elements=500_000_000, coverage=0.999999
     centers = (edges[:-1]+edges[1:])/2
     visible = (edges[:-1] >= -limit) & (edges[1:] <= limit)
     first, last = np.flatnonzero(visible)[[0, -1]]
-    densities = [counts[1:-1]/(total*widths) for _, counts, total in groups]
-    positive = np.concatenate([d[visible & (d > 0)] for d in densities])
+    zero_bin = int(torch.floor(torch.tensor(data['limit'], dtype=torch.float32)/data['bin_width']))
+    densities = []
+    for label, counts, total in groups:
+        minimum, maximum = (float(v) for v in data['extrema'][label])
+        smoothed = smooth_counts(counts[1:-1], edges, smoothing_bins,
+                                 zero_count=int(data.get('zero_counts', {}).get(label, 0)),
+                                 zero_bin=zero_bin, minimum=minimum, maximum=maximum)
+        densities.append(smoothed/(total*widths))
+    # Keep the original histogram's display scale: smoothing should not extend
+    # the log axis with tiny kernel contributions beyond the observed resolution.
+    raw_densities = [counts[1:-1]/(total*widths) for _, counts, total in groups]
+    positive = np.concatenate([d[visible & (d > 0)] for d in raw_densities])
     ymin = 10 ** math.floor(math.log10(float(positive.min())))
     ymax = 10 ** math.ceil(math.log10(float(positive.max())))
     columns, rows = 2, math.ceil(len(groups)/2)
     summary = {'source': str(path.resolve()), 'model_name': data['model_name'],
                'selection': f'group count > {min_elements}', 'normalization': 'count / (all group values * bin width)',
                'xlim': [-limit, limit], 'coverage_target': coverage,
-               'y_scale': 'logarithmic', 'groups': []}
+               'y_scale': 'logarithmic', 'smoothing_sigma_bins': smoothing_bins, 'groups': []}
     output.parent.mkdir(parents=True, exist_ok=True)
     with plot_style(wide=True, font_scale=1.1,
                     overrides={'figure.figsize': (8, 2.3*rows+0.4), 'axes.grid': False}):
@@ -79,9 +124,12 @@ def plot_distributions(path, output, min_elements=500_000_000, coverage=0.999999
         for index, ((label, counts, total), density) in enumerate(zip(groups, densities)):
             ax = axes.flat[index]
             color = COLORS[index % len(COLORS)]
-            # Zero-count bins remain gaps on the log axis; do not add pseudocounts.
+            # Smoothing redistributes observed mass; there are no pseudocounts.
             values = np.where(density > 0, density, np.nan)
-            ax.stairs(values[first:last+1], edges[first:last+2], color=color, linewidth=1.5)
+            if smoothing_bins:
+                ax.plot(centers[first:last+1], values[first:last+1], color=color, linewidth=1.5)
+            else:
+                ax.stairs(values[first:last+1], edges[first:last+2], color=color, linewidth=1.5)
             ax.set_yscale('log')
             ax.set_ylim(ymin, ymax)
             ax.set_xlim(-limit, limit)
@@ -118,10 +166,11 @@ def main():
     output = Path(__file__).resolve().parent / 'plots/weight_distributions'
     min_elements = 500_000_000
     coverage = 0.999999
+    smoothing_bins = 3.0  # Gaussian kernel standard deviation; 0 shows raw bins.
 
     if not results.exists():
         raise FileNotFoundError(f'No saved histograms at {results}; run python plots/collect_weight_histograms.py first')
-    plot_distributions(results, output, min_elements, coverage)
+    plot_distributions(results, output, min_elements, coverage, smoothing_bins=smoothing_bins)
 
 
 if __name__ == '__main__':

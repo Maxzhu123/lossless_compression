@@ -85,7 +85,13 @@ aggregated over layers using the grouping in `llm_analysis/weight_distribution.p
 It uses a density histogram, shared axes, and a logarithmic density scale.
 The common horizontal range contains at least 99.9999% of every selected group;
 normalization still includes all values, including those outside the view.
-Zero-count bins are left empty rather than replaced with pseudocounts.
+Raw counts remain unchanged. For display, a Gaussian kernel smooths histogram
+mass (standard deviation 3 bins for weights, 5 bins for activations). The curves
+are renormalized to preserve mass; exact-zero counts are removed before
+smoothing and restored afterward. Smoothing respects observed support, including
+nonnegative activations, and introduces no pseudocounts. Set `smoothing_bins=0`
+in either script to display the original histogram steps. The log-axis limits
+are retained from the unsmoothed data.
 
 The default source is `artefacts/weight_distribution_results.pt`, falling back to
 `artefacts/weight_distribution_large_results.pt` if the full results are absent.

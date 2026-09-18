@@ -15,9 +15,11 @@ def main():
     output = Path(__file__).resolve().parent / 'plots/activation_distributions'
     min_elements = 500_000_000  # Aggregated observations over all layers and batches.
     coverage = 0.999999
+    smoothing_bins = 5.0  # Gaussian kernel standard deviation; preserves exact-zero mass.
     return plot_distributions(
         results, output, min_elements, coverage,
         group_kind='activation', value_label='Activation value',
+        smoothing_bins=smoothing_bins,
     )
 
 
