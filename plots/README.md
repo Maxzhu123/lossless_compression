@@ -106,3 +106,22 @@ Suggested paper caption: *Weight distributions of the six Nemotron-H-8B
 parameter groups containing more than 500M values. Histograms aggregate weights
 across layers and use a shared range covering at least 99.9999% of each group.
 Densities are normalized by the full group size and shown on a logarithmic scale.*
+
+## Weight exponents
+
+Collect exact eight-bit BF16 exponent-field counts on the CPU, then plot them:
+
+```sh
+python -m plots.collect_weight_histograms --exponents-only
+python -m plots.plot_weight_exponents
+```
+
+The counts are saved separately in
+`artefacts/weight_exponent_distribution_results.pt`. The plot exports
+`weight_exponent_distributions.pdf`, `.png`, and `.json`, with the same six
+groups, ordering, and colors as the raw-weight figure. It uses probabilities
+on a shared linear scale. Exponents below -20 are combined in a separate
+hatched bar; all weights remain in the normalization. The JSON records full
+exponent entropy, the number of most-frequent symbols needed to reach 99%,
+exact-zero/subnormal fractions, and the displayed tail mass. The 99% symbol
+set need not be contiguous. Collection and plotting never use CUDA.
