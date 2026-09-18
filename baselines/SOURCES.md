@@ -27,6 +27,12 @@ are included, rather than upstream demos, datasets and model-loading machinery.
   current stream through `ctypes` instead of requiring CuPy. Buffer guard bytes
   count towards retained memory, not logical payload. CPU reference decoding and
   tensor-level wrappers are local additions, not upstream APIs.
+- DFloat11 defaults to the local `_dfloat11_encode.c` CPU encoder, loaded through
+  `_dfloat11_encoder.py`. It computes the exponent histogram without sorting or
+  Python lists and packs Huffman codes, sign/mantissa bytes, five-bit gaps and
+  block positions in C. It uses the upstream Huffman table builder and produces
+  byte-identical payloads, including EOF padding. The original Python encoder is
+  available as `DFloat11(encoder="reference")`; the CUDA decoder is unchanged.
 - ZipNN Python imports are relative, including the locally built native module.
   `build.py` builds only the copied native sources, with no submodule downloads or
   package installation. C/FSE sources are unchanged. The wrapper protects inputs

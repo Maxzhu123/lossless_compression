@@ -2,6 +2,7 @@
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
+from statistics import mean, pstdev
 import sys
 import time
 
@@ -17,6 +18,8 @@ class Result:
     storage_ratio: float
     compress_ms: float
     decompress_ms: float
+    compress_std_ms: float = 0.0
+    decompress_std_ms: float = 0.0
 
 
 def benchmark(codec, tensor, *, warmup=1, iterations=5):
@@ -44,7 +47,7 @@ def benchmark(codec, tensor, *, warmup=1, iterations=5):
             or restored.device != tensor.device
             or not torch.equal(expected, restored.contiguous().reshape(-1).view(torch.int16))):
         raise AssertionError("baseline failed bitwise round-trip verification")
-    del original, restored
+    del original, restored, expected
 
     for _ in range(warmup):
         temporary = codec.compress(tensor)
@@ -52,24 +55,24 @@ def benchmark(codec, tensor, *, warmup=1, iterations=5):
         sync()
         del temporary, output
 
-    compress_seconds = decompress_seconds = 0.0
+    compress_ms, decompress_ms = [], []
     for _ in range(iterations):
         sync()
         start = time.perf_counter()
         temporary = codec.compress(tensor)
         sync()
-        compress_seconds += time.perf_counter() - start
+        compress_ms.append((time.perf_counter() - start) * 1000)
         del temporary
         sync()
         start = time.perf_counter()
         output = codec.decompress(encoded)
         sync()
-        decompress_seconds += time.perf_counter() - start
+        decompress_ms.append((time.perf_counter() - start) * 1000)
         del output
     return Result(encoded.method, tensor.nbytes, encoded.compressed_bytes,
                   encoded.memory_size(), encoded.storage_ratio,
-                  compress_seconds * 1000 / iterations,
-                  decompress_seconds * 1000 / iterations)
+                  mean(compress_ms), mean(decompress_ms),
+                  pstdev(compress_ms), pstdev(decompress_ms))
 
 
 def main():

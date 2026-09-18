@@ -1,4 +1,4 @@
-"""Upstream DFloat11 encoding and CUDA decoding, without model-loading deps."""
+"""DFloat11-compatible native/reference encoding and upstream CUDA decoding."""
 from dataclasses import dataclass
 
 import torch
@@ -18,6 +18,11 @@ class Payload:
 
 
 class DFloat11:
+    def __init__(self, *, encoder="native"):
+        if encoder not in {"native", "reference"}:
+            raise ValueError("encoder must be native or reference")
+        self.encoder = encoder
+
     def compress(self, tensor):
         """Fit and encode on CPU, then stage buffers to the input device.
 
@@ -29,26 +34,33 @@ class DFloat11:
             return CompressedTensor("dfloat11", None, tuple(tensor.shape), tensor.device, 0, 0)
         if flat.numel() > 2**31 - 1:
             raise ValueError("DFloat11 CUDA decoder uses signed 32-bit element counts")
-        exponents = (flat.view(torch.int16) >> 7) & 255
-        if torch.any(exponents >= 240):
-            raise ValueError("upstream DFloat11 decoder cannot represent BF16 exponents 240..255 (including Inf/NaN)")
         from ._vendor.dfloat11.dfloat11_utils import get_codec, get_32bit_codec, get_luts, encode_weights
-        _, counter = get_codec(flat)
+        if self.encoder == "native":
+            from ._dfloat11_encoder import histogram, encode
+            counter = histogram(flat)
+        else:
+            _, counter = get_codec(flat)
+        if any(symbol >= 240 for symbol in counter):
+            raise ValueError("upstream DFloat11 decoder cannot represent BF16 exponents 240..255 (including Inf/NaN)")
         codec, _, table = get_32bit_codec(counter)
         luts = get_luts(table)
         if luts.shape[0] > 17:
             raise ValueError("DFloat11 decoder supports at most 16 lookup tables plus lengths")
-        encoded, sm, positions, gaps, _ = encode_weights([flat], codec, 8, 512)
-        n_bytes = encoded.numel()
+        if self.encoder == "native":
+            encoded, sm, positions, gaps, n_bytes = encode(flat, codec, counter)
+        else:
+            encoded, sm, positions, gaps, _ = encode_weights([flat], codec, 8, 512)
+            n_bytes = encoded.numel()
         if n_bytes > 2**31 - 1:
             raise ValueError("DFloat11 CUDA decoder uses signed 32-bit byte counts")
         sizes = positions.to(torch.int64).diff()
         shared_bytes = 512 * 4 + 4 + int(sizes.max()) * 2
-        size = sum(t.nbytes for t in (luts, encoded, sm, positions, gaps))
         # Upstream reads one gap byte beyond the final packed entry, and uses
         # lookahead bytes at the end of the code stream. Supply guard storage.
-        encoded = torch.cat((encoded, torch.zeros(12, dtype=torch.uint8)))
-        gaps = torch.cat((gaps, torch.zeros(1, dtype=torch.uint8)))
+        if self.encoder == "reference":
+            encoded = torch.cat((encoded, torch.zeros(12, dtype=torch.uint8)))
+            gaps = torch.cat((gaps, torch.zeros(1, dtype=torch.uint8)))
+        size = sum(t.nbytes for t in (luts, encoded, sm, positions, gaps)) - 13
         buffers = [t.to(tensor.device) for t in (luts, encoded, sm, positions, gaps)]
         return CompressedTensor("dfloat11", Payload(*buffers, n_bytes, shared_bytes),
                                 tuple(tensor.shape), tensor.device, size, tensor.nbytes)

@@ -1,0 +1,190 @@
+"""Run with python -m experiments.bench_lct_operations; edit settings below."""
+import csv
+from pathlib import Path
+from statistics import mean, pstdev
+import sys
+import time
+
+import torch
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from benchmarks.prepare import make_empirical, make_gaussian, make_laplace
+from LCT.comp_format import DistType, Distribution
+from LCT.comp_tensor import CompressedTensor
+from LCT.compress import (
+    compress, decompress, compA_add_B, compA_mul_B,
+    a_compA_add_B, a_compA_add_compB,
+)
+from LCT.tensor_buffer import TensorBuffer
+
+
+def release(result):
+    if isinstance(result, CompressedTensor):
+        result.free()
+
+
+def check_result(result, reference, shape):
+    """Check every output bit; construct dense references in small chunks."""
+    actual = decompress(result) if isinstance(result, CompressedTensor) else result
+    assert actual.shape == shape and actual.dtype == torch.bfloat16
+    for start in range(0, actual.numel(), 1024 ** 2):
+        stop = min(start + 1024 ** 2, actual.numel())
+        expected = reference(start, stop)
+        assert torch.equal(actual[start:stop].view(torch.int16), expected.view(torch.int16)), (
+            f"Bitwise mismatch in elements {start}:{stop}"
+        )
+
+
+def measure(functions, reference, shape, warmup, iterations):
+    for _, function in functions:
+        result = function()  # First-use compilation and validation are not timed.
+        try:
+            check_result(result, reference, shape)
+        finally:
+            release(result)
+            del result
+        for _ in range(warmup):
+            result = function()
+            torch.cuda.synchronize()
+            release(result)
+            del result
+
+    times = {name: [] for name, _ in functions}
+    for iteration in range(iterations):
+        # Alternate paired execution order to reduce temperature/clock bias.
+        ordered = functions if iteration % 2 == 0 else functions[::-1]
+        for name, function in ordered:
+            torch.cuda.synchronize()
+            start = time.perf_counter()
+            result = function()
+            torch.cuda.synchronize()
+            times[name].append((time.perf_counter() - start) * 1000)
+            release(result)  # Buffer release is outside timing.
+            del result
+    return {name: (mean(samples), pstdev(samples)) for name, samples in times.items()}
+
+
+@torch.no_grad()
+def main():
+    # Edit these settings before running. Each dense operand has tensor_bytes.
+    tensor_bytes = 1024 ** 3  # 1 GiB per BF16 operand.
+    family = DistType.GAUSSIAN  # GAUSSIAN, EMPIRICAL, LAPLACE, or GAMMA
+    warmup, iterations = 3, 50
+    seed = 0
+    gaussian_std = 2.0
+    empirical_scale = 0.5
+    laplace_scale = 1.5
+    gamma_shape, gamma_scale = 0.82, 2.43
+    scale = -0.5
+
+    if tensor_bytes <= 0 or tensor_bytes % 2:
+        raise ValueError("tensor_bytes must be positive and divisible by 2 for BF16")
+    if warmup < 0 or iterations < 1:
+        raise ValueError("warmup must be nonnegative and iterations positive")
+    if not torch.cuda.is_available():
+        raise RuntimeError("LCT requires CUDA")
+    elements = tensor_bytes // 2
+    parameters = {DistType.GAUSSIAN: gaussian_std, DistType.EMPIRICAL: empirical_scale,
+                  DistType.LAPLACE: laplace_scale, DistType.GAMMA: 1.0}
+    distribution = Distribution(family, param=parameters[family])
+
+    def make_data(data_seed):
+        if family == DistType.GAUSSIAN:
+            return make_gaussian(elements, std=distribution.param, seed=data_seed)
+        if family == DistType.EMPIRICAL:
+            return make_empirical(elements, scale=distribution.param, seed=data_seed)
+        if family == DistType.LAPLACE:
+            return make_laplace(elements, scale=distribution.param, seed=data_seed)
+        with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
+            torch.cuda.manual_seed(data_seed)
+            gamma = torch.distributions.Gamma(torch.tensor(gamma_shape, device="cuda"),
+                                              torch.tensor(1 / gamma_scale, device="cuda"))
+            return gamma.sample((elements,)).to(torch.bfloat16)
+
+    print(f"GPU: {torch.cuda.get_device_name()} | PyTorch: {torch.__version__} | CUDA: {torch.version.cuda}")
+    print(f"Each operand: {tensor_bytes:,} bytes, {elements:,} BF16 elements | {distribution}")
+    print(f"Seeds: {seed}, {seed + 1} | alpha: {scale} | warmup: {warmup} | iterations: {iterations}")
+    print("Synchronized wall-clock timing, including per-call allocations and output encoding.")
+    print("Input preparation, JIT/autotuning, validation and buffer release are excluded.")
+    print("Compressed outputs reuse the input distribution's codebook family and geometry.")
+    print("Naive baselines: decompress -> eager PyTorch -> recompress for compressed output.")
+    print("Multiply-add uses FP32 arithmetic followed by one BF16 cast, matching the fused reference.")
+    print("Generating two operands and preparing compressed inputs...", flush=True)
+    a, b = make_data(seed), make_data(seed + 1)
+    alpha = torch.tensor([scale], device="cuda", dtype=torch.float32)
+    capacity = (elements + 64 * 1024 ** 2 + 15) // 16 * 16
+    a_buffer, b_buffer, out_buffer = [TensorBuffer(capacity, device="cuda") for _ in range(3)]
+    a_comp = compress(a, distribution, a_buffer)
+    b_comp = compress(b, distribution, b_buffer)
+    check_result(a_comp, lambda start, stop: a[start:stop], a.shape)
+    check_result(b_comp, lambda start, stop: b[start:stop], b.shape)
+    print(f"Input storage ratios: A={a_comp.memory_size() / tensor_bytes:.4f}, B={b_comp.memory_size() / tensor_bytes:.4f}", flush=True)
+
+    reference_a = lambda start, stop: a[start:stop]
+    reference_add = lambda start, stop: a[start:stop] + b[start:stop]
+    reference_mul = lambda start, stop: a[start:stop] * b[start:stop]
+    reference_scale_add = lambda start, stop: (
+        a[start:stop].float() * alpha + b[start:stop].float()
+    ).to(torch.bfloat16)
+
+    def naive(operation, dense_output, compressed_other=False):
+        left = decompress(a_comp)
+        right = decompress(b_comp) if compressed_other else b
+        result = operation(left, right)
+        if dense_output:
+            return result
+        return compress(result, distribution, out_buffer)
+
+    scale_add = lambda left, right: (left.float() * alpha + right.float()).to(torch.bfloat16)
+    cases = [
+        ("compress", "compressed", [("standalone", lambda: compress(a, distribution, out_buffer))], reference_a),
+        ("decompress", "dense", [("standalone", lambda: decompress(a_comp))], reference_a),
+    ]
+    for dense in (True, False):
+        output = "dense" if dense else "compressed"
+        kwargs = dict(dense_output=dense, buffer=out_buffer, distribution=distribution)
+        operations = [
+            ("compA_add_B", output, lambda kw=kwargs: compA_add_B(a_comp, b, **kw), reference_add),
+            ("compA_mul_B", output, lambda kw=kwargs: compA_mul_B(a_comp, b, **kw), reference_mul),
+            ("a_compA_add_B", output, lambda kw=kwargs: a_compA_add_B(a_comp, alpha, b, **kw), reference_scale_add),
+            ("a_compA_add_compB", output, lambda kw=kwargs: a_compA_add_compB(a_comp, alpha, b_comp, **kw), reference_scale_add),
+        ]
+        for (name, output_kind, fused, reference), operation in zip(
+            operations, (torch.add, torch.mul, scale_add, scale_add)
+        ):
+            baseline = lambda op=operation, d=dense, dual=name == "a_compA_add_compB": naive(op, d, dual)
+            cases.append((name, output_kind, [("fused", fused), ("naive", baseline)], reference))
+
+    size_label = f"{tensor_bytes / 1024 ** 3:g}gib"
+    output = Path(__file__).with_name("results") / f"lct_fused_vs_naive_{family.value}_{size_label}.csv"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with output.open("w", newline="") as file:
+            writer = csv.writer(file)
+            # LCT is the fused path, or standalone compress/decompress.
+            writer.writerow(("operation", "output", "lct_mean_ms", "lct_std_ms",
+                             "naive_mean_ms", "naive_std_ms", "speedup"))
+            for name, output_kind, functions, reference in cases:
+                print(f"{name} -> {output_kind}: validating and measuring...", flush=True)
+                results = measure(functions, reference, a.shape, warmup, iterations)
+                for variant, (avg, std) in results.items():
+                    print(f"  {variant}: {avg:.3f} ± {std:.3f} ms | bitwise check: PASS", flush=True)
+                lct_mean, lct_std = results.get("fused", results.get("standalone"))
+                naive_mean, naive_std = results.get("naive", ("", ""))
+                speedup = ""
+                if "fused" in results:
+                    speedup = naive_mean / lct_mean
+                    print(f"  Fused speedup: {speedup:.2f}x (naive / fused)", flush=True)
+                writer.writerow((name, output_kind, lct_mean, lct_std,
+                                 naive_mean, naive_std, speedup))
+                file.flush()
+    finally:
+        a_comp.free()
+        b_comp.free()
+    print(f"CSV: {output}")
+
+
+if __name__ == "__main__":
+    main()

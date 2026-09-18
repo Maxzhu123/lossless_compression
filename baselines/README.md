@@ -10,7 +10,8 @@ without changing `sys.path` or relying on globally installed baseline packages.
 Use the project's Python environment, with PyTorch and NumPy available.
 
 - **SplitZip:** CUDA PyTorch + Triton, already used by LCT.
-- **DFloat11:** PyTorch + NumPy. The CUDA path loads the upstream PTX using the
+- **DFloat11:** PyTorch + NumPy + a C compiler for the default native encoder
+  (the reference encoder requires no compiler). The CUDA path loads the upstream PTX using the
   NVIDIA driver via Python's `ctypes`; CuPy, nvcc and model-loading packages are
   not needed. The small `dahuffman` dependency is vendored. A compatible NVIDIA
   driver supporting PTX 8.2 is required for GPU decoding. CPU decoding is a slow
@@ -48,9 +49,13 @@ for codec in codecs:
     print(benchmark(codec, x, warmup=1, iterations=3))
 ```
 
-DFloat11's upstream encoder runs a Python loop over the tensor, so start with
-small inputs before running on large MLP matrices. Encoding includes fitting a
-Huffman table every time. It is designed for offline weight compression.
+DFloat11 uses a local compiled C encoder by default, preserving the upstream
+payload format and CUDA decoder. A C compiler (`cc`) builds the small shared
+library on first use and caches it in `baselines/__pycache__`. This build is
+outside benchmark timing. Use `DFloat11(encoder="reference")` for the original
+Python encoder. Encoding still fits a fresh Huffman table and includes CPU/GPU
+staging on every call. Report native encoder measurements as a local optimization,
+not upstream encoder performance.
 
 Each module also exposes `compress` and `decompress` functions:
 
