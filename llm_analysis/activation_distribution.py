@@ -1,3 +1,4 @@
+"""Collect activations and save CPU histogram tensors for offline plotting."""
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,8 +19,11 @@ from histogram import tensor_histogram
 
 
 MODEL_NAME = "nvidia/Nemotron-H-8B-Base-8K"
+ARTEFACTS_PATH = Path(__file__).resolve().parents[1] / "artefacts"
+MODEL_PATH = ARTEFACTS_PATH / "Nemotron-H-8B-Base-8K"
 SAMPLE_TEXT_PATH = Path(__file__).parent / "sample_text.txt"
-RESULTS_PATH = Path(__file__).parent / "activation_distribution_results.pt"
+RESULTS_PATH = ARTEFACTS_PATH / "activation_distribution_results.pt"
+RESULTS_FORMAT_VERSION = 2  # Shared histogram schema used by weight_distribution.py.
 NUM_BATCHES = 4
 SEQUENCE_LENGTH = 1024
 SEQUENCES_PER_BATCH = 1
@@ -251,19 +255,23 @@ def save_activation_results(
     sequences_per_batch: int,
     bin_width: float,
     limit: float,
+    model_dtype: str | None = None,
 ) -> None:
-    """Save activation histograms, exact-zero counts, and run metadata."""
-    if set(zero_counts) != set(histograms):
-        raise ValueError("zero_counts and histograms must have matching labels")
+    """Save the weight-compatible histogram schema plus activation-specific metadata."""
+    if any(set(values) != set(histograms) for values in (zero_counts, extrema, categories)):
+        raise ValueError("histograms, zero_counts, extrema, and categories must have matching labels")
     result = {
-        "format_version": 3,
+        "format_version": RESULTS_FORMAT_VERSION,
         "model_name": model_name,
+        "model_dtype": model_dtype,
+        "analysis_device": str(edges.device),
         "num_batches": num_batches,
         "sequence_length": sequence_length,
         "sequences_per_batch": sequences_per_batch,
         "bin_width": bin_width,
         "limit": limit,
-        "categories": {
+        "categories": list(histograms),
+        "capture_points": {
             label: {
                 "parent_type": category.parent_type.__name__,
                 "module_path": category.module_path,
@@ -321,17 +329,25 @@ def token_batches(
 
 
 def main() -> None:
+    if not (MODEL_PATH / "config.json").is_file():
+        raise FileNotFoundError(f"Local Nemotron checkpoint not found at {MODEL_PATH}")
+    if not SAMPLE_TEXT_PATH.is_file():
+        raise FileNotFoundError(
+            f"Provide sample text at {SAMPLE_TEXT_PATH} before collecting activations"
+        )
+    text = SAMPLE_TEXT_PATH.read_text(encoding="utf-8")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
     model = NemotronHForCausalLM.from_pretrained(
-        MODEL_NAME,
+        MODEL_PATH,
         dtype=dtype,
+        local_files_only=True,
     ).to(device)
 
     batches = token_batches(
         tokenizer,
-        SAMPLE_TEXT_PATH.read_text(),
+        text,
         num_batches=NUM_BATCHES,
         sequence_length=SEQUENCE_LENGTH,
         sequences_per_batch=SEQUENCES_PER_BATCH,
@@ -364,6 +380,7 @@ def main() -> None:
         sequences_per_batch=SEQUENCES_PER_BATCH,
         bin_width=BIN_WIDTH,
         limit=LIMIT,
+        model_dtype=str(dtype),
     )
     print(f"Saved activation results to {RESULTS_PATH}")
 

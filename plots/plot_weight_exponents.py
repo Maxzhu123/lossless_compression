@@ -1,6 +1,5 @@
 """Plot exact BF16 exponent probabilities for the largest Nemotron weight groups."""
 import argparse
-import json
 import math
 from pathlib import Path
 
@@ -32,7 +31,7 @@ def shortest_interval(counts, coverage=0.99):
     return min(candidates)
 
 
-def plot_exponents(results=RESULTS, output=Path(__file__).resolve().parent/'weight_exponent_distributions',
+def plot_exponents(results=RESULTS, output=Path(__file__).resolve().parent/'plots/weight_exponent_distributions',
                    min_elements=500_000_000):
     data = torch.load(results, map_location='cpu', weights_only=True)
     if data.get('format_version') != 1:
@@ -106,16 +105,15 @@ def plot_exponents(results=RESULTS, output=Path(__file__).resolve().parent/'weig
         fig.tight_layout(pad=0.7, h_pad=1.5, w_pad=1.1)
         output.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output.with_suffix('.pdf'))
-        fig.savefig(output.with_suffix('.png'), dpi=300)
         plt.close(fig)
-    output.with_suffix('.json').write_text(json.dumps(summary, indent=2)+'\n')
-    print(json.dumps(summary, indent=2))
+    print(f'Saved {output.with_suffix(".pdf")}')
+    return summary
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--results', type=Path, default=RESULTS)
-    parser.add_argument('--output', type=Path, default=Path(__file__).resolve().parent/'weight_exponent_distributions')
+    parser.add_argument('--output', type=Path, default=Path(__file__).resolve().parent/'plots/weight_exponent_distributions')
     args = parser.parse_args()
     plot_exponents(args.results, args.output)
 

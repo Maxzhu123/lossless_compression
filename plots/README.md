@@ -4,6 +4,10 @@ The shared styling and rendering helpers are copied from
 `/home/maccyz/Documents/bitsparse/plots`. Keep new plotting scripts here and
 use these helpers so the figures have a consistent appearance.
 
+Generated PDFs belong in `plots/plots/`, separate from
+the plotting code. Plotting scripts do not update `paper/figures/`. Copy finished
+PDFs there manually when they are ready for the paper.
+
 ## Shared format
 
 - Times-style serif text with STIX mathematics; base text is 12 pt, labels
@@ -44,7 +48,7 @@ def build(series):
 def save(series):
     render(
         {"encode_time.pdf": series}, build,
-        output_dir=Path(__file__).resolve().parent,
+        output_dir=Path(__file__).resolve().parent / "plots",
         show=False,
     )
 ```
@@ -68,9 +72,9 @@ are included in this directory.
 
 ## Weight distributions
 
-`plot_weight_distributions.py` exports `weight_distributions.pdf` (vector),
-`weight_distributions.png` (300 dpi), and `weight_distributions.json` (source,
-selection, counts, extrema, and displayed mass):
+`plot_weight_distributions.py` exports only `plots/plots/weight_distributions.pdf`
+(vector). Selection, counts, extrema, and displayed mass are computed from the
+saved histograms on demand and returned by `plot_distributions()` in memory:
 
 ```sh
 python -m plots.plot_weight_distributions
@@ -118,10 +122,11 @@ python -m plots.plot_weight_exponents
 
 The counts are saved separately in
 `artefacts/weight_exponent_distribution_results.pt`. The plot exports
-`weight_exponent_distributions.pdf`, `.png`, and `.json`, with the same six
+only `plots/plots/weight_exponent_distributions.pdf`, with the same six
 groups, ordering, and colors as the raw-weight figure. It uses probabilities
 on a shared linear scale. Exponents below -20 are combined in a separate
-hatched bar; all weights remain in the normalization. The JSON records full
+hatched bar; all weights remain in the normalization. `plot_exponents()` returns full
 exponent entropy, the number of most-frequent symbols needed to reach 99%,
 exact-zero/subnormal fractions, and the displayed tail mass. The 99% symbol
-set need not be contiguous. Collection and plotting never use CUDA.
+set need not be contiguous. These statistics are computed from the saved counts
+on demand and kept in memory, with no JSON plot output. Collection and plotting never use CUDA.

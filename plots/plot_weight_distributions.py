@@ -1,10 +1,9 @@
 """Paper figure of Nemotron weight groups with more than 500M parameters.
 
-Reads saved CPU histograms only. Export PDF/PNG plus a selection/provenance JSON.
+Reads saved CPU histograms and computes plot statistics on demand. Exports PDF only.
 Run from the repository root: python -m plots.plot_weight_distributions
 """
 import argparse
-import json
 import math
 from pathlib import Path
 
@@ -109,17 +108,15 @@ def plot_distributions(path, output, min_elements=500_000_000, coverage=0.999999
             axes.flat[index].set_visible(False)
         fig.tight_layout(pad=0.7, h_pad=1.5, w_pad=1.1)
         fig.savefig(output.with_suffix('.pdf'))
-        fig.savefig(output.with_suffix('.png'), dpi=300)
         plt.close(fig)
-    output.with_suffix('.json').write_text(json.dumps(summary, indent=2)+'\n')
-    print(json.dumps(summary, indent=2))
     print(f'Saved {output.with_suffix(".pdf")}')
+    return summary
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--results', type=Path)
-    parser.add_argument('--output', type=Path, default=Path(__file__).resolve().parent/'weight_distributions')
+    parser.add_argument('--output', type=Path, default=Path(__file__).resolve().parent/'plots/weight_distributions')
     parser.add_argument('--min-elements', type=int, default=500_000_000)
     parser.add_argument('--coverage', type=float, default=0.999999)
     args = parser.parse_args()
