@@ -1,5 +1,4 @@
 """Plot exact BF16 exponent probabilities for the largest Nemotron weight groups."""
-import argparse
 import math
 from pathlib import Path
 
@@ -8,12 +7,8 @@ from matplotlib.ticker import MaxNLocator
 import numpy as np
 import torch
 
-if __package__:
-    from .plot_lib import plot_style
-    from .plot_weight_distributions import COLORS
-else:
-    from plot_lib import plot_style
-    from plot_weight_distributions import COLORS
+from plot_lib import plot_style
+from plot_weight_distributions import COLORS
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS = ROOT / 'artefacts/weight_exponent_distribution_results.pt'
@@ -32,7 +27,7 @@ def shortest_interval(counts, coverage=0.99):
 
 
 def plot_exponents(results=RESULTS, output=Path(__file__).resolve().parent/'plots/weight_exponent_distributions',
-                   min_elements=500_000_000):
+                   min_elements=500_000_000, *, group_kind='weights'):
     data = torch.load(results, map_location='cpu', weights_only=True)
     if data.get('format_version') != 1:
         raise ValueError('Expected exponent histogram format 1')
@@ -49,11 +44,11 @@ def plot_exponents(results=RESULTS, output=Path(__file__).resolve().parent/'plot
         normal = counts[1:255]
         normal_total = int(normal.sum())
         if normal_total == 0:
-            raise ValueError(f'{label} has no normal weights')
+            raise ValueError(f'{label} has no normal {group_kind}')
         upper = max(upper, int(np.flatnonzero(normal)[-1])-126)
         groups.append((label, counts, total))
     if not groups:
-        raise ValueError('No groups exceed the parameter threshold')
+        raise ValueError('No groups exceed the element threshold')
     exponents = np.arange(-126, 128)
     normal_ticks = list(range(lower, upper+1, 5))
     tail_x = lower-5
@@ -62,7 +57,7 @@ def plot_exponents(results=RESULTS, output=Path(__file__).resolve().parent/'plot
     ymax = max(float(counts.max()/total) for _, counts, total in groups)
     ymax = math.ceil(ymax/0.05)*0.05
     summary = {'source': str(results.resolve()), 'model_name': data['model_name'],
-               'normal_exponent_xlim': [lower, upper], 'probability_denominator': 'all weights in each group',
+               'normal_exponent_xlim': [lower, upper], 'probability_denominator': f'all {group_kind} in each group',
                'left_bin': 'all exponent fields below the displayed normal range; includes field 0', 'groups': []}
     with plot_style(wide=True, font_scale=1.1,
                     overrides={'figure.figsize': (8, 2.3*rows+0.4), 'axes.grid': False}):
@@ -83,7 +78,8 @@ def plot_exponents(results=RESULTS, output=Path(__file__).resolve().parent/'plot
             ax.set_title(f'({chr(97+index)}) {label}', loc='left', fontsize=12.5, pad=10)
             if index % columns == 0:
                 ax.set_ylabel('Probability')
-            if index // columns == rows-1:
+            if index + columns >= len(groups):
+                ax.tick_params(axis='x', labelbottom=True)
                 ax.set_xlabel('Exponent (bias removed)')
             positive = probabilities[probabilities > 0]
             entropy = float(-(positive*np.log2(positive)).sum())
@@ -111,11 +107,11 @@ def plot_exponents(results=RESULTS, output=Path(__file__).resolve().parent/'plot
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--results', type=Path, default=RESULTS)
-    parser.add_argument('--output', type=Path, default=Path(__file__).resolve().parent/'plots/weight_exponent_distributions')
-    args = parser.parse_args()
-    plot_exponents(args.results, args.output)
+    # Edit these settings before running.
+    results = RESULTS
+    output = Path(__file__).resolve().parent / 'plots/weight_exponent_distributions'
+    min_elements = 500_000_000
+    plot_exponents(results, output, min_elements)
 
 
 if __name__ == '__main__':

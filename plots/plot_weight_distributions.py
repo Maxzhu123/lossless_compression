@@ -1,9 +1,8 @@
 """Paper figure of Nemotron weight groups with more than 500M parameters.
 
 Reads saved CPU histograms and computes plot statistics on demand. Exports PDF only.
-Run from the repository root: python -m plots.plot_weight_distributions
+Run from the repository root: python plots/plot_weight_distributions.py
 """
-import argparse
 import math
 from pathlib import Path
 
@@ -12,10 +11,7 @@ from matplotlib.ticker import MaxNLocator, LogLocator, NullFormatter
 import numpy as np
 import torch
 
-if __package__:
-    from .plot_lib import plot_style
-else:
-    from plot_lib import plot_style
+from plot_lib import plot_style
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RESULTS = ROOT / 'artefacts/weight_distribution_results.pt'
@@ -23,10 +19,10 @@ STREAMED_RESULTS = ROOT / 'artefacts/weight_distribution_large_results.pt'
 COLORS = ('#0072B2', '#D55E00', '#009E73', '#CC79A7', '#333333', '#56B4E9')
 
 
-def load_groups(path, min_elements):
+def load_groups(path, min_elements, group_kind='weight'):
     data = torch.load(path, map_location='cpu', weights_only=True)
     if data.get('format_version') != 2:
-        raise ValueError('Expected weight histogram format version 2')
+        raise ValueError('Expected histogram format version 2')
     edges = data['edges'].double().numpy()
     if not np.isfinite(edges).all() or not (np.diff(edges) > 0).all():
         raise ValueError('Histogram edges must be finite and increasing')
@@ -39,7 +35,7 @@ def load_groups(path, min_elements):
         if total > min_elements:
             groups.append((label, counts, total))
     if not groups:
-        raise ValueError(f'No weight groups contain more than {min_elements:,} values')
+        raise ValueError(f'No {group_kind} groups contain more than {min_elements:,} values')
     return data, edges, groups
 
 
@@ -57,14 +53,16 @@ def shared_limit(edges, groups, coverage):
     return limit
 
 
-def plot_distributions(path, output, min_elements=500_000_000, coverage=0.999999):
+def plot_distributions(path, output, min_elements=500_000_000, coverage=0.999999,
+                       *, group_kind='weight', value_label='Weight value'):
     if not 0 < coverage <= 1:
         raise ValueError('coverage must be in (0,1]')
-    data, edges, groups = load_groups(path, min_elements)
+    data, edges, groups = load_groups(path, min_elements, group_kind)
     limit = shared_limit(edges, groups, coverage)
     widths = np.diff(edges)
     centers = (edges[:-1]+edges[1:])/2
     visible = (edges[:-1] >= -limit) & (edges[1:] <= limit)
+    first, last = np.flatnonzero(visible)[[0, -1]]
     densities = [counts[1:-1]/(total*widths) for _, counts, total in groups]
     positive = np.concatenate([d[visible & (d > 0)] for d in densities])
     ymin = 10 ** math.floor(math.log10(float(positive.min())))
@@ -83,7 +81,7 @@ def plot_distributions(path, output, min_elements=500_000_000, coverage=0.999999
             color = COLORS[index % len(COLORS)]
             # Zero-count bins remain gaps on the log axis; do not add pseudocounts.
             values = np.where(density > 0, density, np.nan)
-            ax.stairs(values, edges, color=color, linewidth=1.5)
+            ax.stairs(values[first:last+1], edges[first:last+2], color=color, linewidth=1.5)
             ax.set_yscale('log')
             ax.set_ylim(ymin, ymax)
             ax.set_xlim(-limit, limit)
@@ -95,8 +93,9 @@ def plot_distributions(path, output, min_elements=500_000_000, coverage=0.999999
             ax.set_title(f'({chr(97+index)}) {label}', loc='left', fontsize=12.5, pad=10)
             if index % columns == 0:
                 ax.set_ylabel('Probability density')
-            if index // columns == rows-1:
-                ax.set_xlabel('Weight value')
+            if index + columns >= len(groups):
+                ax.tick_params(axis='x', labelbottom=True)
+                ax.set_xlabel(value_label)
             displayed = int(counts[1:-1][visible].sum())
             assert displayed/total >= coverage-1e-12
             summary['groups'].append({'label': label, 'numel': total,
@@ -114,16 +113,15 @@ def plot_distributions(path, output, min_elements=500_000_000, coverage=0.999999
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--results', type=Path)
-    parser.add_argument('--output', type=Path, default=Path(__file__).resolve().parent/'plots/weight_distributions')
-    parser.add_argument('--min-elements', type=int, default=500_000_000)
-    parser.add_argument('--coverage', type=float, default=0.999999)
-    args = parser.parse_args()
-    results = args.results or (DEFAULT_RESULTS if DEFAULT_RESULTS.exists() else STREAMED_RESULTS)
+    # Edit these settings before running.
+    results = DEFAULT_RESULTS if DEFAULT_RESULTS.exists() else STREAMED_RESULTS
+    output = Path(__file__).resolve().parent / 'plots/weight_distributions'
+    min_elements = 500_000_000
+    coverage = 0.999999
+
     if not results.exists():
-        parser.error(f'No saved histograms at {results}; run python -m plots.collect_weight_histograms first')
-    plot_distributions(results, args.output, args.min_elements, args.coverage)
+        raise FileNotFoundError(f'No saved histograms at {results}; run python plots/collect_weight_histograms.py first')
+    plot_distributions(results, output, min_elements, coverage)
 
 
 if __name__ == '__main__':

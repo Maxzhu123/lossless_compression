@@ -23,12 +23,13 @@ ARTEFACTS_PATH = Path(__file__).resolve().parents[1] / "artefacts"
 MODEL_PATH = ARTEFACTS_PATH / "Nemotron-H-8B-Base-8K"
 SAMPLE_TEXT_PATH = Path(__file__).parent / "sample_text.txt"
 RESULTS_PATH = ARTEFACTS_PATH / "activation_distribution_results.pt"
+EXPONENT_RESULTS_PATH = ARTEFACTS_PATH / "activation_exponent_distribution_results.pt"
 RESULTS_FORMAT_VERSION = 2  # Shared histogram schema used by weight_distribution.py.
 NUM_BATCHES = 4
 SEQUENCE_LENGTH = 1024
 SEQUENCES_PER_BATCH = 1
-BIN_WIDTH = 0.05
-LIMIT = 150.0
+BIN_WIDTH = 0.1
+LIMIT = 1000.0  # More extreme values remain in the two overflow buckets.
 
 
 @dataclass(frozen=True)
@@ -103,13 +104,14 @@ def activation_distribution(
     num_batches: int,
     bin_width: float = BIN_WIDTH,
     limit: float = LIMIT,
+    exponent_counts: dict[str, Tensor] | None = None,
 ) -> tuple[
     dict[str, Tensor],
     Tensor,
     dict[str, tuple[Tensor, Tensor]],
     dict[str, Tensor],
 ]:
-    """Aggregate histograms and exact-zero counts for semantic activations."""
+    """Aggregate histograms and zeros; optionally fill exact BF16 exponent counts."""
     if num_batches <= 0:
         raise ValueError("num_batches must be positive")
     if not categories:
@@ -154,6 +156,15 @@ def activation_distribution(
             limit=limit,
         )
         batch_zero_count = tensor.eq(0).sum(dtype=torch.int64)
+        if exponent_counts is not None:
+            if tensor.dtype != torch.bfloat16:
+                raise ValueError("Exact BF16 exponent collection requires BF16 activations")
+            bits = tensor.detach().contiguous().view(torch.int16).reshape(-1)
+            exponent_histogram = torch.zeros(256, dtype=torch.int64, device=tensor.device)
+            for start in range(0, bits.numel(), 1024 ** 2):
+                fields = ((bits[start:start + 1024 ** 2] >> 7) & 255).long()
+                exponent_histogram += torch.bincount(fields, minlength=256)
+            exponent_counts[label] = exponent_counts.get(label, 0) + exponent_histogram
         counts[label] = (
             batch_counts
             if counts[label] is None
@@ -353,11 +364,13 @@ def main() -> None:
         sequences_per_batch=SEQUENCES_PER_BATCH,
         device=device,
     )
+    exponent_counts = {} if dtype == torch.bfloat16 else None
     histograms, edges, extrema, zero_counts = activation_distribution(
         model,
         batches,
         ACTIVATION_CATEGORIES,
         num_batches=NUM_BATCHES,
+        exponent_counts=exponent_counts,
     )
     for label, (minimum, maximum) in extrema.items():
         counts = histograms[label]
@@ -383,6 +396,21 @@ def main() -> None:
         model_dtype=str(dtype),
     )
     print(f"Saved activation results to {RESULTS_PATH}")
+    if dtype == torch.bfloat16:
+        for label, counts in exponent_counts.items():
+            assert int(counts.sum()) == int(histograms[label].sum()), label
+        torch.save({
+            "format_version": 1, "model_name": MODEL_NAME,
+            "model_dtype": str(dtype), "analysis_device": str(device),
+            "num_batches": NUM_BATCHES, "sequence_length": SEQUENCE_LENGTH,
+            "sequences_per_batch": SEQUENCES_PER_BATCH,
+            "categories": list(histograms),
+            "exponent_counts": {label: counts.cpu() for label, counts in exponent_counts.items()},
+            "zero_counts": {label: int(count) for label, count in zero_counts.items()},
+            "extrema": {label: (lo.cpu(), hi.cpu()) for label, (lo, hi) in extrema.items()},
+            "exponent_definition": "raw BF16 field; normal exponent = field - 127",
+        }, EXPONENT_RESULTS_PATH)
+        print(f"Saved activation exponent results to {EXPONENT_RESULTS_PATH}")
 
 
 if __name__ == "__main__":

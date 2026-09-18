@@ -32,8 +32,8 @@ Separate reading results, building a figure, and saving it. For example:
 ```python
 from pathlib import Path
 import matplotlib.pyplot as plt
-from plots.plot_lib import plot_series, format_axes, finish_plot
-from plots.plot_tables import render
+from plot_lib import plot_series, format_axes, finish_plot
+from plot_tables import render
 
 
 def build(series):
@@ -53,8 +53,8 @@ def save(series):
     )
 ```
 
-Use `python -m plots.plot_name` from the repository root for scripts with
-package imports. Run figure creation and saving within `plot_style()` when
+Run scripts directly with `python plots/plot_name.py` from the repository root.
+Use direct sibling imports within `plots/`. Run figure creation and saving within `plot_style()` when
 not using `render()`; the context restores global Matplotlib settings afterward.
 For continuous axes with fractional values, pass `xformat=None` or a suitable
 format to `format_axes` (its default uses integer ticks).
@@ -77,7 +77,7 @@ are included in this directory.
 saved histograms on demand and returned by `plot_distributions()` in memory:
 
 ```sh
-python -m plots.plot_weight_distributions
+python plots/plot_weight_distributions.py
 ```
 
 It selects **parameter groups with strictly more than 500 million values**,
@@ -89,14 +89,14 @@ Zero-count bins are left empty rather than replaced with pseudocounts.
 
 The default source is `artefacts/weight_distribution_results.pt`, falling back to
 `artefacts/weight_distribution_large_results.pt` if the full results are absent.
-Use `--results PATH` to select a particular saved file. No model weights are
+Edit `results` inside `main()` to select a particular saved file. No model weights are
 loaded when plotting.
 
 For a machine without enough free RAM to load the full model, the companion
 collector reads the local safetensors checkpoint in CPU chunks:
 
 ```sh
-python -m plots.collect_weight_histograms
+python plots/collect_weight_histograms.py
 ```
 
 It uses a metadata-only model to identify the same parameter groups, collects
@@ -104,7 +104,7 @@ every value in the selected groups (no sampling), and saves a separate
 `artefacts/weight_distribution_large_results.pt` with 0.001-wide bins and a
 provenance sidecar. The six-group result is deliberately separate from a full
 all-group analysis. The collector never downloads weights or allocates CUDA
-tensors. `--threads` controls CPU parallelism (default 4).
+tensors. Set `threads` inside `main()` to control CPU parallelism (default 4).
 
 Suggested paper caption: *Weight distributions of the six Nemotron-H-8B
 parameter groups containing more than 500M values. Histograms aggregate weights
@@ -116,10 +116,11 @@ Densities are normalized by the full group size and shown on a logarithmic scale
 Collect exact eight-bit BF16 exponent-field counts on the CPU, then plot them:
 
 ```sh
-python -m plots.collect_weight_histograms --exponents-only
-python -m plots.plot_weight_exponents
+python plots/collect_weight_histograms.py
+python plots/plot_weight_exponents.py
 ```
 
+Set `exponents_only = True` in the collector's `main()` before running it.
 The counts are saved separately in
 `artefacts/weight_exponent_distribution_results.pt`. The plot exports
 only `plots/plots/weight_exponent_distributions.pdf`, with the same six
@@ -130,3 +131,43 @@ exponent entropy, the number of most-frequent symbols needed to reach 99%,
 exact-zero/subnormal fractions, and the displayed tail mass. The 99% symbol
 set need not be contiguous. These statistics are computed from the saved counts
 on demand and kept in memory, with no JSON plot output. Collection and plotting never use CUDA.
+
+## Activation distributions
+
+Collect fresh activation histograms and exact BF16 exponent counts, then render
+the same PDF layouts used for weights:
+
+```sh
+python llm_analysis/activation_distribution.py
+python plots/plot_activation_distributions.py
+python plots/plot_activation_exponents.py
+```
+
+The collector uses the local checkpoint at `artefacts/Nemotron-H-8B-Base-8K`
+and `llm_analysis/sample_text.txt`: four batches of one 1,024-token sequence,
+with no KV cache. On CUDA it runs BF16 inference and saves both
+`artefacts/activation_distribution_results.pt` and
+`artefacts/activation_exponent_distribution_results.pt`. The float32 CPU path
+saves value histograms only. Exponent counts are collected from the actual BF16
+bits during the same forward passes, not inferred from value histograms.
+
+“Largest” means categories with **more than 500M observed activation values**,
+aggregated across captured layers and batches. These are observation counts,
+not parameter counts or the size of one simultaneously live tensor. In the
+default run this selects FFN pre-activation, FFN hidden, Mamba projected,
+Mamba hidden, and logits. Both plots use the same order and colors.
+
+The scripts have editable settings inside `main()` and export only:
+
+- `plots/plots/activation_distributions.pdf`: shared symmetric value axes,
+  logarithmic density, and at least 99.9999% displayed mass per group. The
+  collector uses 0.1-wide bins over ±1,000, with overflow buckets for more
+  extreme values; normalization includes all observations. Exact zeros remain
+  in the histogram.
+- `plots/plots/activation_exponent_distributions.pdf`: exact exponent-field
+  probabilities, with bias removed for normal exponents. The hatched `<-20`
+  bar includes exact zeros, subnormals, and smaller normal exponents.
+
+As with weights, plotting loads only saved CPU counts, shares `plot_style()`,
+and returns group counts, extrema, coverage, and exponent statistics in memory.
+Plotting neither runs the model nor updates `paper/figures/`.

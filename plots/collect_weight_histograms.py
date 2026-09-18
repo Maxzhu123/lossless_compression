@@ -1,5 +1,4 @@
 """Stream selected local checkpoint groups into CPU histograms; never load all weights."""
-import argparse
 from collections import defaultdict
 import json
 import math
@@ -114,17 +113,19 @@ def collect(output=DEFAULT_OUTPUT, min_elements=500_000_000, chunk_elements=4_19
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output', type=Path)
-    parser.add_argument('--exponents-only', action='store_true')
-    parser.add_argument('--min-elements', type=int, default=500_000_000)
-    parser.add_argument('--threads', type=int, default=4)
-    args = parser.parse_args()
-    if args.threads < 1:
-        parser.error('--threads must be positive')
-    torch.set_num_threads(args.threads)
-    output = args.output or (EXPONENT_OUTPUT if args.exponents_only else DEFAULT_OUTPUT)
-    collect(output, args.min_elements, exponents_only=args.exponents_only)
+    # Edit these settings before running.
+    exponents_only = False
+    output = EXPONENT_OUTPUT if exponents_only else DEFAULT_OUTPUT
+    min_elements = 500_000_000
+    threads = 4
+    chunk_elements = 4_194_304
+    bin_width = 0.001
+    limit = 50.0
+
+    if threads < 1:
+        raise ValueError('threads must be positive')
+    torch.set_num_threads(threads)
+    collect(output, min_elements, chunk_elements, bin_width, limit, exponents_only)
 
 
 if __name__ == '__main__':

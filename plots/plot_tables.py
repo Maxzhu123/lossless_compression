@@ -13,10 +13,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 
-if __package__:
-    from .plot_lib import plot_style
-else:
-    from plot_lib import plot_style
+from plot_lib import plot_style
 
 
 # Written where a series was not measured at that x value. Gaps have to be
