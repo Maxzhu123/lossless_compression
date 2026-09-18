@@ -1,3 +1,4 @@
+"""Collect Nemotron weight histograms on CPU and save them for offline analysis."""
 from pathlib import Path
 
 import torch
@@ -12,10 +13,13 @@ from histogram import tensor_histogram
 
 
 MODEL_NAME = "nvidia/Nemotron-H-8B-Base-8K"
-RESULTS_PATH = Path(__file__).parent / "weight_distribution_results.pt"
+ARTEFACTS_PATH = Path(__file__).resolve().parents[1] / "artefacts"
+MODEL_PATH = ARTEFACTS_PATH / "Nemotron-H-8B-Base-8K"
+RESULTS_PATH = ARTEFACTS_PATH / "weight_distribution_results.pt"
 RESULTS_FORMAT_VERSION = 2
 BIN_WIDTH = 0.01
 LIMIT = 50.0
+MODEL_DTYPE = torch.bfloat16
 
 
 def group_parameters(model: nn.Module) -> dict[str, list[Tensor]]:
@@ -98,6 +102,7 @@ def weight_distribution(
     extrema: dict[str, tuple[Tensor, Tensor]] = {}
     edges: Tensor | None = None
     for label, tensors in groups.items():
+        print(f"Analysing {label}: {sum(t.numel() for t in tensors):,} values", flush=True)
         counts, group_edges, minimum, maximum = tensor_histogram(
             tensors,
             bin_width=bin_width,
@@ -121,6 +126,7 @@ def save_weight_results(
     model_name: str,
     bin_width: float,
     limit: float,
+    model_dtype: str | None = None,
 ) -> None:
     """Save weight histograms, extrema, and run metadata as CPU tensors."""
     result = {
@@ -128,6 +134,8 @@ def save_weight_results(
         "model_name": model_name,
         "bin_width": bin_width,
         "limit": limit,
+        "model_dtype": model_dtype,
+        "analysis_device": str(edges.device),
         "categories": list(histograms),
         "histograms": {
             label: counts.detach().cpu()
@@ -144,12 +152,22 @@ def save_weight_results(
 
 
 def main() -> None:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-    model = NemotronHForCausalLM.from_pretrained(
-        MODEL_NAME,
-        dtype=dtype,
-    ).to(device)
+    if not (MODEL_PATH / "config.json").is_file():
+        raise FileNotFoundError(f"Local Nemotron checkpoint not found at {MODEL_PATH}")
+    print(f"Loading {MODEL_PATH} on CPU ({MODEL_DTYPE})...", flush=True)
+    # Keep loading and histogram work off the GPU even when CUDA is available.
+    # BF16 also avoids the doubled host-memory cost of loading weights in FP32.
+    # No device_map is needed, so CPU loading does not require Accelerate.
+    with torch.device("cpu"):
+        model = NemotronHForCausalLM.from_pretrained(
+            MODEL_PATH,
+            dtype=MODEL_DTYPE,
+            local_files_only=True,
+        )
+    model.eval()
+    model.requires_grad_(False)
+    if any(parameter.device.type != "cpu" for parameter in model.parameters()):
+        raise RuntimeError("Weight analysis requires all model parameters on CPU")
 
     histograms, edges, extrema = weight_distribution(model)
     for label, (minimum, maximum) in extrema.items():
@@ -162,6 +180,7 @@ def main() -> None:
         model_name=MODEL_NAME,
         bin_width=BIN_WIDTH,
         limit=LIMIT,
+        model_dtype=str(MODEL_DTYPE),
     )
     print(f"Saved weight results to {RESULTS_PATH}")
 

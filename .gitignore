@@ -22,3 +22,4 @@ nanogpt/data/fineweb10B/
 *.txt
 /program.md
 /.start
+/artefacts/
