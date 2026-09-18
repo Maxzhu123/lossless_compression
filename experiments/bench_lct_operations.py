@@ -103,15 +103,6 @@ def main():
                                               torch.tensor(1 / gamma_scale, device="cuda"))
             return gamma.sample((elements,)).to(torch.bfloat16)
 
-    print(f"GPU: {torch.cuda.get_device_name()} | PyTorch: {torch.__version__} | CUDA: {torch.version.cuda}")
-    print(f"Each operand: {tensor_bytes:,} bytes, {elements:,} BF16 elements | {distribution}")
-    print(f"Seeds: {seed}, {seed + 1} | alpha: {scale} | warmup: {warmup} | iterations: {iterations}")
-    print("Synchronized wall-clock timing, including per-call allocations and output encoding.")
-    print("Input preparation, JIT/autotuning, validation and buffer release are excluded.")
-    print("Compressed outputs reuse the input distribution's codebook family and geometry.")
-    print("Naive baselines: decompress -> eager PyTorch -> recompress for compressed output.")
-    print("Multiply-add uses FP32 arithmetic followed by one BF16 cast, matching the fused reference.")
-    print("Generating two operands and preparing compressed inputs...", flush=True)
     a, b = make_data(seed), make_data(seed + 1)
     alpha = torch.tensor([scale], device="cuda", dtype=torch.float32)
     capacity = (elements + 64 * 1024 ** 2 + 15) // 16 * 16
@@ -120,7 +111,6 @@ def main():
     b_comp = compress(b, distribution, b_buffer)
     check_result(a_comp, lambda start, stop: a[start:stop], a.shape)
     check_result(b_comp, lambda start, stop: b[start:stop], b.shape)
-    print(f"Input storage ratios: A={a_comp.memory_size() / tensor_bytes:.4f}, B={b_comp.memory_size() / tensor_bytes:.4f}", flush=True)
 
     reference_a = lambda start, stop: a[start:stop]
     reference_add = lambda start, stop: a[start:stop] + b[start:stop]
@@ -167,23 +157,23 @@ def main():
             writer.writerow(("operation", "output", "lct_mean_ms", "lct_std_ms",
                              "naive_mean_ms", "naive_std_ms", "speedup"))
             for name, output_kind, functions, reference in cases:
-                print(f"{name} -> {output_kind}: validating and measuring...", flush=True)
                 results = measure(functions, reference, a.shape, warmup, iterations)
-                for variant, (avg, std) in results.items():
-                    print(f"  {variant}: {avg:.3f} ± {std:.3f} ms | bitwise check: PASS", flush=True)
+                timings = " | ".join(
+                    f"{variant}: {avg:.3f} ± {std:.3f} ms"
+                    for variant, (avg, std) in results.items()
+                )
+                print(f"{name} ({output_kind}) | {timings}", flush=True)
                 lct_mean, lct_std = results.get("fused", results.get("standalone"))
                 naive_mean, naive_std = results.get("naive", ("", ""))
                 speedup = ""
                 if "fused" in results:
                     speedup = naive_mean / lct_mean
-                    print(f"  Fused speedup: {speedup:.2f}x (naive / fused)", flush=True)
                 writer.writerow((name, output_kind, lct_mean, lct_std,
                                  naive_mean, naive_std, speedup))
                 file.flush()
     finally:
         a_comp.free()
         b_comp.free()
-    print(f"CSV: {output}")
 
 
 if __name__ == "__main__":
