@@ -1,0 +1,114 @@
+{
+  "source": "/home/maccyz/Documents/lossless_compression/artefacts/weight_exponent_distribution_results.pt",
+  "model_name": "nvidia/Nemotron-H-8B-Base-8K",
+  "normal_exponent_xlim": [
+    -20,
+    2
+  ],
+  "probability_denominator": "all weights in each group",
+  "left_bin": "all exponent fields below the displayed normal range; includes field 0",
+  "groups": [
+    {
+      "label": "Embedding weights",
+      "numel": 536870912,
+      "entropy_bits": 2.7037297026604614,
+      "symbols_for_99pct": 11,
+      "left_aggregate_fraction": 0.008067643269896507,
+      "normal_99pct_width": 12,
+      "normal_99pct_interval": [
+        -16,
+        -5
+      ],
+      "normal_interval_mass": 0.9904799200594425,
+      "mode_exponent": -7,
+      "zero_fraction": 0.0,
+      "subnormal_fraction": 0.0,
+      "visible_normal_fraction": 0.9919323567301035
+    },
+    {
+      "label": "FFN input weights",
+      "numel": 2113929216,
+      "entropy_bits": 2.6585184671601554,
+      "symbols_for_99pct": 10,
+      "left_aggregate_fraction": 0.019056829195173954,
+      "normal_99pct_width": 119,
+      "normal_99pct_interval": [
+        -123,
+        -5
+      ],
+      "normal_interval_mass": 0.9999173926928687,
+      "mode_exponent": -7,
+      "zero_fraction": 0.0,
+      "subnormal_fraction": 0.0,
+      "visible_normal_fraction": 0.9809431708048261
+    },
+    {
+      "label": "FFN output weights",
+      "numel": 2113929216,
+      "entropy_bits": 2.650788683694365,
+      "symbols_for_99pct": 10,
+      "left_aggregate_fraction": 0.019058197736740112,
+      "normal_99pct_width": 119,
+      "normal_99pct_interval": [
+        -123,
+        -5
+      ],
+      "normal_interval_mass": 0.9999660499512203,
+      "mode_exponent": -7,
+      "zero_fraction": 0.0,
+      "subnormal_fraction": 0.0,
+      "visible_normal_fraction": 0.9809418022632599
+    },
+    {
+      "label": "Mamba input weights",
+      "numel": 1824522240,
+      "entropy_bits": 2.595699402928012,
+      "symbols_for_99pct": 9,
+      "left_aggregate_fraction": 0.0004623807709792565,
+      "normal_99pct_width": 9,
+      "normal_99pct_interval": [
+        -13,
+        -5
+      ],
+      "normal_interval_mass": 0.9915813911920306,
+      "mode_exponent": -7,
+      "zero_fraction": 0.0,
+      "subnormal_fraction": 0.0,
+      "visible_normal_fraction": 0.9995376192290207
+    },
+    {
+      "label": "Mamba output weights",
+      "numel": 805306368,
+      "entropy_bits": 2.578356935492194,
+      "symbols_for_99pct": 9,
+      "left_aggregate_fraction": 6.525218486785889e-05,
+      "normal_99pct_width": 9,
+      "normal_99pct_interval": [
+        -13,
+        -5
+      ],
+      "normal_interval_mass": 0.991571418941021,
+      "mode_exponent": -7,
+      "zero_fraction": 0.0,
+      "subnormal_fraction": 0.0,
+      "visible_normal_fraction": 0.9999347478151321
+    },
+    {
+      "label": "LM head weights",
+      "numel": 536870912,
+      "entropy_bits": 2.6047347969010657,
+      "symbols_for_99pct": 9,
+      "left_aggregate_fraction": 9.58666205406189e-05,
+      "normal_99pct_width": 9,
+      "normal_99pct_interval": [
+        -14,
+        -6
+      ],
+      "normal_interval_mass": 0.9923600051552057,
+      "mode_exponent": -8,
+      "zero_fraction": 0.0,
+      "subnormal_fraction": 0.0,
+      "visible_normal_fraction": 0.9999041333794594
+    }
+  ]
+}

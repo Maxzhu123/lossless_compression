@@ -1,0 +1,62 @@
+{
+  "source": "/home/maccyz/Documents/lossless_compression/artefacts/weight_distribution_large_results.pt",
+  "model_name": "nvidia/Nemotron-H-8B-Base-8K",
+  "selection": "group count > 500000000",
+  "normalization": "count / (all group values * bin width)",
+  "xlim": [
+    -0.2989976406097412,
+    0.2989976406097412
+  ],
+  "coverage_target": 0.999999,
+  "y_scale": "logarithmic",
+  "groups": [
+    {
+      "label": "Embedding weights",
+      "numel": 536870912,
+      "displayed_fraction": 1.0,
+      "histogram_overflow": 0,
+      "minimum": -0.1962890625,
+      "maximum": 0.16796875
+    },
+    {
+      "label": "FFN input weights",
+      "numel": 2113929216,
+      "displayed_fraction": 0.9999999952694726,
+      "histogram_overflow": 0,
+      "minimum": -0.484375,
+      "maximum": 0.6328125
+    },
+    {
+      "label": "FFN output weights",
+      "numel": 2113929216,
+      "displayed_fraction": 0.9999998921439761,
+      "histogram_overflow": 0,
+      "minimum": -1.140625,
+      "maximum": 2.28125
+    },
+    {
+      "label": "Mamba input weights",
+      "numel": 1824522240,
+      "displayed_fraction": 0.9999998531122317,
+      "histogram_overflow": 0,
+      "minimum": -0.61328125,
+      "maximum": 0.80078125
+    },
+    {
+      "label": "Mamba output weights",
+      "numel": 805306368,
+      "displayed_fraction": 0.9999990028639635,
+      "histogram_overflow": 0,
+      "minimum": -0.97265625,
+      "maximum": 1.0703125
+    },
+    {
+      "label": "LM head weights",
+      "numel": 536870912,
+      "displayed_fraction": 1.0,
+      "histogram_overflow": 0,
+      "minimum": -0.1572265625,
+      "maximum": 0.2001953125
+    }
+  ]
+}
