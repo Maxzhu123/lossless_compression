@@ -38,6 +38,67 @@ class RMSNorm(torch.autograd.Function):
         return grad_x, None, None, None
 
 
+class RMSFFN(Function):
+    """RMSNorm followed by FFN, without caching the normalized input.
+
+    Save the original input, reciprocal RMS, weights, and ReLU activation.
+    Reconstruct the normalized input in backward for the W1 gradient.
+    """
+
+    @staticmethod
+    def forward(ctx, x, W1, W2, buffer: TensorBuffer|None=None,
+                compressed: bool=False, eps=None):
+        if eps is None:
+            eps = torch.finfo(x.dtype).eps
+        normalized, rstd = torch.ops.aten._fused_rms_norm.default(
+            x, [x.shape[-1]], None, eps,
+        )
+        h = (normalized @ W1.T).relu_()
+        del normalized
+        output = h @ W2.T
+
+        if compressed:
+            x = MyCompressed(x, buffer=buffer, dist=act_dist)
+            h = MyCompressed(h, buffer=buffer, dist=act_relu_dist)
+        ctx.save_for_backward(x, W1, W2, h, rstd)
+        ctx.compressed = compressed
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, W1, W2, h, rstd = ctx.saved_tensors
+        if ctx.compressed:
+            x = x.decompress_free()
+            h = h.decompress_free()
+        # The local tensors now suffice. In particular, release the saved
+        # compressed storage before allocating dense backward intermediates.
+        if not torch.compiler.is_compiling():
+            ctx.maybe_clear_saved_tensors()
+
+        grad_W2 = grad_output.T @ h if ctx.needs_input_grad[2] else None
+        grad_x = grad_W1 = None
+        if ctx.needs_input_grad[0] or ctx.needs_input_grad[1]:
+            grad_h = grad_output @ W2
+            grad_z = torch.ops.aten.threshold_backward.grad_input(
+                grad_h, h, 0, grad_input=grad_h,
+            )
+            del h, grad_h
+            if ctx.needs_input_grad[1]:
+                # Multiply in rstd's precision, writing directly to the input
+                # dtype without materializing full-size float32 temporaries.
+                normalized = torch.empty_like(x)
+                torch.mul(x, rstd, out=normalized)
+                grad_W1 = grad_z.T @ normalized
+                del normalized
+            if ctx.needs_input_grad[0]:
+                grad_normalized = grad_z @ W1
+                del grad_z
+                grad_x, _ = torch.ops.aten._fused_rms_norm_backward.default(
+                    grad_normalized, x, [x.shape[-1]], rstd, None, [True, False],
+                )
+        return grad_x, grad_W1, grad_W2, None, None, None
+
+
 class FFN(Function):
     """Dense baseline autograd FFN for comparison.
 
