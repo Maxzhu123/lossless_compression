@@ -1,7 +1,8 @@
-"""Benchmark 1 GiB of BF16 data; save timing means and standard deviations to CSV."""
+"""Benchmark 1 GiB of BF16 data; save timing means and standard errors to CSV."""
 import csv
+from math import sqrt
 from pathlib import Path
-from statistics import mean, pstdev
+from statistics import mean, stdev
 import time
 
 import torch
@@ -71,9 +72,16 @@ def main():
     encode_times, decode_times = zip(*timings)
     with output.open("w", newline="") as file:
         writer = csv.writer(file)
-        writer.writerow(("encode_mean_ms", "encode_std_ms", "decode_mean_ms", "decode_std_ms"))
-        writer.writerow((mean(encode_times), pstdev(encode_times),
-                         mean(decode_times), pstdev(decode_times)))
+        writer.writerow(("encode_mean_ms", "encode_sem_ms", "decode_mean_ms", "decode_sem_ms"))
+        # SEM uses the sample standard deviation; one measurement is insufficient.
+        encode_sem = stdev(encode_times) / sqrt(iterations) if iterations > 1 else float("nan")
+        decode_sem = stdev(decode_times) / sqrt(iterations) if iterations > 1 else float("nan")
+        writer.writerow((mean(encode_times), encode_sem, mean(decode_times), decode_sem))
+    print(
+        f"LCT | encode: {mean(encode_times):.3f} ± {encode_sem:.3f} ms"
+        f" | decode: {mean(decode_times):.3f} ± {decode_sem:.3f} ms",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

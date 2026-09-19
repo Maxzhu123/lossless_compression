@@ -1,8 +1,9 @@
 """End-to-end codec timings, including staging, allocation and table building."""
 from dataclasses import asdict, dataclass
+from math import sqrt
 import json
 from pathlib import Path
-from statistics import mean, pstdev
+from statistics import mean, stdev
 import sys
 import time
 
@@ -18,8 +19,8 @@ class Result:
     storage_ratio: float
     compress_ms: float
     decompress_ms: float
-    compress_std_ms: float = 0.0
-    decompress_std_ms: float = 0.0
+    compress_sem_ms: float = float("nan")
+    decompress_sem_ms: float = float("nan")
 
 
 def benchmark(codec, tensor, *, warmup=1, iterations=5):
@@ -28,6 +29,7 @@ def benchmark(codec, tensor, *, warmup=1, iterations=5):
     Calibrate SplitZip before calling. CPU↔GPU copies are included for ZipNN
     and DFloat11 encoding. Times are wall-clock, synchronized on tensor.device;
     they are not kernel-only throughput numbers. No autograd is retained.
+    SEM is sample standard deviation / sqrt(iterations), or NaN for one sample.
     """
     if warmup < 0 or iterations < 1:
         raise ValueError("warmup must be nonnegative and iterations positive")
@@ -72,7 +74,8 @@ def benchmark(codec, tensor, *, warmup=1, iterations=5):
     return Result(encoded.method, tensor.nbytes, encoded.compressed_bytes,
                   encoded.memory_size(), encoded.storage_ratio,
                   mean(compress_ms), mean(decompress_ms),
-                  pstdev(compress_ms), pstdev(decompress_ms))
+                  stdev(compress_ms) / sqrt(iterations) if iterations > 1 else float("nan"),
+                  stdev(decompress_ms) / sqrt(iterations) if iterations > 1 else float("nan"))
 
 
 def main():
