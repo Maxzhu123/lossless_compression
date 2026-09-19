@@ -74,17 +74,43 @@ def compA_mul_B(
 def a_compA_add_B(
     A_comp: CompressedTensor, a: Tensor, B: Tensor,
     *,
+    alpha_is_one: bool = False,
     dense_output: bool = True, buffer: TensorBuffer | None = None, distribution=None,
 ) -> Tensor | CompressedTensor:
-    """ Compute ``a * A_comp + B`` with a fused pointwise operation.
-        .
+    """Compute ``a * A_comp + B`` with a fused pointwise operation.
+
+    alpha_is_one=True treats a as 1 without reading its value on the GPU.
     """
     if not isinstance(a, torch.Tensor):
         raise TypeError("alpha must be a torch.Tensor")
     return pointwise_compressed_dense(
-        A_comp, B, SCALAR_MUL_ADD, alpha=a,
+        A_comp, B, SCALAR_MUL_ADD, alpha=a, alpha_is_one=alpha_is_one,
         dense_output=dense_output,
         buffer=buffer, distribution=distribution,
+    )
+
+
+def a_compA_add_b_B(
+    A_comp: CompressedTensor, a: Tensor, B: Tensor, b: Tensor,
+    *,
+    alpha_is_one: bool = False,
+    dense_output: bool = True, buffer: TensorBuffer | None = None, distribution=None,
+) -> Tensor | CompressedTensor:
+    """Compute ``a * A_comp + b * B`` without materializing either scaled operand.
+
+    Scalars are CUDA float32 tensors. Multiply B by b in FP32, then use FP32
+    fused multiply-add for a * A + scaled_B, rounding the result to BF16.
+    alpha_is_one=True treats a as 1 and uses FMA(B, b, A) instead, removing
+    the alpha load and redundant multiplication at compile time.
+    """
+    for name, scalar in (("alpha", a), ("beta", b)):
+        if not isinstance(scalar, torch.Tensor):
+            raise TypeError(f"{name} must be a torch.Tensor")
+        if scalar.numel() != 1 or scalar.dtype != torch.float32 or scalar.device != A_comp.data.device:
+            raise ValueError(f"{name} must be a float32 scalar on the compressed tensor's device")
+    return pointwise_compressed_dense(
+        A_comp, B, SCALAR_MUL_ADD, alpha=a, beta=b, alpha_is_one=alpha_is_one,
+        dense_output=dense_output, buffer=buffer, distribution=distribution,
     )
 
 

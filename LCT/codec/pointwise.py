@@ -101,7 +101,7 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
 
 
 def _launch_scalar_mul_add_compressed_dense(
-    data, other, alpha, output_policy,
+    data, other, alpha, output_policy, beta=None, alpha_is_one=False,
 ):
     """Launch the dedicated fused scalar multiply-add pointwise kernels."""
     other = other.contiguous().view(-1)
@@ -129,9 +129,11 @@ def _launch_scalar_mul_add_compressed_dense(
 
     main_args = (
         data.data, data.sign_mantissa, other, output, auxiliary,
-        shifted_decode, data.size, blocks * lanes, data.center, alpha,
+        shifted_decode, data.size, blocks * lanes, data.center, alpha, beta,
     )
     main_meta = dict(
+        SCALE_OTHER=beta is not None,
+        ALPHA_IS_ONE=alpha_is_one,
         OUTPUT_POLICY=output_policy,
         FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length,
         BLOCK=block_symbols, N_LANES=lanes, N_STEPS=steps,
@@ -145,9 +147,11 @@ def _launch_scalar_mul_add_compressed_dense(
         fallback_args = (
             metadata, data.fallback_buffer, metadata, data.fallback_buffer, 0,
             metadata, data.fallback_descriptor, data.fallback_count,
-            data.sign_mantissa, other, output, auxiliary, data.size, alpha,
+            data.sign_mantissa, other, output, auxiliary, data.size, alpha, beta,
         )
         fallback_meta = dict(
+            SCALE_OTHER=beta is not None,
+            ALPHA_IS_ONE=alpha_is_one,
             OUTPUT_POLICY=output_policy,
             BUFFERED=True, TILE=64, BLOCK=block_symbols,
             N_LANES=lanes, N_STEPS=steps,
@@ -161,9 +165,11 @@ def _launch_scalar_mul_add_compressed_dense(
             data.offsets, data.fallback_starts, data.fallback_offsets,
             data.fallback_buffer, data.fallback_base, data.offsets,
             data.offsets, data.fallback_count, data.sign_mantissa,
-            other, output, auxiliary, data.size, alpha,
+            other, output, auxiliary, data.size, alpha, beta,
         )
         fallback_meta = dict(
+            SCALE_OTHER=beta is not None,
+            ALPHA_IS_ONE=alpha_is_one,
             OUTPUT_POLICY=output_policy,
             BUFFERED=False, TILE=64, BLOCK=block_symbols,
             N_LANES=lanes, N_STEPS=steps,
@@ -325,11 +331,15 @@ def pointwise_compressed_dense(
     operation: PointwiseOp,
     *,
     alpha=None,
+    beta=None,
+    alpha_is_one=False,
     dense_output: bool = True,
     buffer: TensorBuffer | None = None,
     distribution=None,
 ) -> torch.Tensor | CompressedTensor:
     """ Apply a compressed + dense pointwise operation.
+        For scalar_mul_add, optional beta scales the dense operand in FP32.
+        alpha_is_one specializes away the alpha load and multiplication.
         If dense_output, returns a dense tensor. Otherwise, returns a compressed tensor.
     """
     # Both tensors must have the same shape.
@@ -352,7 +362,18 @@ def pointwise_compressed_dense(
     # Raw fast path: no codec streams, operate on dense payload directly.
     if data.layout == StorageLayout.RAW:
         if operation.name == "scalar_mul_add":
-            result = operation.torch_fn(data.data.reshape(data.shape), other, alpha)
+            if alpha_is_one:
+                left = data.data.reshape(data.shape).float()
+                if beta is None:
+                    result = (left + other.float()).to(torch.bfloat16)
+                else:
+                    result = torch.addcmul(left, other.float(), beta).to(torch.bfloat16)
+            elif beta is None:
+                result = operation.torch_fn(data.data.reshape(data.shape), other, alpha)
+            else:
+                result = torch.addcmul(
+                    other.float() * beta, data.data.reshape(data.shape).float(), alpha,
+                ).to(torch.bfloat16)
         else:
             result = operation.torch_fn(data.data.reshape(data.shape), other)
         if dense_output:
@@ -363,7 +384,7 @@ def pointwise_compressed_dense(
     policy = DENSE_OUTPUT if dense_output else COMPRESSED_OUTPUT
     if operation.name == "scalar_mul_add":
         values, auxiliary = _launch_scalar_mul_add_compressed_dense(
-            data, other, alpha, policy,
+            data, other, alpha, policy, beta=beta, alpha_is_one=alpha_is_one,
         )
     else:
         values, auxiliary = _launch_pointwise_compressed_dense(

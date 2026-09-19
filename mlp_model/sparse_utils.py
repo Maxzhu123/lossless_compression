@@ -109,6 +109,8 @@ class SparseMuon:
         # One momentum tensor per parameter.
         self.momentums: list[Tensor | MyCompressed | None] = [None for _ in self.params]
 
+        self.neg_lr = torch.tensor([-self.lr], dtype=torch.float32, device="cuda")
+
     @torch.no_grad()
     def step(self):
         for i, p in enumerate(self.params):
@@ -135,8 +137,7 @@ class SparseMuon:
                 decay = torch.tensor(
                     [1 - self.lr * self.weight_decay], dtype=torch.float32, device=p.device,
                 )
-                update.mul_(-self.lr)
-                p.mul_add_(decay, update)
+                p.mul_add_(decay, update, beta=self.neg_lr, alpha_is_one=self.weight_decay == 0)
             else:
                 p.mul_(1 - self.lr * self.weight_decay)
                 p.add_(update, alpha=-self.lr)
