@@ -5,7 +5,7 @@ from torch import Tensor
 
 from .comp_format import Distribution
 from .comp_tensor import CompressedTensor
-from .compress import compress, decompress, compA_add_B, a_compA_add_B, a_compA_add_compB
+from .compress import compress, decompress, compA_add_B, a_compA_add_B, a_compA_add_b_B, a_compA_add_compB
 from .tensor_buffer import TensorBuffer
 
 
@@ -71,13 +71,21 @@ class MyCompressed(Tensor):
                              dense_output=False, distribution=prev.distribution, buffer=prev.buffer)
         prev.free()
 
-    def mul_add_(self, alpha: Tensor, update: Tensor):
+    def mul_add_(self, alpha: Tensor, update: Tensor, beta: Tensor | None = None,
+                 *, alpha_is_one: bool = False):
         """ Inplace multiply-add,
-            x <- alpha * x + update
+            x <- alpha * x + beta * update (beta defaults to 1).
+            alpha_is_one specializes alpha to 1 without reading its tensor.
         """
         prev = self.x
-        self.x = a_compA_add_B(prev, alpha, update,
-                               dense_output=False, distribution=prev.distribution, buffer=prev.buffer)
+        if beta is None:
+            self.x = a_compA_add_B(prev, alpha, update,
+                                   alpha_is_one=alpha_is_one,
+                                   dense_output=False, distribution=prev.distribution, buffer=prev.buffer)
+        else:
+            self.x = a_compA_add_b_B(prev, alpha, update, beta,
+                                     alpha_is_one=alpha_is_one,
+                                     dense_output=False, distribution=prev.distribution, buffer=prev.buffer)
         prev.free()
 
     def add_comp_(self, update_comp: MyCompressed, alpha: Tensor):

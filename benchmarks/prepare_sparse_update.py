@@ -1,187 +1,93 @@
-"""Benchmark correctness and performance for the sparse SGD update.
+"""Time alpha * A_compressed + beta * B_dense, with compressed output.
 
-Current path (dense materialisation):
-    update = mom.decompress() * scale
-    result = p + update          # encoded as a compressed tensor
-
-Planned fused path:
-    result = scale * mom + p     # both operands start compressed
-                                   # dummy implementation only for now
+Compare separate scaling plus the existing fused add against the new two-scale
+operation. Requires a_compA_add_b_B; there is no substitute implementation.
 """
 
 import statistics
 import torch
 
 from LCT.comp_format import DistType, Distribution
-from LCT.compress import compress, compA_add_B, a_compA_add_compB, decompress
-from LCT.tensor_buffer import Allocation, TensorBuffer
+from LCT.compress import compress, a_compA_add_B, a_compA_add_b_B
+from LCT.tensor_buffer import TensorBuffer
 
 
 SIZES = [512, 1024, 2048, 4096]
-SHAPE = lambda n: (n, 4 * n)
+CASES = [("without_decay", 1.0), ("with_decay", 0.998)]
+BETA = -0.02
 WARMUP = 3
 ITERATIONS = 50
 TRIALS = 3
-SCALE_VALUE = -0.5
 
 
-def _buffer(numel: int) -> TensorBuffer:
-    capacity = (numel * 2 + 64 * 1024 * 1024 + 15) // 16 * 16
-    return TensorBuffer(capacity, device="cuda")
-
-
-def _free(result, buffer: TensorBuffer) -> None:
-    if result is not None and result.fallback_descriptor is not None:
-        buffer.free(Allocation(result.fallback_descriptor, buffer))
-
-
-def _assert_bits_equal(left: torch.Tensor, right: torch.Tensor) -> None:
-    assert left.shape == right.shape
-    assert torch.equal(
-        left.contiguous().view(torch.int16),
-        right.contiguous().view(torch.int16),
-    )
-
-
-def _make_compressed_pair(n: int, buffer: TensorBuffer):
-    shape = SHAPE(n)
-    generator = torch.Generator(device="cuda").manual_seed(n)
-    p = torch.randn(shape, device="cuda", generator=generator).to(torch.bfloat16)
-    mom = torch.randn(shape, device="cuda", generator=generator).to(torch.bfloat16)
-    dist = Distribution(DistType.GAUSSIAN)
-    p_enc = compress(p, dist, buffer)
-    mom_enc = compress(mom, dist, buffer)
-    return p, mom, p_enc, mom_enc, dist, shape
-
-
-def _current_update(p_enc, mom_enc, _scale, out_buf):
-    """Current implementation used by SparseSGDM, expressed as a pure op.
-
-    The real SparseSGDM multiplies by a Python scalar, producing a BF16 update;
-    the fused path uses a CUDA tensor alpha so it is kept separate here.
-    """
-    update = decompress(mom_enc) * SCALE_VALUE
-    return compA_add_B(
-        p_enc,
-        update,
-        dense_output=False,
-        buffer=out_buf,
-        distribution=p_enc.distribution,
-    )
-
-
-def _fused_update(p_enc, mom_enc, scale, out_buf):
-    """Fused sparse-update entry point.
-
-    ``compressed_scale_add`` currently decodes the second operand to dense and
-    then uses the scalar multiply-add fused path. This avoids materialising
-    ``scale * mom`` as the current method does, while keeping both operands
-    compressed in the API.
-    """
-    return a_compA_add_compB(
-        mom_enc,
-        scale,
-        p_enc,
-        dense_output=False,
-        buffer=out_buf,
-        distribution=p_enc.distribution,
-    )
-
-
-def _time(function, iterations: int = ITERATIONS) -> float:
+def _time(operation) -> float:
     for _ in range(WARMUP):
-        function()
+        result = operation()
+        result.free()
     torch.cuda.synchronize()
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(iterations):
-        function()
-    end.record()
-    end.synchronize()
-    return start.elapsed_time(end) / iterations
+
+    events = [
+        (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
+        for _ in range(ITERATIONS)
+    ]
+    for start, end in events:
+        start.record()
+        result = operation()
+        end.record()
+        # Output release is outside the measured interval.
+        result.free()
+    torch.cuda.synchronize()
+    return statistics.mean(start.elapsed_time(end) for start, end in events)
 
 
-def _compare(first, second, release_first, release_second):
-    first_times = []
-    second_times = []
-    for trial in range(TRIALS):
-        ordered = (
-            ((first, release_first), (second, release_second))
-            if trial % 2 == 0
-            else ((second, release_second), (first, release_first))
+def _benchmark(n: int, label: str, alpha_value: float) -> None:
+    shape = (n, 4 * n)
+    numel = shape[0] * shape[1]
+    buffer = TensorBuffer(numel * 2 + 64 * 1024 * 1024, device="cuda")
+    generator = torch.Generator(device="cuda").manual_seed(n)
+    A = torch.randn(shape, device="cuda", generator=generator).bfloat16()
+    B = torch.randn(shape, device="cuda", generator=generator).bfloat16()
+    A_comp = compress(A, Distribution(DistType.GAUSSIAN), buffer)
+    del A
+    alpha = torch.tensor([alpha_value], device="cuda", dtype=torch.float32)
+    beta = torch.tensor([BETA], device="cuda", dtype=torch.float32)
+    scaled_B = torch.empty_like(B)
+
+    def separate():
+        torch.mul(B, beta, out=scaled_B)
+        return a_compA_add_B(
+            A_comp, alpha, scaled_B, alpha_is_one=alpha_value == 1.0,
+            dense_output=False, buffer=buffer,
         )
-        for fn, release in ordered:
-            # timed functions return a compressed result that must be freed
-            # so the shared output buffer is available for the next call.
-            for _ in range(WARMUP):
-                result = fn()
-                release(result)
-            torch.cuda.synchronize()
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
-            for _ in range(ITERATIONS):
-                result = fn()
-                release(result)
-            end.record()
-            end.synchronize()
-            elapsed = start.elapsed_time(end) / ITERATIONS
-            if fn is first:
-                first_times.append(elapsed)
-            else:
-                second_times.append(elapsed)
-    return statistics.median(first_times), statistics.median(second_times)
 
+    def fused():
+        return a_compA_add_b_B(
+            A_comp, alpha, B, beta, alpha_is_one=alpha_value == 1.0,
+            dense_output=False, buffer=buffer,
+        )
 
-def _benchmark_shape(n: int) -> tuple[float, float]:
-    numel = SHAPE(n)[0] * SHAPE(n)[1]
-    buf = _buffer(numel)
-    p, mom, p_enc, mom_enc, dist, shape = _make_compressed_pair(n, buf)
-    scale = torch.tensor([SCALE_VALUE], device="cuda", dtype=torch.float32)
-
-    # Correctness.
-    expected = (p.float() + mom.float() * scale).to(torch.bfloat16)
-    current_result = _current_update(p_enc, mom_enc, scale, buf)
-    _assert_bits_equal(decompress(current_result), expected)
-    _free(current_result, buf)
-    fused_result = _fused_update(p_enc, mom_enc, scale, buf)
-    _assert_bits_equal(decompress(fused_result), expected)
-    _free(fused_result, buf)
-
-    current = lambda: _current_update(p_enc, mom_enc, scale, buf)
-    fused = lambda: _fused_update(p_enc, mom_enc, scale, buf)
-    current_ms, fused_ms = _compare(
-        current,
-        fused,
-        lambda result: _free(result, buf),
-        lambda result: _free(result, buf),
-    )
-
+    timings = {separate: [], fused: []}
+    for trial in range(TRIALS):
+        if trial % 2 == 0:
+            operations = (separate, fused)
+        else:
+            operations = (fused, separate)
+        for operation in operations:
+            timings[operation].append(_time(operation))
+    separate_ms = statistics.median(timings[separate])
+    fused_ms = statistics.median(timings[fused])
     print(
-        f"shape={shape!s:>14s}  current={current_ms:7.4f} ms  "
-        f"fused={fused_ms:7.4f} ms  "
-        f"reduction={(current_ms - fused_ms) / current_ms:6.2%}"
+        f"shape={shape!s:>14s}  {label:>13s}  "
+        f"separate={separate_ms:.4f} ms  fused={fused_ms:.4f} ms  "
+        f"reduction={(separate_ms - fused_ms) / separate_ms:.2%}"
     )
-
-    _free(p_enc, buf)
-    _free(mom_enc, buf)
-    buf.reset()
-    del p, mom, p_enc, mom_enc, current_result, fused_result
-    torch.cuda.empty_cache()
-    return current_ms, fused_ms
+    A_comp.free()
 
 
 def main() -> None:
-    total_current_ms = 0.0
-    total_fused_ms = 0.0
-    for n in SIZES:
-        current_ms, fused_ms = _benchmark_shape(n)
-        total_current_ms += current_ms
-        total_fused_ms += fused_ms
-
-    print(f"Total current: {total_current_ms:.5g}ms")
-    print(f"Total fused: {total_fused_ms:.5g}ms")
+    for label, alpha in CASES:
+        for n in SIZES:
+            _benchmark(n, label, alpha)
 
 
 if __name__ == "__main__":
