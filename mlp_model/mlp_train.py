@@ -6,12 +6,13 @@ from cprint import c_print
 
 from LCT.tensor_buffer import TensorBuffer, visualize_buffer
 from LCT.LCTensor import MyCompressed
-from sparse_utils import SparseSGDM
+from sparse_utils import SparseSGDM, SparseMuon
 from mlps import RMSFFN
 from dist_configs import weight_dist
 
 COMPRESSED = True
 BUFFER = False
+USE_MUON = False
 c_print(f"Compressed: {COMPRESSED}", color="bright_blue")
 c_print(f"Buffer: {BUFFER}", color="bright_blue")
 
@@ -64,8 +65,13 @@ def main():
         buffer = None
 
     model = Model(8, 4096, 21504, 4096, G, buffer=buffer)
-    optimiser = SparseSGDM(model.sparse_parameters(), lr=0.001, momentum=0.9,
-                           buffer=buffer, compressed=COMPRESSED)
+    if USE_MUON:
+        optimiser = SparseMuon(model.sparse_parameters(), lr=0.02, mu=0.95,
+                               buffer=buffer, compressed=COMPRESSED)
+    else:
+        optimiser = SparseSGDM(model.sparse_parameters(), lr=0.001, momentum=0.9,
+                               buffer=buffer, compressed=COMPRESSED)
+    c_print(f"Optimiser: {type(optimiser).__name__}", color="bright_blue")
 
     x = torch.randn(12000, 4096, dtype=torch.bfloat16, device="cuda", generator=G)
     y_hat = x.norm(dim=0)

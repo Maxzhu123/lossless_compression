@@ -146,6 +146,3 @@ class SparseMuon:
     def zero_grad(self):
         for p in self.params:
             p.grad = None
-
-
-Muon = SparseMuon

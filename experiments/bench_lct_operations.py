@@ -17,7 +17,7 @@ from LCT.comp_format import DistType, Distribution
 from LCT.comp_tensor import CompressedTensor
 from LCT.compress import (
     compress, decompress, compA_add_B, compA_mul_B,
-    a_compA_add_B, a_compA_add_b_B, a_compA_add_compB,
+    a_compA_add_B, a_compA_add_compB,
 )
 from LCT.tensor_buffer import TensorBuffer
 
@@ -27,26 +27,23 @@ def release(result):
         result.free()
 
 
-def check_result(result, reference, shape, exact=True):
-    """Check outputs against dense references constructed in small chunks."""
+def check_result(result, reference, shape):
+    """Check every output bit; construct dense references in small chunks."""
     actual = decompress(result) if isinstance(result, CompressedTensor) else result
     assert actual.shape == shape and actual.dtype == torch.bfloat16
     for start in range(0, actual.numel(), 1024 ** 2):
         stop = min(start + 1024 ** 2, actual.numel())
         expected = reference(start, stop)
-        if exact:
-            assert torch.equal(actual[start:stop].view(torch.int16), expected.view(torch.int16)), (
-                f"Bitwise mismatch in elements {start}:{stop}"
-            )
-        else:
-            torch.testing.assert_close(actual[start:stop], expected, rtol=0.016, atol=1e-5)
+        assert torch.equal(actual[start:stop].view(torch.int16), expected.view(torch.int16)), (
+            f"Bitwise mismatch in elements {start}:{stop}"
+        )
 
 
-def measure(functions, reference, shape, warmup, iterations, exact=True):
+def measure(functions, reference, shape, warmup, iterations):
     for _, function in functions:
         result = function()  # First-use compilation and validation are not timed.
         try:
-            check_result(result, reference, shape, exact=exact)
+            check_result(result, reference, shape)
         finally:
             release(result)
             del result
@@ -90,7 +87,6 @@ def main():
     laplace_scale = 1.5
     gamma_shape, gamma_scale = 0.82, 2.43
     scale = -0.5
-    scale_b = -0.02
     multiplier_mean, multiplier_std = 1.0, 0.01  # Multiplication-only operand.
 
     if tensor_bytes <= 0 or tensor_bytes % 2:
@@ -120,7 +116,6 @@ def main():
     a, b = make_data(seed), make_data(seed + 1)
     multiplier = make_gaussian(elements, mean=multiplier_mean, std=multiplier_std, seed=seed + 2)
     alpha = torch.tensor([scale], device="cuda", dtype=torch.float32)
-    beta = torch.tensor([scale_b], device="cuda", dtype=torch.float32)
     capacity = (elements + 64 * 1024 ** 2 + 15) // 16 * 16
     a_buffer, b_buffer, out_buffer = [TensorBuffer(capacity, device="cuda") for _ in range(3)]
     a_comp = compress(a, distribution, a_buffer)
@@ -145,14 +140,6 @@ def main():
 
     # One scaled-add operation, without materialized FP32 intermediates.
     scale_add = lambda left, right: torch.add(right, left, alpha=scale)
-
-    @torch.compile(fullgraph=True)
-    def two_scale_add(left, right):
-        return (left.float() * alpha + right.float() * beta).to(torch.bfloat16)
-
-    reference_two_scale = lambda start, stop: (
-        a[start:stop].float() * alpha + b[start:stop].float() * beta
-    ).to(torch.bfloat16)
     cases = [
         ("compress", "compressed", [("standalone", lambda: compress(a, distribution, out_buffer))], reference_a),
         ("decompress", "dense", [("standalone", lambda: decompress(a_comp))], reference_a),
@@ -165,11 +152,9 @@ def main():
             ("compA_mul_B", output, lambda kw=kwargs: compA_mul_B(a_comp, multiplier, **kw), reference_mul),
             ("a_compA_add_B", output, lambda kw=kwargs: a_compA_add_B(a_comp, alpha, b, **kw), reference_scale_add),
             ("a_compA_add_compB", output, lambda kw=kwargs: a_compA_add_compB(a_comp, alpha, b_comp, **kw), reference_scale_add),
-            ("a_compA_add_b_B", output,
-             lambda kw=kwargs: a_compA_add_b_B(a_comp, alpha, b, beta, **kw), reference_two_scale),
         ]
         for (name, output_kind, fused, reference), operation in zip(
-            operations, (torch.add, torch.mul, scale_add, scale_add, two_scale_add)
+            operations, (torch.add, torch.mul, scale_add, scale_add)
         ):
             other = multiplier if name == "compA_mul_B" else b
             baseline = lambda op=operation, d=dense, rhs=other, dual=name == "a_compA_add_compB": naive(op, d, rhs, dual)
@@ -191,8 +176,7 @@ def main():
             writer.writerow(("operation", "output", "lct_mean_ms", "lct_sem_ms",
                              "naive_mean_ms", "naive_sem_ms", "dense_mean_ms", "dense_sem_ms", "speedup"))
             for name, output_kind, functions, reference in cases:
-                results = measure(functions, reference, a.shape, warmup, iterations,
-                                  exact=name != "a_compA_add_b_B")
+                results = measure(functions, reference, a.shape, warmup, iterations)
                 timings = {
                     variant: f"{avg:.3f} ± {sem:.3f}"
                     for variant, (avg, sem) in results.items()
