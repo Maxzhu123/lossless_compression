@@ -3,6 +3,7 @@ import torch
 from torch import Tensor
 
 from LCT.LCTensor import MyCompressed
+from LCT.compress import a_compA_add_B
 from dist_configs import momentum_dist
 if TYPE_CHECKING:
     from LCT.tensor_buffer import TensorBuffer
@@ -51,8 +52,9 @@ class SparseSGDM:
                 if isinstance(p, MyCompressed):
                     p.add_comp_(mom, self.neg_lr)
                 else:
-                    update = mom.decompress() * self.neg_lr
-                    p.add_(update)
+                    # Decode and apply momentum in the fused kernel, keeping
+                    # only a BF16 result temporary and preserving p's identity.
+                    p.copy_(a_compA_add_B(mom.x, self.neg_lr, p))
             else:
                 update = mom * self.neg_lr
                 p.add_(update)

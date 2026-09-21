@@ -19,7 +19,7 @@ from .primitives import pack_bf16
 @triton.jit
 def _estimate_center_kernel(
     source_bits, center_out, size,
-    SAMPLE_SIZE: tl.constexpr, STRIDE, PRECOMPUTED: tl.constexpr,
+    SAMPLE_SIZE: tl.constexpr, PRECOMPUTED: tl.constexpr,
     IGNORE_ZERO: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
@@ -30,7 +30,14 @@ def _estimate_center_kernel(
     for i in range(0, SAMPLE_SIZE, BLOCK):
         idx = i + offsets
         mask = idx < SAMPLE_SIZE
-        pos = tl.minimum(idx * STRIDE, size - 1)
+        # One deterministic jittered sample per region avoids repeatedly
+        # visiting the same columns when a fixed stride aligns with a matrix.
+        # Integer hashing needs no RNG state, sample buffer, or extra launch.
+        hashed = idx.to(tl.uint32) * 0x9E3779B9
+        start = idx.to(tl.int64) * size // SAMPLE_SIZE
+        end = (idx.to(tl.int64) + 1) * size // SAMPLE_SIZE
+        jitter = (hashed.to(tl.uint64) * (end - start).to(tl.uint64)) >> 32
+        pos = start + jitter.to(tl.int64)
         value = tl.load(source_bits + pos, mask=mask, other=0).to(tl.int32)
         if PRECOMPUTED:
             exp = value - 127

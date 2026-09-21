@@ -58,12 +58,11 @@ def geometry(distribution: Distribution):
 
 
 def _estimate_center(source, size, *, precomputed, ignore_zero=False):
-    """Estimate the exponent center from strided samples on the GPU."""
+    """Estimate the exponent center from stratified jittered GPU samples."""
     sample_size = min(size, CENTER_SAMPLE_SIZE)
-    stride = size // sample_size
     center = torch.empty(1, dtype=torch.int32, device=source.device)
     _estimate_center_kernel[(1,)](
-        source, center, size, SAMPLE_SIZE=sample_size, STRIDE=stride,
+        source, center, size, SAMPLE_SIZE=sample_size,
         PRECOMPUTED=precomputed, IGNORE_ZERO=ignore_zero,
     )
     return center
