@@ -23,13 +23,14 @@ class Result:
     decompress_sem_ms: float = float("nan")
 
 
-def benchmark(codec, tensor, *, warmup=1, iterations=5):
-    """Validate bits, warm up, then measure encode/decode independently.
+def benchmark(codec, tensor, *, warmup=1, iterations=5, verify=True):
+    """Optionally validate bits, warm up, then time encode/decode independently.
 
     Calibrate SplitZip before calling. CPU↔GPU copies are included for ZipNN
     and DFloat11 encoding. Times are wall-clock, synchronized on tensor.device;
     they are not kernel-only throughput numbers. No autograd is retained.
     SEM is sample standard deviation / sqrt(iterations), or NaN for one sample.
+    Set verify=False to skip the input clone and round-trip correctness pass.
     """
     if warmup < 0 or iterations < 1:
         raise ValueError("warmup must be nonnegative and iterations positive")
@@ -38,18 +39,20 @@ def benchmark(codec, tensor, *, warmup=1, iterations=5):
         if tensor.device.type == "cuda":
             torch.cuda.synchronize(tensor.device)
 
-    original = tensor.detach().clone()
+    if verify:
+        original = tensor.detach().clone()
     encoded = codec.compress(tensor)
-    restored = codec.decompress(encoded)
-    sync()
-    expected = original.contiguous().reshape(-1).view(torch.int16)
-    if not torch.equal(expected, tensor.detach().contiguous().reshape(-1).view(torch.int16)):
-        raise AssertionError("compress modified the input")
-    if (restored.shape != tensor.shape or restored.dtype != tensor.dtype
-            or restored.device != tensor.device
-            or not torch.equal(expected, restored.contiguous().reshape(-1).view(torch.int16))):
-        raise AssertionError("baseline failed bitwise round-trip verification")
-    del original, restored, expected
+    if verify:
+        restored = codec.decompress(encoded)
+        sync()
+        expected = original.contiguous().reshape(-1).view(torch.int16)
+        if not torch.equal(expected, tensor.detach().contiguous().reshape(-1).view(torch.int16)):
+            raise AssertionError("compress modified the input")
+        if (restored.shape != tensor.shape or restored.dtype != tensor.dtype
+                or restored.device != tensor.device
+                or not torch.equal(expected, restored.contiguous().reshape(-1).view(torch.int16))):
+            raise AssertionError("baseline failed bitwise round-trip verification")
+        del original, restored, expected
 
     for _ in range(warmup):
         temporary = codec.compress(tensor)

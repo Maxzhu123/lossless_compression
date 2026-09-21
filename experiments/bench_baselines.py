@@ -48,10 +48,6 @@ def main():
             )
             return gamma.sample((elements,)).to(torch.bfloat16)
 
-    if any(name not in {"splitzip", "dfloat11", "zipnn"} for name in methods):
-        raise ValueError("Methods must be splitzip, dfloat11, or zipnn")
-    if not torch.cuda.is_available():
-        raise RuntimeError("This experiment requires CUDA")
     x = make_data(seed)
     output_dir = Path(__file__).resolve().parent / "results"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -60,14 +56,16 @@ def main():
             calibration = make_data(seed + 1)
             codec = SplitZip(calibration)
             del calibration
-        elif name == "dfloat11":
-            codec = DFloat11(encoder=dfloat11_encoder)
         else:
-            codec = ZipNN(threads=threads)
-        result = benchmark(codec, x, warmup=warmup, iterations=iterations)
+            codec = {
+                "dfloat11": lambda: DFloat11(encoder=dfloat11_encoder),
+                "zipnn": lambda: ZipNN(threads=threads),
+            }[name]()
+        result = benchmark(codec, x, warmup=warmup, iterations=iterations, verify=False)
         print(
             f"{name} | encode: {result.compress_ms:.3f} ± {result.compress_sem_ms:.3f} ms"
-            f" | decode: {result.decompress_ms:.3f} ± {result.decompress_sem_ms:.3f} ms",
+            f" | decode: {result.decompress_ms:.3f} ± {result.decompress_sem_ms:.3f} ms"
+            f" | compression ratio (original/compressed): {result.original_bytes / result.compressed_bytes:.3f}x",
             flush=True,
         )
         output = output_dir / f"{name}_{family.value}_{x.nbytes / 1024 ** 3:g}gib.csv"
