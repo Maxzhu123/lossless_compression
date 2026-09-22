@@ -13,18 +13,6 @@ def dense_weight(weight):
     return weight.decompress() if isinstance(weight, LCTTensor) else weight
 
 
-class DenseWeight(torch.autograd.Function):
-    """Decode once while routing dense gradients back to the original weight."""
-
-    @staticmethod
-    def forward(ctx, weight):
-        return dense_weight(weight)
-
-    @staticmethod
-    def backward(ctx, grad):
-        return grad
-
-
 @torch.compile(fullgraph=True)
 def _restore_normalized(x, rstd, gain):
     # Match fused RMSNorm: apply the gain in FP32, then round once to BF16.
@@ -45,7 +33,7 @@ class RMSLinear(torch.autograd.Function):
         return output , rstd
 
     @staticmethod
-    @torch.compile()
+    # @torch.compile()
     def rms_linear_backward(norm_weight, grad, W_dense, rstd, x, bias_dtype):
         gain = norm_weight.to(x.dtype)
         grad = grad.reshape(-1, grad.shape[-1])
@@ -59,15 +47,15 @@ class RMSLinear(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, weight, norm_weight, bias, buffer=None, compressed=False,
-                distribution=None, min_elements=65536):
+                distribution=None, min_elements=65536, decoded_weight=None):
         ctx.compressed = compressed and x.numel() >= min_elements
-        W_dense = dense_weight(weight)
+        W_dense = dense_weight(weight) if decoded_weight is None else decoded_weight
 
         output, rstd = RMSLinear.rms_linear(x, norm_weight, W_dense, bias)
 
         # Save for autograd
         ctx.input = compress(x, distribution=distribution or act_dist, buffer=buffer) if ctx.compressed else x
-        ctx.save_for_backward(norm_weight, rstd, weight)
+        ctx.save_for_backward(norm_weight, rstd, weight if decoded_weight is None else decoded_weight)
         ctx.bias_dtype = bias.dtype
         return output
 
@@ -80,7 +68,8 @@ class RMSLinear(torch.autograd.Function):
         ctx.input = None
 
         W_dense = dense_weight(weight)
-        return RMSLinear.rms_linear_backward(norm_weight, grad, W_dense, rstd, x, ctx.bias_dtype) + (None, None, None, None)
+        grads = RMSLinear.rms_linear_backward(norm_weight, grad, W_dense, rstd, x, ctx.bias_dtype)
+        return grads + (None,) * (len(ctx.needs_input_grad) - 4)
 
 
 class _RMSNormQKV(torch.autograd.Function):
@@ -269,36 +258,51 @@ class FlashAttention(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, q, k, v, weight, bias, buffer, compressed, distribution, min_elements):
+    @torch.compile()
+    def attention_forward(q, k, v, W_dense, bias):
         out, lse, cq, ck, max_q, max_k, rng, unused, _ = (
             torch.ops.aten._scaled_dot_product_flash_attention.default(
                 q, k, v, 0.0, True, False, scale=0.12))
+        hidden = out.transpose(1, 2).reshape(q.shape[0], q.shape[2], -1)
+        output = F.linear(hidden, W_dense, bias.to(out.dtype))
+        return output, out, (lse, cq, ck, max_q, max_k, rng, unused)
+
+    @staticmethod
+    # @torch.compile()
+    def attention_backward(grad_output, q, k, v, out, W_dense, auxiliary, bias_dtype):
+        batch, heads, length, head_dim = q.shape
+        g = grad_output.reshape(-1, grad_output.shape[-1])
+        hidden = out.transpose(1, 2).reshape(-1, heads * head_dim)
+        grad_weight = g.T @ hidden
+        grad_bias = g.sum(0).to(bias_dtype)
+        grad_attention = (g @ W_dense).reshape(
+            batch, length, heads, head_dim).transpose(1, 2)
+        lse, cq, ck, max_q, max_k, rng, unused = auxiliary
+        dq, dk, dv = torch.ops.aten._scaled_dot_product_flash_attention_backward.default(
+            grad_attention, q, k, v, out, lse, cq, ck, max_q, max_k,
+            0.0, True, rng, unused, scale=0.12)
+        return dq, dk, dv, grad_weight, grad_bias
+
+    @staticmethod
+    def forward(ctx, q, k, v, weight, bias, buffer, compressed, distribution, min_elements):
+        W_dense = dense_weight(weight)
+        output, out, ctx.auxiliary = FlashAttention.attention_forward(q, k, v, W_dense, bias)
         ctx.weight = weight
         ctx.bias_dtype = bias.dtype
         ctx.state = _AttentionState((q, k, v, out),
                                     compressed and q.numel() >= min_elements,
                                     buffer, distribution)
-        ctx.auxiliary = (lse, cq, ck, max_q, max_k, rng, unused)
-        hidden = out.transpose(1, 2).reshape(q.shape[0], q.shape[2], -1)
-        return F.linear(hidden, dense_weight(weight), bias.to(out.dtype))
+        return output
 
     @staticmethod
     def backward(ctx, grad_output):
         q, k, v, out = ctx.state.unpack()
-        batch, heads, length, head_dim = q.shape
-        g = grad_output.reshape(-1, grad_output.shape[-1])
-        hidden = out.transpose(1, 2).reshape(-1, heads * head_dim)
-        grad_weight = g.T @ hidden
-        grad_bias = g.sum(0).to(ctx.bias_dtype)
-        grad_attention = (g @ dense_weight(ctx.weight)).reshape(
-            batch, length, heads, head_dim).transpose(1, 2)
-        lse, cq, ck, max_q, max_k, rng, unused = ctx.auxiliary
-        dq, dk, dv = torch.ops.aten._scaled_dot_product_flash_attention_backward.default(
-            grad_attention, q, k, v, out, lse, cq, ck, max_q, max_k,
-            0.0, True, rng, unused, scale=0.12)
+        W_dense = dense_weight(ctx.weight)
+        grads = FlashAttention.attention_backward(
+            grad_output, q, k, v, out, W_dense, ctx.auxiliary, ctx.bias_dtype)
         ctx.state.close()
         ctx.state = ctx.auxiliary = ctx.weight = None
-        return dq, dk, dv, grad_weight, grad_bias, None, None, None, None
+        return grads + (None, None, None, None)
 
 
 def compress_weight(module, buffer=None, distribution=None):

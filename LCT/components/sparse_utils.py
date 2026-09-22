@@ -111,6 +111,7 @@ class SparseMuon:
         self.mu = mu
         self.distribution = distribution or momentum_dist
         self.match_weight_update = match_weight_update
+        self.decay = torch.tensor([1 - lr * weight_decay], dtype=torch.float32, device="cuda")
         if match_weight_update and any(p.ndim != 2 for p in self.params):
             raise ValueError("Matching fused weight updates require matrix parameters")
         self.compressed = compressed
@@ -144,14 +145,10 @@ class SparseMuon:
 
             # 2) Apply weight decay and the Muon update.
             if isinstance(p, LCTTensor):
-                decay = torch.tensor(
-                    [1 - self.lr * self.weight_decay], dtype=torch.float32, device=p.device,
-                )
-                p.mul_add_(decay, update, beta=self.neg_lr, alpha_is_one=self.weight_decay == 0)
+                p.mul_add_(self.decay, update, beta=self.neg_lr, alpha_is_one=self.weight_decay == 0)
             elif self.match_weight_update:
-                decay = torch.tensor([1 - self.lr * self.weight_decay], dtype=torch.float32, device=p.device)
                 muon_dense_update_kernel[(triton.cdiv(p.numel(), 1024),)](
-                    p, update, decay, self.neg_lr, p.numel(), p.shape[1],
+                    p, update, self.decay, self.neg_lr, p.numel(), p.shape[1],
                     *p.stride(), *update.stride(),
                     ALPHA_IS_ONE=self.weight_decay == 0, BLOCK=1024,
                 )
