@@ -13,6 +13,7 @@ from datetime import datetime
 import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from dataloader import load_data_shard
 from dist_configs import weight_dist, momentum_dist, act_dist, act_relu_dist
@@ -28,6 +29,8 @@ COMPRESS_ACTIVATIONS = True  # BF16 saves, including native FlashAttention Q/K/V
 COMPRESS_OPTIMISER = True  # Muon momentum only; AdamW moments stay dense.
 BUFFER = True  # Shared fallback arena; never reset while weights/state are live.
 COMPILE = True  # Compile dense model regions; LCT operations run eagerly.
+CHECKPOINT_HEAD = True
+CHUNK_TOKENS = 4096  # Tokens per checkpointed output projection and loss.
 BUFFER_SIZE_MIB = 256  # Full-model/microbatch-32 checks used less than 77 MiB of fallback space.
 MIN_COMPRESS_ELEMENTS = 65536  # Avoid padding small activations to a full codec block.
 TRAIN_STEPS = 3350
@@ -77,12 +80,58 @@ def data_generator(pattern, batch_size, seq_len=SEQ_LEN, device=None):
 #             Architecture             #
 ########################################
 
-@torch.compile(dynamic=False, fullgraph=True)
-def softcap_cross_entropy(logits: Tensor, targets: Tensor):
-    """Compile only dense tensor operations, outside custom projection autograd."""
-    logits = logits.float()
-    logits = 15 * logits * (logits.square() + 15**2).rsqrt()
-    return F.cross_entropy(logits.reshape(targets.numel(), -1), targets.reshape(-1), reduction="sum")
+class SoftcapCrossEntropy(torch.autograd.Function):
+    """Summed loss for valid vocabulary targets; save logits and row statistics."""
+
+    @staticmethod
+    def head_loss(x, targets, weight, gains, bias, buffer, compressed, min_elements):
+        def project_and_loss(chunk, chunk_targets):
+            # Checkpointed chunks are consumed immediately; keep their input dense.
+            logits = RMSLinear.apply(
+                chunk, weight, gains, bias, buffer,
+                compressed and torch.is_grad_enabled() and not CHECKPOINT_HEAD,
+                act_dist, min_elements,
+            )
+            return SoftcapCrossEntropy.apply(logits, chunk_targets)
+
+        if not CHECKPOINT_HEAD:
+            return project_and_loss(x, targets)
+        x = x.reshape(-1, x.shape[-1])
+        targets = targets.reshape(-1)
+        loss = x.new_zeros((), dtype=torch.float32)
+        for start in range(0, targets.numel(), CHUNK_TOKENS):
+            chunk = x[start:start + CHUNK_TOKENS]
+            chunk_targets = targets[start:start + CHUNK_TOKENS]
+            if torch.is_grad_enabled():
+                # Non-reentrant checkpoint hooks conflict with the compiled loss backward.
+                loss = loss + checkpoint(project_and_loss, chunk, chunk_targets,
+                                         use_reentrant=True, preserve_rng_state=False)
+            else:
+                loss = loss + project_and_loss(chunk, chunk_targets)
+        return loss
+
+    @staticmethod
+    @torch.compile
+    def forward(ctx, logits: Tensor, targets: Tensor):
+        x = logits.float().reshape(targets.numel(), -1)
+        capped = 15 * x * (x.square() + 15**2).rsqrt()
+        logsumexp = capped.logsumexp(dim=-1, keepdim=True)
+        selected = capped.gather(1, targets.reshape(-1, 1))
+        ctx.save_for_backward(logits, targets, logsumexp)
+        return (logsumexp - selected).sum()
+
+    @staticmethod
+    @torch.compile
+    def backward(ctx, grad_output):
+        logits, targets, logsumexp = ctx.saved_tensors
+        x = logits.float().reshape(targets.numel(), -1)
+        inv = (x.square() + 15**2).rsqrt()
+        probabilities = (15 * x * inv - logsumexp).exp()
+        # Compilation fuses the comparison into backward without allocating a mask.
+        is_target = torch.arange(x.shape[-1], device=x.device) == targets.reshape(-1, 1)
+        # d[15*x/sqrt(x*x + 225)]/dx = 3375/(x*x + 225)**1.5.
+        grad_logits = (probabilities - is_target.to(x.dtype)) * inv.pow(3) * 15**3 * grad_output
+        return grad_logits.reshape(logits.shape).to(logits.dtype), None
 
 
 class RMSNorm(nn.Module):
@@ -231,18 +280,12 @@ class GPT(nn.Module):
         return state
 
     def forward(self, inputs: Tensor, targets: Tensor):
-        logits = self._forward(inputs)
-        # The compiled loss keeps its logits dense.
-        return softcap_cross_entropy(logits, targets)
-
-    def _forward(self, inputs):
         x = self._embed(inputs)
         for block in self.blocks:
             x = block(x)
-        return RMSLinear.apply(
-            x, self.proj.weight, self.norm2.gains, self.proj.bias, self.tensor_buffer,
-            self.compress_activations and torch.is_grad_enabled(),
-            act_dist, self.min_compress_elements,
+        return SoftcapCrossEntropy.head_loss(
+            x, targets, self.proj.weight, self.norm2.gains, self.proj.bias,
+            self.tensor_buffer, self.compress_activations, self.min_compress_elements,
         )
 
     def _embed(self, inputs: Tensor):
@@ -346,6 +389,7 @@ def train(device):
     print_log(f"COMPRESS_WEIGHTS={COMPRESS_WEIGHTS}, COMPRESS_ACTIVATIONS={COMPRESS_ACTIVATIONS}, "
               f"COMPRESS_OPTIMISER={COMPRESS_OPTIMISER}, BUFFER={BUFFER}")
     print_log(f"BF16 matrices; FP32 biases/gains; native FlashAttention; compile={COMPILE}")
+    print_log(f"checkpoint head={CHECKPOINT_HEAD}, chunk tokens={CHUNK_TOKENS}")
     print_log(f"sequence length={SEQ_LEN}, batch={batch_size} tokens, "
            f"train microbatch={TRAIN_MICROBATCH_SEQUENCES} sequences, "
            f"accumulation={accumulation_steps}, validation microbatch={VAL_MICROBATCH_SEQUENCES} sequences")
