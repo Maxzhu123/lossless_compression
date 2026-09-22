@@ -7,29 +7,27 @@ It was prepared as a simplified version of the speedrun for use in neural net op
 import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 from pathlib import Path
-from contextlib import nullcontext
-import sys
 import time
 from datetime import datetime
 
 import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
-from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from dataloader import load_data_shard
-from LCT.layers import Linear, Embedding, named_trainable_tensors, rms_norm_linears
-from LCT.saved_tensors import ActivationCompression
+from dist_configs import weight_dist, momentum_dist, act_dist, act_relu_dist
+from LCT.layers import Linear, Embedding, RMSNormFunction, RMSLinear, Relu2Linear, named_trainable_tensors, rms_norm_qkv
 from LCT.sparse_utils import SparseAdamW, SparseMuon
 from LCT.tensor_buffer import TensorBuffer
+from LCT.attention import FlashAttention
 
 DATA_ROOT = Path(__file__).resolve().parent
 LOG_ROOT = DATA_ROOT / "logs"
-COMPRESS_WEIGHTS = False  # All BF16 matrices, including embeing and LM head.
+COMPRESS_WEIGHTS = True  # All BF16 matrices, including embeing and LM head.
 COMPRESS_ACTIVATIONS = True  # BF16 saves, including native FlashAttention Q/K/V/output.
-COMPRESS_OPTIMISER = False  # Muon momentum only; AdamW moments stay dense.
-BUFFER = False  # Shared fallback arena; never reset while weights/state are live.
-BUFFER_SIZE_MIB = 1024
+COMPRESS_OPTIMISER = True  # Muon momentum only; AdamW moments stay dense.
+BUFFER = True  # Shared fallback arena; never reset while weights/state are live.
+BUFFER_SIZE_MIB = 256  # Full-model/microbatch-32 checks used less than 77 MiB of fallback space.
 MIN_COMPRESS_ELEMENTS = 65536  # Avoid padding small activations to a full codec block.
 TRAIN_STEPS = 3350
 SAVE_EVERY = 300
@@ -101,6 +99,7 @@ class Rotary(nn.Module):
         angular_freq = (1 / 1024) ** torch.linspace(0, 1, steps=dim//4, dtype=torch.float32)
         self.register_buffer("angular_freq", torch.cat([angular_freq, angular_freq.new_zeros(dim//4)]))
 
+    @torch.compile()
     def forward(self, x_BTHD: Tensor):
         pos = torch.arange(x_BTHD.size(1), dtype=torch.float32, device=x_BTHD.device)
         theta = torch.outer(pos, self.angular_freq)[None, :, None, :]
@@ -111,8 +110,12 @@ class Rotary(nn.Module):
         return torch.cat((y1, y2), 3).type_as(x_BTHD)
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, dim: int, head_dim=128):
+    def __init__(self, dim: int, head_dim=128, compress_activations=False,
+                 min_compress_elements=MIN_COMPRESS_ELEMENTS):
         super().__init__()
+        self.compress_activations = compress_activations
+        self.min_compress_elements = min_compress_elements
+        self.tensor_buffer = None
         if dim % head_dim:
             raise ValueError("model_dim must be divisible by head_dim")
         self.num_heads = dim // head_dim
@@ -126,37 +129,56 @@ class CausalSelfAttention(nn.Module):
 
     def forward(self, x: Tensor, norm_weight: Tensor):
         B, T = x.size(0), x.size(1)
-        q, k, v = rms_norm_linears(x, norm_weight, (self.q, self.k, self.v))
+        q, k, v = rms_norm_qkv(
+            x, norm_weight, self.q, self.k, self.v, buffer=self.tensor_buffer,
+            compressed=self.compress_activations and torch.is_grad_enabled(),
+            distribution=act_dist, min_elements=self.min_compress_elements,
+        )
         q = q.view(B, T, self.num_heads, self.head_dim)
         k = k.view(B, T, self.num_heads, self.head_dim)
         v = v.view(B, T, self.num_heads, self.head_dim)
-        q, k = F.rms_norm(q, (q.size(-1),)), F.rms_norm(k, (k.size(-1),))
+        norm_args = (None, self.tensor_buffer,
+                     self.compress_activations and torch.is_grad_enabled(),
+                     act_dist, self.min_compress_elements)
+        q = RMSNormFunction.apply(q, *norm_args)
+        k = RMSNormFunction.apply(k, *norm_args)
         q, k = self.rotary(q), self.rotary(k)
-        # Keep PyTorch's native FlashAttention forward and backward. Saved
-        # BF16 tensors are packed by the model's activation-compression hooks.
-        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-            y = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2),
-                                               v.transpose(1, 2), scale=0.12, is_causal=True).transpose(1, 2)
-        y = y.contiguous().view(B, T, self.num_heads * self.head_dim)
-        y = self.proj(y)
-        return y
+        # Explicit Q/K/V/output cache, shared with projection backward.
+        return FlashAttention.apply(
+            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
+            self.proj.weight, self.proj.bias,
+            self.tensor_buffer, self.compress_activations and torch.is_grad_enabled(),
+            act_dist, self.min_compress_elements,
+        )
 
 class MLP(nn.Module):
-    def __init__(self, dim: int):
+    def __init__(self, dim: int, compress_activations=False, min_compress_elements=MIN_COMPRESS_ELEMENTS):
         super().__init__()
+        self.compress_activations = compress_activations
+        self.min_compress_elements = min_compress_elements
+        self.tensor_buffer = None
         hdim = 4 * dim
         self.fc = Linear(dim, hdim)
         self.proj = Linear(hdim, dim)
 
     def forward(self, x: Tensor, norm_weight: Tensor):
-        z = self.fc.forward_rms_norm(x, norm_weight)
-        return self.proj(z.relu().square())
+        z = RMSLinear.apply(
+            x, self.fc.weight, norm_weight, self.fc.bias, buffer=self.tensor_buffer,
+            compressed=self.compress_activations and torch.is_grad_enabled(),
+            distribution=act_dist, min_elements=self.min_compress_elements,
+        )
+        return Relu2Linear.apply(
+            z, self.proj.weight, self.proj.bias, self.tensor_buffer,
+            self.compress_activations and torch.is_grad_enabled(),
+            act_relu_dist, self.min_compress_elements,
+        )
 
 class Block(nn.Module):
-    def __init__(self, dim: int):
+    def __init__(self, dim: int, compress_activations=False, min_compress_elements=MIN_COMPRESS_ELEMENTS):
         super().__init__()
-        self.attn = CausalSelfAttention(dim)
-        self.mlp = MLP(dim)
+        self.attn = CausalSelfAttention(dim, compress_activations=compress_activations,
+                                        min_compress_elements=min_compress_elements)
+        self.mlp = MLP(dim, compress_activations, min_compress_elements)
         self.norm1 = RMSNorm(dim)
         self.norm2 = RMSNorm(dim)
 
@@ -170,7 +192,8 @@ class GPT(nn.Module):
                  compress_activations=False, min_compress_elements=MIN_COMPRESS_ELEMENTS):
         super().__init__()
         self.embed = Embedding(vocab_size, model_dim)
-        self.blocks = nn.ModuleList([Block(model_dim) for _ in range(num_layers)])
+        self.blocks = nn.ModuleList([Block(model_dim, compress_activations, min_compress_elements)
+                                     for _ in range(num_layers)])
         self.compress_activations = compress_activations
         self.min_compress_elements = min_compress_elements
         self.proj = Linear(model_dim, vocab_size)
@@ -180,11 +203,14 @@ class GPT(nn.Module):
 
     def set_tensor_buffer(self, buffer):
         self.tensor_buffer = buffer
+        for block in self.blocks:
+            block.mlp.tensor_buffer = buffer
+            block.attn.tensor_buffer = buffer
 
     def compress_weights(self):
         for module in self.modules():
             if isinstance(module, (Linear, Embedding)):
-                module.compress_weight(self.tensor_buffer)
+                module.compress_weight(self.tensor_buffer, distribution=weight_dist)
 
     def named_trainable_tensors(self):
         return named_trainable_tensors(self)
@@ -205,25 +231,26 @@ class GPT(nn.Module):
         return state
 
     def forward(self, inputs: Tensor, targets: Tensor):
-        context = (ActivationCompression(self.parameters(), buffer=self.tensor_buffer,
-                                        min_elements=self.min_compress_elements)
-                   if self.compress_activations and torch.is_grad_enabled() else nullcontext())
-        with context:
-            return self._forward(inputs, targets)
+        logits = self._forward(inputs)
+        # The compiled loss keeps its logits dense.
+        return softcap_cross_entropy(logits, targets)
 
-    def _forward(self, inputs, targets):
+    def _forward(self, inputs):
         x = self._embed(inputs)
         for block in self.blocks:
             x = block(x)
-        return self._cross_entropy(x, targets)
+        return RMSLinear.apply(
+            x, self.proj.weight, self.norm2.gains, self.proj.bias, buffer=self.tensor_buffer,
+            compressed=self.compress_activations and torch.is_grad_enabled(),
+            distribution=act_dist, min_elements=self.min_compress_elements,
+        )
 
-    @torch.compile(dynamic=False)
     def _embed(self, inputs: Tensor):
-        return self.norm1(self.embed(inputs))
-
-    def _cross_entropy(self, x: Tensor, targets: Tensor):
-        logits = self.proj.forward_rms_norm(x, self.norm2.gains)
-        return softcap_cross_entropy(logits, targets)
+        return RMSNormFunction.apply(
+            self.embed(inputs), self.norm1.gains, self.tensor_buffer,
+            self.compress_activations and torch.is_grad_enabled(),
+            act_dist, self.min_compress_elements,
+        )
 
 
 def initialize_model(model):
@@ -253,7 +280,8 @@ def make_optimizers(model, compressed=False):
         dict(params=[p for p in named.values() if p.ndim < 2], lr=0.01),
     ], compressed=False, buffer=model.tensor_buffer)
     muon = SparseMuon([p for name, p in named.items() if name.startswith("blocks.") and p.ndim >= 2],
-                      lr=0.035, weight_decay=0.025, compressed=compressed, buffer=model.tensor_buffer)
+                      lr=0.035, weight_decay=0.025, compressed=compressed, buffer=model.tensor_buffer,
+                      distribution=momentum_dist, match_weight_update=True)
     parameters = [p for group in adam.param_groups for p in group['params']] + muon.params
     assert len(parameters) == len(named) and {id(p) for p in parameters} == {id(p) for p in named.values()}
     for group in adam.param_groups:

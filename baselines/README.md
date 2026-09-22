@@ -98,7 +98,6 @@ DFloat11 also checks its decoder's table and signed 32-bit size limits.
 ```bash
 python -m baselines.benchmark --device cuda --elements 65536 --iterations 5
 python -m baselines.benchmark --method zipnn --device cpu --threads 4
-python -m unittest baselines.test_baselines -v
 ```
 
 The benchmark verifies bitwise recovery and input immutability, then reports

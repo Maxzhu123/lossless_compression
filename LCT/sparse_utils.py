@@ -1,11 +1,13 @@
 from typing import Iterable, TYPE_CHECKING
 import math
 import torch
+import triton
 from torch import Tensor
 
 from LCT.LCTensor import MyCompressed
 from LCT.compress import a_compA_add_B
 from LCT.dist_configs import momentum_dist
+from LCT.kernels.optimizer import muon_dense_update_kernel
 if TYPE_CHECKING:
     from LCT.tensor_buffer import TensorBuffer
 
@@ -99,13 +101,18 @@ class SparseMuon:
     """Muon with bfloat16 momentum, optionally compressed between steps."""
 
     def __init__(self, params: Iterable[MyCompressed | Tensor], lr=0.02, weight_decay=0, mu=0.95,
-                 buffer: TensorBuffer|None=None, compressed=True):
+                 buffer: TensorBuffer|None=None, compressed=True, distribution=None,
+                 match_weight_update=False):
         self.params = list(params)
         for p in self.params:
             assert isinstance(p, (MyCompressed, Tensor)) and p.ndim >= 2, "Muon requires matrix parameters"
         self.lr = lr
         self.weight_decay = weight_decay
         self.mu = mu
+        self.distribution = distribution or momentum_dist
+        self.match_weight_update = match_weight_update
+        if match_weight_update and any(p.ndim != 2 for p in self.params):
+            raise ValueError("Matching fused weight updates require matrix parameters")
         self.compressed = compressed
         self.buffer = buffer
 
@@ -131,7 +138,7 @@ class SparseMuon:
 
             update = muon_update(g, mom, mu=self.mu)
             if self.compressed:
-                mom = MyCompressed(mom, buffer=self.buffer, dist=momentum_dist)
+                mom = MyCompressed(mom, buffer=self.buffer, dist=self.distribution)
             self.momentums[i] = mom
             del mom
 
@@ -141,9 +148,20 @@ class SparseMuon:
                     [1 - self.lr * self.weight_decay], dtype=torch.float32, device=p.device,
                 )
                 p.mul_add_(decay, update, beta=self.neg_lr, alpha_is_one=self.weight_decay == 0)
+            elif self.match_weight_update:
+                decay = torch.tensor([1 - self.lr * self.weight_decay], dtype=torch.float32, device=p.device)
+                muon_dense_update_kernel[(triton.cdiv(p.numel(), 1024),)](
+                    p, update, decay, self.neg_lr, p.numel(), p.shape[1],
+                    *p.stride(), *update.stride(),
+                    ALPHA_IS_ONE=self.weight_decay == 0, BLOCK=1024,
+                )
             else:
                 p.mul_(1 - self.lr * self.weight_decay)
                 p.add_(update, alpha=-self.lr)
+            if self.match_weight_update:
+                # Raw Triton writes and wrapper updates bypass PyTorch's
+                # automatic in-place version increment.
+                torch.autograd.graph.increment_version(p)
             del update
 
     def zero_grad(self):

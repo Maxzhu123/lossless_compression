@@ -3,12 +3,7 @@
 Uses the training model, initialization, data, optimizers and batch settings.
 No validation, checkpoints or log files. First-time compilation can take longer.
 """
-from pathlib import Path
-import sys
 import time
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import train_gpt_lct as training
 
@@ -16,11 +11,11 @@ COMPRESS_WEIGHTS = False
 COMPRESS_ACTIVATIONS = False
 COMPRESS_OPTIMISER = False
 BUFFER = False
-BUFFER_SIZE_MIB = training.BUFFER_SIZE_MIB
+BUFFER_SIZE_MIB = 256
 SEQ_LEN = training.SEQ_LEN
 TRAIN_BATCH_TOKENS = training.TRAIN_BATCH_TOKENS
 SEQUENCES_PER_MICROBATCH = training.TRAIN_MICROBATCH_SEQUENCES
-WARMUP_STEPS = 5
+WARMUP_STEPS = 3
 MEASURE_STEPS = 5
 # Use the trainer's compilation boundaries; do not compile the whole LCT model.
 
@@ -29,12 +24,6 @@ def main():
     import torch
     from LCT.tensor_buffer import TensorBuffer
 
-    if WARMUP_STEPS < 0 or MEASURE_STEPS < 1:
-        raise ValueError("Warmup must be nonnegative and measured steps must be positive")
-    if SEQ_LEN < 1 or TRAIN_BATCH_TOKENS < 1 or SEQUENCES_PER_MICROBATCH < 1:
-        raise ValueError("Sequence length, batch tokens, and microbatch size must be positive")
-    if TRAIN_BATCH_TOKENS % SEQ_LEN:
-        raise ValueError("Token batch must divide evenly into sequences")
     sequences = TRAIN_BATCH_TOKENS // SEQ_LEN
     accumulation_steps = (sequences + SEQUENCES_PER_MICROBATCH - 1) // SEQUENCES_PER_MICROBATCH
     compressed = COMPRESS_WEIGHTS or COMPRESS_ACTIVATIONS or COMPRESS_OPTIMISER
@@ -44,8 +33,8 @@ def main():
           f"Muon momentum={COMPRESS_OPTIMISER}, buffer={use_buffer}, "
           f"{SEQUENCES_PER_MICROBATCH} sequences/microbatch, "
           f"{accumulation_steps} microbatches/step", flush=True)
-    if not torch.cuda.is_available():
-        raise RuntimeError("This test requires CUDA")
+
+
     torch.cuda.set_device(0)
     torch.manual_seed(training.SEED)
     model = training.GPT(training.VOCAB_SIZE, training.NUM_LAYERS, training.MODEL_DIM,
@@ -90,6 +79,8 @@ def main():
               f"loss={total_loss.item()/tokens:.4f}, time={elapsed:.2f}s", flush=True)
     print(f"Peak allocated after warmup: {max(peaks):.1f} MiB", flush=True)
     print(f"Mean step time after warmup: {sum(step_times)/len(step_times):.3f}s", flush=True)
+    return {"peak_mib": max(peaks), "mean_step_seconds": sum(step_times)/len(step_times),
+            "final_train_loss": total_loss.item()/tokens, "tokens_per_step": tokens}
 
 
 
