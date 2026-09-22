@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from torch import Tensor
     from .comp_tensor import CompressedTensor
 
+@torch.compiler.disable
 def compress(
     data: Tensor,
     distribution: Distribution | None = None,
@@ -23,9 +24,10 @@ def compress(
     """ Losslessly encode the exponent byte of a CUDA bfloat16 tensor."""
     if distribution is None:
         distribution = Distribution()
-    return compress_dense(data, distribution, buffer, allow_raw=allow_raw)
+    return compress_dense(data.detach(), distribution, buffer, allow_raw=allow_raw)
 
 
+@torch.compiler.disable
 def decompress(data: CompressedTensor) -> Tensor:
     """ Decode a tensor produced by :func:`compress`."""
     if data.layout == StorageLayout.COMPRESSED:

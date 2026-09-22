@@ -3,26 +3,31 @@
 Uses the training model, initialization, data, optimizers and batch settings.
 No validation, checkpoints or log files. First-time compilation can take longer.
 """
+import gc
 import time
 
 import train_gpt_lct as training
 
-COMPRESS_WEIGHTS = False
+COMPRESS_WEIGHTS = True
 COMPRESS_ACTIVATIONS = False
 COMPRESS_OPTIMISER = False
 BUFFER = False
-BUFFER_SIZE_MIB = 256
+COMPILE = True
+LOG_GRAPH_BREAKS = True
+BUFFER_SIZE_MIB = 64
 SEQ_LEN = training.SEQ_LEN
 TRAIN_BATCH_TOKENS = training.TRAIN_BATCH_TOKENS
 SEQUENCES_PER_MICROBATCH = training.TRAIN_MICROBATCH_SEQUENCES
 WARMUP_STEPS = 3
 MEASURE_STEPS = 5
-# Use the trainer's compilation boundaries; do not compile the whole LCT model.
 
 
 def main():
     import torch
     from LCT.tensor_buffer import TensorBuffer
+
+    # Emit graph-break reasons and source locations while Dynamo traces the model.
+    torch._logging.set_logs(graph_breaks=LOG_GRAPH_BREAKS)
 
     sequences = TRAIN_BATCH_TOKENS // SEQ_LEN
     accumulation_steps = (sequences + SEQUENCES_PER_MICROBATCH - 1) // SEQUENCES_PER_MICROBATCH
@@ -46,6 +51,8 @@ def main():
         model.set_tensor_buffer(TensorBuffer(BUFFER_SIZE_MIB * 2**20, device="cuda"))
     if COMPRESS_WEIGHTS:
         model.compress_weights()
+    if COMPILE:
+        model.compile()
 
     adam, muon = training.make_optimizers(model, compressed=COMPRESS_OPTIMISER)
     tokens = TRAIN_BATCH_TOKENS
@@ -53,6 +60,10 @@ def main():
     peaks = []
     step_times = []
     for step in range(WARMUP_STEPS + MEASURE_STEPS):
+        if step == WARMUP_STEPS:
+            # Dynamo's graph-break tracing can leave tensor-owning cycles behind.
+            # Release warmup garbage before measuring steady-state memory/time.
+            gc.collect()
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
         start = time.perf_counter()

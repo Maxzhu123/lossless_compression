@@ -16,7 +16,7 @@ import torch.nn.functional as F
 
 from dataloader import load_data_shard
 from dist_configs import weight_dist, momentum_dist, act_dist, act_relu_dist
-from LCT.layers import Linear, Embedding, RMSNormFunction, RMSLinear, Relu2Linear, named_trainable_tensors, rms_norm_qkv
+from LCT.layers import Linear, Embedding, RMSNormFunction, RMSLinear, Relu2Linear, compress_weight, named_trainable_tensors, rms_norm_qkv
 from LCT.sparse_utils import SparseAdamW, SparseMuon
 from LCT.tensor_buffer import TensorBuffer
 from LCT.attention import FlashAttention
@@ -27,6 +27,7 @@ COMPRESS_WEIGHTS = True  # All BF16 matrices, including embeing and LM head.
 COMPRESS_ACTIVATIONS = True  # BF16 saves, including native FlashAttention Q/K/V/output.
 COMPRESS_OPTIMISER = True  # Muon momentum only; AdamW moments stay dense.
 BUFFER = True  # Shared fallback arena; never reset while weights/state are live.
+COMPILE = True  # Compile dense model regions; LCT operations run eagerly.
 BUFFER_SIZE_MIB = 256  # Full-model/microbatch-32 checks used less than 77 MiB of fallback space.
 MIN_COMPRESS_ELEMENTS = 65536  # Avoid padding small activations to a full codec block.
 TRAIN_STEPS = 3350
@@ -36,8 +37,8 @@ NUM_LAYERS = 12
 MODEL_DIM = 768
 SEED = 0
 # Matrices use BF16 in every mode; biases and RMSNorm gains use FP32.
-# The transformer uses eager autograd and native FlashAttention. Compile the
-# dense loss separately so validation cannot disable fusion for the loss.
+# Compile dense regions around eager LCT operations and native FlashAttention.
+# Keep the dense loss compiled separately, including during validation.
 SEQ_LEN = 1024
 TRAIN_BATCH_TOKENS = 8 * 64 * 1024  # Tokens per optimizer step.
 VAL_TOKENS = 20 * 524288
@@ -99,7 +100,6 @@ class Rotary(nn.Module):
         angular_freq = (1 / 1024) ** torch.linspace(0, 1, steps=dim//4, dtype=torch.float32)
         self.register_buffer("angular_freq", torch.cat([angular_freq, angular_freq.new_zeros(dim//4)]))
 
-    @torch.compile()
     def forward(self, x_BTHD: Tensor):
         pos = torch.arange(x_BTHD.size(1), dtype=torch.float32, device=x_BTHD.device)
         theta = torch.outer(pos, self.angular_freq)[None, :, None, :]
@@ -163,9 +163,9 @@ class MLP(nn.Module):
 
     def forward(self, x: Tensor, norm_weight: Tensor):
         z = RMSLinear.apply(
-            x, self.fc.weight, norm_weight, self.fc.bias, buffer=self.tensor_buffer,
-            compressed=self.compress_activations and torch.is_grad_enabled(),
-            distribution=act_dist, min_elements=self.min_compress_elements,
+            x, self.fc.weight, norm_weight, self.fc.bias, self.tensor_buffer,
+            self.compress_activations and torch.is_grad_enabled(),
+            act_dist, self.min_compress_elements,
         )
         return Relu2Linear.apply(
             z, self.proj.weight, self.proj.bias, self.tensor_buffer,
@@ -191,7 +191,7 @@ class GPT(nn.Module):
     def __init__(self, vocab_size: int, num_layers: int, model_dim: int,
                  compress_activations=False, min_compress_elements=MIN_COMPRESS_ELEMENTS):
         super().__init__()
-        self.embed = Embedding(vocab_size, model_dim)
+        self.embed = nn.Embedding(vocab_size, model_dim, dtype=torch.bfloat16)
         self.blocks = nn.ModuleList([Block(model_dim, compress_activations, min_compress_elements)
                                      for _ in range(num_layers)])
         self.compress_activations = compress_activations
@@ -209,8 +209,8 @@ class GPT(nn.Module):
 
     def compress_weights(self):
         for module in self.modules():
-            if isinstance(module, (Linear, Embedding)):
-                module.compress_weight(self.tensor_buffer, distribution=weight_dist)
+            if isinstance(module, (Linear, nn.Embedding)):
+                compress_weight(module, self.tensor_buffer, distribution=weight_dist)
 
     def named_trainable_tensors(self):
         return named_trainable_tensors(self)
@@ -240,14 +240,14 @@ class GPT(nn.Module):
         for block in self.blocks:
             x = block(x)
         return RMSLinear.apply(
-            x, self.proj.weight, self.norm2.gains, self.proj.bias, buffer=self.tensor_buffer,
-            compressed=self.compress_activations and torch.is_grad_enabled(),
-            distribution=act_dist, min_elements=self.min_compress_elements,
+            x, self.proj.weight, self.norm2.gains, self.proj.bias, self.tensor_buffer,
+            self.compress_activations and torch.is_grad_enabled(),
+            act_dist, self.min_compress_elements,
         )
 
     def _embed(self, inputs: Tensor):
         return RMSNormFunction.apply(
-            self.embed(inputs), self.norm1.gains, self.tensor_buffer,
+            Embedding.apply(inputs, self.embed.weight), self.norm1.gains, self.tensor_buffer,
             self.compress_activations and torch.is_grad_enabled(),
             act_dist, self.min_compress_elements,
         )
@@ -331,6 +331,8 @@ def train(device):
         model.set_tensor_buffer(TensorBuffer(BUFFER_SIZE_MIB * 2**20, device=device))
     if COMPRESS_WEIGHTS:
         model.compress_weights()
+    if COMPILE:
+        model.compile()
 
 
 
@@ -343,7 +345,7 @@ def train(device):
     print_log(Path(__file__).read_text(), console=False)
     print_log(f"COMPRESS_WEIGHTS={COMPRESS_WEIGHTS}, COMPRESS_ACTIVATIONS={COMPRESS_ACTIVATIONS}, "
               f"COMPRESS_OPTIMISER={COMPRESS_OPTIMISER}, BUFFER={BUFFER}")
-    print_log("BF16 matrices; FP32 biases/gains; native FlashAttention; eager autograd")
+    print_log(f"BF16 matrices; FP32 biases/gains; native FlashAttention; compile={COMPILE}")
     print_log(f"sequence length={SEQ_LEN}, batch={batch_size} tokens, "
            f"train microbatch={TRAIN_MICROBATCH_SEQUENCES} sequences, "
            f"accumulation={accumulation_steps}, validation microbatch={VAL_MICROBATCH_SEQUENCES} sequences")

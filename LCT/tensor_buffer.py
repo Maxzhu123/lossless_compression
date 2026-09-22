@@ -5,6 +5,8 @@ import torch
 import triton
 from triton import language as tl
 
+from .tensor_buffer_ops import tensor_buffer_free
+
 
 _ALIGNMENT = 16
 _STATUS_OK = 0
@@ -300,14 +302,7 @@ class TensorBuffer:
             raise ValueError("allocation belongs to a different allocator")
         if allocation.descriptor.device != self.device:
             raise ValueError("allocation must be on the allocator device")
-        status = torch.empty(1, dtype=torch.int32, device=self.device)
-        _free_kernel[(1,)](
-            allocation.descriptor,
-            self._free_starts, self._free_sizes, self._free_count,
-            self._lock, self._generation, status,
-            MAX_FREE_REGIONS=self.max_free_regions,
-        )
-        return status
+        return tensor_buffer_free(self._storage, allocation.descriptor, self.max_free_regions)
 
     def reset(self) -> None:
         """Reset asynchronously; previously returned descriptors become stale."""
