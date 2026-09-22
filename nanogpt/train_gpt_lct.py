@@ -17,7 +17,7 @@ from torch.utils.checkpoint import checkpoint
 
 from dataloader import load_data_shard
 from dist_configs import weight_dist, momentum_dist, act_dist, act_relu_dist
-from LCT.components.layers import Linear, Embedding, RMSNormFunction, RMSLinear, Relu2Linear, FlashAttention, compress_weight, named_trainable_tensors, rms_norm_qkv
+from LCT.components.layers import Linear, Embedding, RMSNormFunction, RMSLinear, Relu2Linear, FlashAttention, DenseWeight, compress_weight, named_trainable_tensors, rms_norm_qkv
 from LCT.components.sparse_utils import SparseAdamW, SparseMuon
 from LCT.tensor_buffer import TensorBuffer
 
@@ -84,17 +84,19 @@ class SoftcapCrossEntropy(torch.autograd.Function):
 
     @staticmethod
     def head_loss(x, targets, weight, gains, bias, buffer, compressed, min_elements):
-        def project_and_loss(chunk, chunk_targets):
+        W_dense = DenseWeight.apply(weight)
+
+        def project_and_loss(chunk, chunk_targets, W_dense):
             # Checkpointed chunks are consumed immediately; keep their input dense.
             logits = RMSLinear.apply(
-                chunk, weight, gains, bias, buffer,
+                chunk, W_dense, gains, bias, buffer,
                 compressed and torch.is_grad_enabled() and not CHECKPOINT_HEAD,
                 act_dist, min_elements,
             )
             return SoftcapCrossEntropy.apply(logits, chunk_targets)
 
         if not CHECKPOINT_HEAD:
-            return project_and_loss(x, targets)
+            return project_and_loss(x, targets, W_dense)
         x = x.reshape(-1, x.shape[-1])
         targets = targets.reshape(-1)
         loss = x.new_zeros((), dtype=torch.float32)
@@ -103,10 +105,12 @@ class SoftcapCrossEntropy(torch.autograd.Function):
             chunk_targets = targets[start:start + CHUNK_TOKENS]
             if torch.is_grad_enabled():
                 # Non-reentrant checkpoint hooks conflict with the compiled loss backward.
-                loss = loss + checkpoint(project_and_loss, chunk, chunk_targets,
+                # Pass the weight explicitly so checkpoint accumulates its gradients
+                # before traversing the shared DenseWeight autograd node.
+                loss = loss + checkpoint(project_and_loss, chunk, chunk_targets, W_dense,
                                          use_reentrant=True, preserve_rng_state=False)
             else:
-                loss = loss + project_and_loss(chunk, chunk_targets)
+                loss = loss + project_and_loss(chunk, chunk_targets, W_dense)
         return loss
 
     @staticmethod
