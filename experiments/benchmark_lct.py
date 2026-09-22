@@ -52,7 +52,7 @@ def main():
         del packed, restored
 
     timings = []
-    for _ in range(iterations):
+    for iteration in range(iterations):
         torch.cuda.synchronize(x.device)
         start = time.perf_counter()
         packed = compress(x, distribution=distribution, buffer=buffer)
@@ -64,6 +64,9 @@ def main():
         torch.cuda.synchronize(x.device)
         decode_ms = (time.perf_counter() - start) * 1000
         timings.append((encode_ms, decode_ms))
+        if iteration == iterations - 1:
+            # Measure owned storage before freeing it, outside the timed regions.
+            compression_ratio = packed.memory_size() / x.nbytes
         packed.free()
         del packed, restored
 
@@ -79,7 +82,8 @@ def main():
         writer.writerow((mean(encode_times), encode_sem, mean(decode_times), decode_sem))
     print(
         f"LCT | encode: {mean(encode_times):.3f} ± {encode_sem:.3f} ms"
-        f" | decode: {mean(decode_times):.3f} ± {decode_sem:.3f} ms",
+        f" | decode: {mean(decode_times):.3f} ± {decode_sem:.3f} ms"
+        f" | compression ratio (compressed/original): {1/compression_ratio:.4f}",
         flush=True,
     )
 

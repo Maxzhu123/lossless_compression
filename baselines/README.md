@@ -5,6 +5,16 @@ Source, CUDA PTX, C dependencies and licenses are copied into `_vendor`; none of
 these three packages needs to be installed. Imports use local package names,
 without changing `sys.path` or relying on globally installed baseline packages.
 
+NVIDIA nvCOMP is also supported through `NVComp("LZ4")`,
+`NVComp("Cascaded")`, and `NVComp("Bitcomp")`. It requires the separately
+installed `nvidia.nvcomp` Python bindings and a compatible CUDA environment;
+the dependency loads only when used. All three are enabled by default in
+`experiments/bench_baselines.py`, with separate timing CSVs and printed ratios.
+They encode raw BF16 bytes without quantization. Compressed payloads use
+PyTorch-owned storage trimmed to the actual encoded size. Codec construction,
+allocation, and the trimming copy are included in encode/decode timings, as
+applicable. Empty CUDA tensors are handled without invoking nvCOMP.
+
 ## Setup
 
 Use the project's Python environment, with PyTorch and NumPy available.

@@ -5,7 +5,7 @@ import unittest
 
 import torch
 
-from baselines import DFloat11, SplitZip, ZipNN
+from baselines import DFloat11, SplitZip, ZipNN, NVComp
 from baselines.common import storage_bytes
 
 
@@ -54,6 +54,39 @@ class BaselineTests(unittest.TestCase):
     def test_storage_counts_allocations_once(self):
         x = torch.empty(100, dtype=torch.uint8)
         self.assertEqual(storage_bytes((x[:2], x[2:])), 100)
+
+    @unittest.skipUnless(torch.cuda.is_available(), 'CUDA required')
+    def test_nvcomp_roundtrips(self):
+        try:
+            from nvidia import nvcomp
+        except ImportError:
+            self.skipTest('nvCOMP Python bindings required')
+        from baselines.nvcomp import decompress
+        bits = torch.arange(-32768, 32768, dtype=torch.int32, device='cuda')
+        for algorithm in ('LZ4', 'Cascaded', 'Bitcomp'):
+            codec = NVComp(algorithm)
+            for x in (torch.empty(0, 3, dtype=torch.bfloat16, device='cuda'),
+                      torch.tensor(-0., dtype=torch.bfloat16, device='cuda'),
+                      torch.randn(17, 19, dtype=torch.bfloat16, device='cuda').T,
+                      torch.zeros(8193, dtype=torch.bfloat16, device='cuda'),
+                      bits.short().view(torch.bfloat16)):
+                with self.subTest(algorithm=algorithm, shape=x.shape):
+                    packed = self.assert_roundtrip(codec, x)
+                    self.assertEqual(packed.memory_size(), packed.compressed_bytes)
+                    self.assertTrue(torch.equal(decompress(packed).view(torch.int16),
+                                                x.contiguous().view(torch.int16)))
+            stream = torch.cuda.Stream()
+            with torch.cuda.stream(stream):
+                self.assert_roundtrip(codec, torch.randn(4099, dtype=torch.bfloat16, device='cuda'))
+            stream.synchronize()
+
+    def test_nvcomp_validation(self):
+        with self.assertRaises(ValueError):
+            NVComp('unknown')
+        with self.assertRaises(ValueError):
+            NVComp().compress(torch.ones(5, dtype=torch.bfloat16))
+        with self.assertRaises(TypeError):
+            NVComp().compress(torch.ones(5))
 
     def test_benchmark(self):
         from baselines.benchmark import benchmark

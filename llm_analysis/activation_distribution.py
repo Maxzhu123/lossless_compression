@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+import numpy as np
 import torch
 from torch import Tensor, nn
 from tqdm import trange
@@ -21,7 +22,7 @@ from histogram import tensor_histogram
 MODEL_NAME = "nvidia/Nemotron-H-8B-Base-8K"
 ARTEFACTS_PATH = Path(__file__).resolve().parents[1] / "artefacts"
 MODEL_PATH = ARTEFACTS_PATH / "Nemotron-H-8B-Base-8K"
-SAMPLE_TEXT_PATH = Path(__file__).parent / "sample_text.txt"
+FINEWEB_PATH = Path(__file__).resolve().parents[1] / "nanogpt" / "data" / "fineweb10B"
 RESULTS_PATH = ARTEFACTS_PATH / "activation_distribution_results.pt"
 EXPONENT_RESULTS_PATH = ARTEFACTS_PATH / "activation_exponent_distribution_results.pt"
 RESULTS_FORMAT_VERSION = 2  # Shared histogram schema used by weight_distribution.py.
@@ -267,6 +268,7 @@ def save_activation_results(
     bin_width: float,
     limit: float,
     model_dtype: str | None = None,
+    dataset: Mapping[str, Any] | None = None,
 ) -> None:
     """Save the weight-compatible histogram schema plus activation-specific metadata."""
     if any(set(values) != set(histograms) for values in (zero_counts, extrema, categories)):
@@ -275,6 +277,7 @@ def save_activation_results(
         "format_version": RESULTS_FORMAT_VERSION,
         "model_name": model_name,
         "model_dtype": model_dtype,
+        "dataset": dict(dataset) if dataset is not None else None,
         "analysis_device": str(edges.device),
         "num_batches": num_batches,
         "sequence_length": sequence_length,
@@ -308,45 +311,85 @@ def save_activation_results(
     torch.save(result, path)
 
 
+def fineweb_documents(shards: Iterable[Path]) -> Iterable[list[int]]:
+    """Read GPT-2 documents from nanoGPT shards without loading a whole shard."""
+    document: list[int] = []
+    for path in shards:
+        header = np.fromfile(path, dtype="<i4", count=256)
+        if header.size != 256 or header[0] != 20240520 or header[1] != 1:
+            raise ValueError(f"Invalid nanoGPT shard header: {path}")
+        count = int(header[2])
+        if count <= 0 or path.stat().st_size != 1024 + 2 * count:
+            raise ValueError(f"Invalid nanoGPT shard length: {path}")
+        tokens = np.memmap(path, mode="r", dtype="<u2", offset=1024, shape=(count,))
+        for start in range(0, count, 65536):
+            chunk = tokens[start:start + 65536]
+            if np.any(chunk > 50256):
+                raise ValueError(f"Expected GPT-2 token IDs in {path}")
+            previous = 0
+            for end in np.flatnonzero(chunk == 50256):
+                document.extend(chunk[previous:end].tolist())
+                if document:
+                    yield document
+                    document = []
+                previous = int(end) + 1
+            document.extend(chunk[previous:].tolist())
+    if document:
+        yield document
+
+
 def token_batches(
     tokenizer,
-    text: str,
+    shards: Iterable[Path],
     *,
     num_batches: int,
     sequence_length: int,
     sequences_per_batch: int,
     device: torch.device,
 ) -> Iterable[dict[str, Tensor]]:
-    """Tokenize text and yield fixed-size, non-overlapping input batches."""
-    tokens = tokenizer(text, return_tensors="pt", add_special_tokens=False)[
-        "input_ids"
-    ].squeeze(0)
-    batch_tokens = sequence_length * sequences_per_batch
-    required_tokens = num_batches * batch_tokens
-    if tokens.numel() < required_tokens:
-        raise ValueError(
-            f"Sample text contains {tokens.numel()} tokens; "
-            f"{required_tokens} are required"
-        )
+    """Retokenize FineWeb documents and pack consecutive full Nemotron batches."""
+    import tiktoken
 
-    for start in range(0, required_tokens, batch_tokens):
-        input_ids = tokens[start : start + batch_tokens].reshape(
-            sequences_per_batch, sequence_length
-        )
-        yield {
-            "input_ids": input_ids.to(device),
-            "attention_mask": torch.ones_like(input_ids, device=device),
-        }
+    if min(num_batches, sequence_length, sequences_per_batch) <= 0:
+        raise ValueError("batch count and sequence dimensions must be positive")
+    if tokenizer.eos_token_id is None:
+        raise ValueError("The model tokenizer must define a document separator (EOS)")
+    source_tokenizer = tiktoken.get_encoding("gpt2")
+    batch_tokens = sequence_length * sequences_per_batch
+    pending: list[int] = []
+    produced = 0
+    for document in fineweb_documents(shards):
+        text = source_tokenizer.decode(document)
+        pending.extend(tokenizer(text, add_special_tokens=False)["input_ids"])
+        pending.append(tokenizer.eos_token_id)
+        consumed = 0
+        while len(pending) - consumed >= batch_tokens:
+            input_ids = torch.tensor(pending[consumed:consumed + batch_tokens],
+                                     dtype=torch.long, device=device).reshape(
+                sequences_per_batch, sequence_length)
+            yield {"input_ids": input_ids, "attention_mask": torch.ones_like(input_ids)}
+            produced += 1
+            if produced == num_batches:
+                return
+            consumed += batch_tokens
+        pending = pending[consumed:]
+    raise ValueError(f"FineWeb validation data provided only {produced} full batches; "
+                     f"{num_batches} are required")
 
 
 def main() -> None:
     if not (MODEL_PATH / "config.json").is_file():
         raise FileNotFoundError(f"Local Nemotron checkpoint not found at {MODEL_PATH}")
-    if not SAMPLE_TEXT_PATH.is_file():
-        raise FileNotFoundError(
-            f"Provide sample text at {SAMPLE_TEXT_PATH} before collecting activations"
-        )
-    text = SAMPLE_TEXT_PATH.read_text(encoding="utf-8")
+    shards = sorted(FINEWEB_PATH.glob("fineweb_val_*.bin"))
+    if not shards:
+        raise FileNotFoundError(f"No FineWeb validation shards found under {FINEWEB_PATH}")
+    dataset = {
+        "name": "FineWeb", "split": "validation",
+        "shards": [str(path) for path in shards],
+        "source_tokenizer": "gpt2", "model_tokenizer": MODEL_NAME,
+        "sampling": "sequential documents, retokenized and packed without overlap",
+        "tokens_processed": NUM_BATCHES * SEQUENCE_LENGTH * SEQUENCES_PER_BATCH,
+    }
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
@@ -358,7 +401,7 @@ def main() -> None:
 
     batches = token_batches(
         tokenizer,
-        text,
+        shards,
         num_batches=NUM_BATCHES,
         sequence_length=SEQUENCE_LENGTH,
         sequences_per_batch=SEQUENCES_PER_BATCH,
@@ -394,6 +437,7 @@ def main() -> None:
         bin_width=BIN_WIDTH,
         limit=LIMIT,
         model_dtype=str(dtype),
+        dataset=dataset,
     )
     print(f"Saved activation results to {RESULTS_PATH}")
     if dtype == torch.bfloat16:
@@ -402,6 +446,7 @@ def main() -> None:
         torch.save({
             "format_version": 1, "model_name": MODEL_NAME,
             "model_dtype": str(dtype), "analysis_device": str(device),
+            "dataset": dataset,
             "num_batches": NUM_BATCHES, "sequence_length": SEQUENCE_LENGTH,
             "sequences_per_batch": SEQUENCES_PER_BATCH,
             "categories": list(histograms),

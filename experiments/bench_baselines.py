@@ -8,7 +8,7 @@ import torch
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from baselines import DFloat11, SplitZip, ZipNN
+from baselines import DFloat11, SplitZip, ZipNN, NVComp
 from baselines.benchmark import benchmark
 from benchmarks.prepare import make_empirical, make_gaussian, make_laplace
 from LCT.comp_format import DistType, Distribution
@@ -17,7 +17,8 @@ from LCT.comp_format import DistType, Distribution
 def main():
     # Same task settings as experiments/benchmark_lct.py. Edit before running.
     family = DistType.GAUSSIAN  # GAUSSIAN, EMPIRICAL, LAPLACE, or GAMMA
-    methods = ["splitzip", "dfloat11", "zipnn"]
+    methods = ["nvcomp_lz4", "nvcomp_cascaded", "nvcomp_bitcomp",
+               "splitzip", "dfloat11", "zipnn"]
     elements = (1024 ** 3) // 2
     warmup, iterations = 3, 50
     seed = 0
@@ -60,6 +61,9 @@ def main():
             codec = {
                 "dfloat11": lambda: DFloat11(encoder=dfloat11_encoder),
                 "zipnn": lambda: ZipNN(threads=threads),
+                "nvcomp_lz4": lambda: NVComp("LZ4"),
+                "nvcomp_cascaded": lambda: NVComp("Cascaded"),
+                "nvcomp_bitcomp": lambda: NVComp("Bitcomp"),
             }[name]()
         result = benchmark(codec, x, warmup=warmup, iterations=iterations, verify=False)
         print(
