@@ -1,4 +1,5 @@
 from typing import Iterable, TYPE_CHECKING
+import math
 import torch
 from torch import Tensor
 
@@ -148,3 +149,57 @@ class SparseMuon:
     def zero_grad(self):
         for p in self.params:
             p.grad = None
+
+
+class SparseAdamW:
+    """AdamW with optional lossless BF16 moment storage and LCT matrix weights.
+
+    FP32 scalar/vector parameters and their moments remain dense. Dense and
+    compressed modes use the same update arithmetic and state precision.
+    """
+
+    def __init__(self, param_groups, *, betas=(0.8, 0.95), eps=1e-10,
+                 weight_decay=0, compressed=True, buffer=None):
+        self.param_groups = [dict(group, params=list(group['params'])) for group in param_groups]
+        self.betas, self.eps, self.weight_decay = betas, eps, weight_decay
+        self.compressed, self.buffer = compressed, buffer
+        self.state = {}
+
+    @torch.no_grad()
+    def step(self):
+        beta1, beta2 = self.betas
+        for group in self.param_groups:
+            lr = group['lr']
+            for p in group['params']:
+                grad = p.grad
+                if grad is None:
+                    continue
+                state = self.state.setdefault(p, {'step': 0})
+                state['step'] += 1
+                moments = []
+                for key in ('exp_avg', 'exp_avg_sq'):
+                    value = state.pop(key, None)
+                    if value is None:
+                        value = torch.zeros_like(grad)
+                    elif isinstance(value, MyCompressed):
+                        value = value.decompress_free()
+                    moments.append(value)
+                avg, square_avg = moments
+                avg.lerp_(grad, 1 - beta1)
+                square_avg.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+                denom = square_avg.sqrt().div_(math.sqrt(1 - beta2 ** state['step'])).add_(self.eps)
+                weight = p.decompress() if isinstance(p, MyCompressed) else p
+                weight.mul_(1 - lr * self.weight_decay)
+                weight.addcdiv_(avg, denom, value=-lr / (1 - beta1 ** state['step']))
+                if isinstance(p, MyCompressed):
+                    old = p.x
+                    p.x = MyCompressed(weight, buffer=old.buffer, dist=old.distribution).x
+                    old.free()
+                for key, value in zip(('exp_avg', 'exp_avg_sq'), moments):
+                    state[key] = (MyCompressed(value, buffer=self.buffer, dist=momentum_dist)
+                                  if self.compressed and value.dtype == torch.bfloat16 else value)
+
+    def zero_grad(self):
+        for group in self.param_groups:
+            for p in group['params']:
+                p.grad = None

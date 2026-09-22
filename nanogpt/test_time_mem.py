@@ -1,4 +1,4 @@
-"""Quick CUDA memory check. Select USE_BITSPARSE below and run directly.
+"""Quick CUDA time/memory check for train_gpt_lct; edit the options below.
 
 Uses the training model, initialization, data, optimizers and batch settings.
 No validation, checkpoints or log files. First-time compilation can take longer.
@@ -10,68 +10,59 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from train_gpt_simple import SEQ_LEN, TRAIN_BATCH_TOKENS
+import train_gpt_lct as training
 
-USE_BITSPARSE = True
-USE_TENSOR_BUFFER = True
-PACK_SBIT = True
-BUFFER_SIZE_MIB = 2408
-SEQUENCES_PER_MICROBATCH = 64
-ACCUMULATION_STEPS = (TRAIN_BATCH_TOKENS + SEQ_LEN * SEQUENCES_PER_MICROBATCH - 1) // (SEQ_LEN * SEQUENCES_PER_MICROBATCH)
-WARMUP_STEPS = 15
+COMPRESS_WEIGHTS = False
+COMPRESS_ACTIVATIONS = False
+COMPRESS_OPTIMISER = False
+BUFFER = False
+BUFFER_SIZE_MIB = training.BUFFER_SIZE_MIB
+SEQ_LEN = training.SEQ_LEN
+TRAIN_BATCH_TOKENS = training.TRAIN_BATCH_TOKENS
+SEQUENCES_PER_MICROBATCH = training.TRAIN_MICROBATCH_SEQUENCES
+WARMUP_STEPS = 5
 MEASURE_STEPS = 5
-COMPILE = True  # Model compilation; Muon retains its own compile decorator.
+# Use the trainer's compilation boundaries; do not compile the whole LCT model.
 
 
 def main():
     import torch
-    from train_gpt_simple import GPT, Muon, data_generator
-    from lib_sparse.bitsparse import TensorBuffer
+    from LCT.tensor_buffer import TensorBuffer
 
-    mode = "bitsparse" if USE_BITSPARSE else "dense"
-    print(f"Running {mode}: buffer={USE_TENSOR_BUFFER}, sign packing={PACK_SBIT}, "
-          f"compile={COMPILE}, {ACCUMULATION_STEPS} microbatches/step", flush=True)
-    if USE_TENSOR_BUFFER and not USE_BITSPARSE:
-        raise ValueError("USE_TENSOR_BUFFER requires USE_BITSPARSE=True")
+    if WARMUP_STEPS < 0 or MEASURE_STEPS < 1:
+        raise ValueError("Warmup must be nonnegative and measured steps must be positive")
+    if SEQ_LEN < 1 or TRAIN_BATCH_TOKENS < 1 or SEQUENCES_PER_MICROBATCH < 1:
+        raise ValueError("Sequence length, batch tokens, and microbatch size must be positive")
+    if TRAIN_BATCH_TOKENS % SEQ_LEN:
+        raise ValueError("Token batch must divide evenly into sequences")
+    sequences = TRAIN_BATCH_TOKENS // SEQ_LEN
+    accumulation_steps = (sequences + SEQUENCES_PER_MICROBATCH - 1) // SEQUENCES_PER_MICROBATCH
+    compressed = COMPRESS_WEIGHTS or COMPRESS_ACTIVATIONS or COMPRESS_OPTIMISER
+    mode = "lct" if compressed else "dense"
+    use_buffer = BUFFER and compressed
+    print(f"Running {mode}: weights={COMPRESS_WEIGHTS}, activations={COMPRESS_ACTIVATIONS}, "
+          f"Muon momentum={COMPRESS_OPTIMISER}, buffer={use_buffer}, "
+          f"{SEQUENCES_PER_MICROBATCH} sequences/microbatch, "
+          f"{accumulation_steps} microbatches/step", flush=True)
     if not torch.cuda.is_available():
         raise RuntimeError("This test requires CUDA")
     torch.cuda.set_device(0)
-    torch.manual_seed(0)
-    model = GPT(50304, 12, 768, use_bitsparse=USE_BITSPARSE, pack_sbit=PACK_SBIT).cuda().train()
+    torch.manual_seed(training.SEED)
+    model = training.GPT(training.VOCAB_SIZE, training.NUM_LAYERS, training.MODEL_DIM,
+                         compress_activations=COMPRESS_ACTIVATIONS,
+                         min_compress_elements=training.MIN_COMPRESS_ELEMENTS).cuda().train()
+    training.initialize_model(model)
 
-    if USE_TENSOR_BUFFER:
-        model.set_tensor_buffer(TensorBuffer(
-            BUFFER_SIZE_MIB * 2**20, device="cuda", dtype=torch.bfloat16, pack_sbit=PACK_SBIT,
-        ))
+    if use_buffer:
+        model.set_tensor_buffer(TensorBuffer(BUFFER_SIZE_MIB * 2**20, device="cuda"))
+    if COMPRESS_WEIGHTS:
+        model.compress_weights()
 
-    with torch.no_grad():
-        for name, p in model.named_parameters():
-            if name.endswith("weight"):
-                if "proj" in name:
-                    p.zero_()
-                elif "embed" in name:
-                    p.normal_()
-                else:
-                    p.normal_(std=0.33**0.5 / p.size(-1)**0.5)
-            elif name.endswith("bias"):
-                p.zero_()
-            elif name.endswith("gains"):
-                p.fill_(1)
-            else:
-                raise ValueError(f"Uninitialized parameter: {name}")
-
-    if COMPILE:
-        model.compile(dynamic=False)
-    adam = torch.optim.AdamW([
-        dict(params=[model.embed.weight], lr=0.3),
-        dict(params=[model.proj.weight], lr=1/320),
-        dict(params=[p for p in model.parameters() if p.ndim < 2], lr=0.01),
-    ], betas=(0.8, 0.95), eps=1e-10, weight_decay=0, fused=True)
-    muon = Muon([p for p in model.blocks.parameters() if p.ndim >= 2],
-                lr=0.035, weight_decay=0.025)
+    adam, muon = training.make_optimizers(model, compressed=COMPRESS_OPTIMISER)
     tokens = TRAIN_BATCH_TOKENS
-    loader = data_generator("data/fineweb10B/fineweb_train_*.bin", tokens, SEQ_LEN)
+    loader = training.data_generator("data/fineweb10B/fineweb_train_*.bin", tokens, SEQ_LEN)
     peaks = []
+    step_times = []
     for step in range(WARMUP_STEPS + MEASURE_STEPS):
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
@@ -87,15 +78,18 @@ def main():
         muon.step()
         model.zero_grad(set_to_none=True)
         torch.cuda.synchronize()
+        elapsed = time.perf_counter() - start
         peak = torch.cuda.max_memory_allocated() / 2**20
         warmup = step < WARMUP_STEPS
         if not warmup:
             peaks.append(peak)
+            step_times.append(elapsed)
         print(f"{mode} step {step+1} ({'warmup' if warmup else 'measured'}): "
               f"peak={peak:.1f} MiB, reserved={torch.cuda.max_memory_reserved()/2**20:.1f} MiB, "
               f"after step={torch.cuda.memory_allocated()/2**20:.1f} MiB, "
-              f"loss={total_loss.item()/tokens:.4f}, time={time.perf_counter()-start:.2f}s", flush=True)
+              f"loss={total_loss.item()/tokens:.4f}, time={elapsed:.2f}s", flush=True)
     print(f"Peak allocated after warmup: {max(peaks):.1f} MiB", flush=True)
+    print(f"Mean step time after warmup: {sum(step_times)/len(step_times):.3f}s", flush=True)
 
 
 
