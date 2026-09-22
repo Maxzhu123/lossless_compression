@@ -73,11 +73,13 @@ def main():
             flush=True,
         )
         output = output_dir / f"{name}_{family.value}_{x.nbytes / 1024 ** 3:g}gib.csv"
-        with output.open("w", newline="") as file:
+        with output.open("a", newline="") as file:
             writer = csv.writer(file)
-            writer.writerow(("encode_mean_ms", "encode_sem_ms", "decode_mean_ms", "decode_sem_ms"))
+            if file.tell() == 0:
+                writer.writerow(("encode_mean_ms", "encode_sem_ms", "decode_mean_ms", "decode_sem_ms", "tensor_bytes"))
             writer.writerow((result.compress_ms, result.compress_sem_ms,
-                             result.decompress_ms, result.decompress_sem_ms))
+                             result.decompress_ms, result.decompress_sem_ms, x.nbytes))
+        print(f"Results saved to {output}", flush=True)
         del codec
 
 

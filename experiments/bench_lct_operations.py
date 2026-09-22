@@ -170,11 +170,12 @@ def main():
     output.parent.mkdir(parents=True, exist_ok=True)
     table = []
     try:
-        with output.open("w", newline="") as file:
+        with output.open("a", newline="") as file:
             writer = csv.writer(file)
             # LCT is the fused path, or standalone compress/decompress.
-            writer.writerow(("operation", "output", "lct_mean_ms", "lct_sem_ms",
-                             "naive_mean_ms", "naive_sem_ms", "dense_mean_ms", "dense_sem_ms", "speedup"))
+            if file.tell() == 0:
+                writer.writerow(("operation", "output", "lct_mean_ms", "lct_sem_ms",
+                                 "naive_mean_ms", "naive_sem_ms", "dense_mean_ms", "dense_sem_ms", "speedup", "tensor_bytes"))
             for name, output_kind, functions, reference in cases:
                 results = measure(functions, reference, a.shape, warmup, iterations)
                 timings = {
@@ -193,13 +194,14 @@ def main():
                 if "fused" in results:
                     speedup = naive_mean / lct_mean
                 writer.writerow((name, output_kind, lct_mean, lct_sem,
-                                 naive_mean, naive_sem, dense_mean, dense_sem, speedup))
+                                 naive_mean, naive_sem, dense_mean, dense_sem, speedup, a.nbytes))
                 file.flush()
     finally:
         a_comp.free()
         b_comp.free()
     print(tabulate(table, headers=("Operation", "Output", "LCT (ms)", "Naive (ms)", "Dense (ms)"),
                    tablefmt="simple", colalign=("left", "left", "right", "right", "right")), flush=True)
+    print(f"Results saved to {output}", flush=True)
 
 
 if __name__ == "__main__":

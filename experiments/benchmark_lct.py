@@ -16,7 +16,7 @@ from LCT.tensor_buffer import TensorBuffer
 def main():
     # Edit these settings before running.
     family = DistType.GAUSSIAN  # GAUSSIAN, EMPIRICAL, LAPLACE, or GAMMA
-    elements = (1024 ** 3) // 2
+    elements = (2 ** 30) // 2
     warmup, iterations = 3, 50
     seed = 0
     gaussian_std = 2.0
@@ -73,19 +73,21 @@ def main():
     output = Path(__file__).with_name("results") / f"lct_{family.value}_1gib.csv"
     output.parent.mkdir(parents=True, exist_ok=True)
     encode_times, decode_times = zip(*timings)
-    with output.open("w", newline="") as file:
+    with output.open("a", newline="") as file:
         writer = csv.writer(file)
-        writer.writerow(("encode_mean_ms", "encode_sem_ms", "decode_mean_ms", "decode_sem_ms"))
+        if file.tell() == 0:
+            writer.writerow(("encode_mean_ms", "encode_sem_ms", "decode_mean_ms", "decode_sem_ms", "tensor_bytes"))
         # SEM uses the sample standard deviation; one measurement is insufficient.
         encode_sem = stdev(encode_times) / sqrt(iterations) if iterations > 1 else float("nan")
         decode_sem = stdev(decode_times) / sqrt(iterations) if iterations > 1 else float("nan")
-        writer.writerow((mean(encode_times), encode_sem, mean(decode_times), decode_sem))
+        writer.writerow((mean(encode_times), encode_sem, mean(decode_times), decode_sem, x.nbytes))
     print(
         f"LCT | encode: {mean(encode_times):.3f} ± {encode_sem:.3f} ms"
         f" | decode: {mean(decode_times):.3f} ± {decode_sem:.3f} ms"
         f" | compression ratio (compressed/original): {1/compression_ratio:.4f}",
         flush=True,
     )
+    print(f"Results saved to {output}", flush=True)
 
 
 if __name__ == "__main__":
