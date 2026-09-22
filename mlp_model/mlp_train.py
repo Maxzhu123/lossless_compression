@@ -8,9 +8,9 @@ from torchvision.datasets import MNIST
 
 from LCT.tensor_buffer import TensorBuffer, visualize_buffer
 from LCT.LCTensor import MyCompressed
-from sparse_utils import SparseSGDM, SparseMuon
-from mlps import RMSFFN
-from dist_configs import weight_dist
+from LCT.sparse_utils import SparseSGDM, SparseMuon
+from LCT.mlps import RMSFFN
+from LCT.dist_configs import weight_dist
 
 # Independent compression options; optimiser compression applies to momentum state.
 COMPRESS_WEIGHTS = False
