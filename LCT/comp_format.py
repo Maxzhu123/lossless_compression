@@ -7,6 +7,7 @@ class NoiseLevel(Enum):
     CLEAN = auto()   # Default fixed-stream Huffman layout.
     MEDIUM = auto()  # Larger fixed payload for medium-noise data.
     HIGH = auto()    # Smaller blocks with extra payload for high-noise data.
+    SPARSE = auto()  # 2.5 fixed payload bits per exponent, plus overflow storage.
 
 
 class DistType(Enum):

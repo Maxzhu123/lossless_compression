@@ -44,6 +44,9 @@ def geometry(distribution: Distribution):
             if distribution.family != DistType.GAUSSIAN
             else LANE_BITS - 32
         )
+    elif distribution.noise_level == NoiseLevel.SPARSE:
+        block_symbols = BLOCK_SYMBOLS
+        lane_bits = 5 * clean_steps // 2
     elif distribution.noise_level == NoiseLevel.MEDIUM:
         block_symbols = BLOCK_SYMBOLS // 2
         clean_steps //= 2

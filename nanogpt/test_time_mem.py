@@ -8,9 +8,9 @@ import time
 
 import train_gpt_lct as training
 
-COMPRESS_WEIGHTS = False
-COMPRESS_ACTIVATIONS = False
-COMPRESS_OPTIMISER = False
+COMPRESS_WEIGHTS = True
+COMPRESS_ACTIVATIONS = True
+COMPRESS_OPTIMISER = True
 BUFFER = True
 COMPILE = True
 LOG_GRAPH_BREAKS = True
