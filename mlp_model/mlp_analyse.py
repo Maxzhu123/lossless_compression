@@ -2,7 +2,7 @@ import torch
 from cprint import c_print
 
 from LCT.tensor_buffer import TensorBuffer
-from LCT.sparse_utils import SparseSGDM
+from LCT.components.sparse_utils import SparseSGDM
 from mlp_model.mlp_train import Model
 
 COMPRESSED = True

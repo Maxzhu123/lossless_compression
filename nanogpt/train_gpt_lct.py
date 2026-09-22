@@ -17,10 +17,9 @@ from torch.utils.checkpoint import checkpoint
 
 from dataloader import load_data_shard
 from dist_configs import weight_dist, momentum_dist, act_dist, act_relu_dist
-from LCT.layers import Linear, Embedding, RMSNormFunction, RMSLinear, Relu2Linear, compress_weight, named_trainable_tensors, rms_norm_qkv
-from LCT.sparse_utils import SparseAdamW, SparseMuon
+from LCT.components.layers import Linear, Embedding, RMSNormFunction, RMSLinear, Relu2Linear, FlashAttention, compress_weight, named_trainable_tensors, rms_norm_qkv
+from LCT.components.sparse_utils import SparseAdamW, SparseMuon
 from LCT.tensor_buffer import TensorBuffer
-from LCT.attention import FlashAttention
 
 DATA_ROOT = Path(__file__).resolve().parent
 LOG_ROOT = DATA_ROOT / "logs"
@@ -274,7 +273,7 @@ class GPT(nn.Module):
     def checkpoint(self):
         # Stream matrices to CPU one at a time rather than decoding every
         # compressed matrix onto the GPU simultaneously through state_dict().
-        from LCT.layers import dense_weight
+        from LCT.components.layers import dense_weight
         state = {name: dense_weight(p).detach().cpu() for name, p in self.named_trainable_tensors()}
         state.update({name: b.detach().cpu() for name, b in self.named_buffers()})
         return state

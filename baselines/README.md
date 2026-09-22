@@ -117,9 +117,9 @@ throughput. CPU runs of `--method all` explicitly skip SplitZip.
 - `storage_ratio`: compressed/original bytes (smaller is better), matching
   `benchmarks/prepare.py`; undefined (`NaN`) for an empty input.
 
-`mlp_model/mlp_train.py` currently uses `MyCompressed`, custom autograd functions
+`mlp_model/mlp_train.py` currently uses `LCTTensor`, custom autograd functions
 and `SparseSGDM` with LCT-specific operations. These helpers let you benchmark
-actual BF16 weights or activations before wrapping them in `MyCompressed`.
+actual BF16 weights or activations before wrapping them in `LCTTensor`.
 They are tensor codecs, not drop-in replacements for that training system:
 DFloat11 and ZipNN do not implement LCT's compressed sparse updates or autograd.
 The existing training loop is unchanged.

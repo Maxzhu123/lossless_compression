@@ -9,7 +9,7 @@ from .compress import compress, decompress, compA_add_B, a_compA_add_B, a_compA_
 from .tensor_buffer import TensorBuffer
 
 
-class MyCompressed(Tensor):
+class LCTTensor(Tensor):
     __torch_function__ = torch._C._disabled_torch_function_impl
     x: CompressedTensor
 
@@ -39,12 +39,12 @@ class MyCompressed(Tensor):
 
         if func is torch.ops.aten.mm.default:
             a, b = args
-            if isinstance(a, MyCompressed):
+            if isinstance(a, LCTTensor):
                 a = decompress(a.x)
-            if isinstance(b, MyCompressed):
+            if isinstance(b, LCTTensor):
                 b = decompress(b.x)
             return a @ b
-        raise NotImplementedError(f"{func} not implemented for MySparse")
+        raise NotImplementedError(f"{func} not implemented for LCTTensor")
 
     @property
     def nbytes(self):
@@ -60,7 +60,7 @@ class MyCompressed(Tensor):
         return "LCT compressed"
 
     def __repr__(self):
-        return f"MySparse({self.x})"
+        return f"LCTTensor({self.x})"
 
     def add_(self, update: Tensor):
         """ Inplace add,
@@ -88,7 +88,7 @@ class MyCompressed(Tensor):
                                      dense_output=False, distribution=prev.distribution, buffer=prev.buffer)
         prev.free()
 
-    def add_comp_(self, update_comp: MyCompressed, alpha: Tensor):
+    def add_comp_(self, update_comp: LCTTensor, alpha: Tensor):
         """ Inplace add with another compressed tensor,
             x <- x + alpha * update_comp
         """

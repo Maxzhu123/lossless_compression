@@ -7,9 +7,9 @@ from cprint import c_print
 from torchvision.datasets import MNIST
 
 from LCT.tensor_buffer import TensorBuffer, visualize_buffer
-from LCT.LCTensor import MyCompressed
-from LCT.sparse_utils import SparseSGDM, SparseMuon
-from LCT.mlps import RMSFFN
+from LCT.LCTensor import LCTTensor
+from LCT.components.sparse_utils import SparseSGDM, SparseMuon
+from LCT.components.mlps import RMSFFN
 from LCT.dist_configs import weight_dist
 
 # Independent compression options; optimiser compression applies to momentum state.
@@ -36,8 +36,8 @@ class FFNLayer(nn.Module):
         nn.init.xavier_uniform_(W2, generator=G)
 
         if COMPRESS_WEIGHTS:
-            self.W1 = MyCompressed(W1, buffer=buffer, dist=weight_dist)
-            self.W2 = MyCompressed(W2, buffer=buffer, dist=weight_dist)
+            self.W1 = LCTTensor(W1, buffer=buffer, dist=weight_dist)
+            self.W2 = LCTTensor(W2, buffer=buffer, dist=weight_dist)
         else:
             self.W1 = W1
             self.W2 = W2
