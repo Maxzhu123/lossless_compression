@@ -86,6 +86,8 @@ def _allocate_kernel(
     shift_left = exact & (indices >= slot) & (next_indices < count)
     next_starts = tl.load(free_starts + next_indices, mask=shift_left, other=0)
     next_sizes = tl.load(free_sizes + next_indices, mask=shift_left, other=0)
+    # The shift overlaps its source across warps; finish all reads first.
+    tl.debug_barrier()
     tl.store(free_starts + indices, next_starts, mask=shift_left)
     tl.store(free_sizes + indices, next_sizes, mask=shift_left)
     tl.store(free_count, count - 1, mask=exact)
@@ -152,6 +154,8 @@ def _free_kernel(
     next_only = valid & ~merge_previous & merge_next
     both = valid & merge_previous & merge_next
 
+    # Keep the snapshot intact until every warp has read its entries.
+    tl.debug_barrier()
     tl.store(free_sizes + previous_index, previous_size + size, mask=previous_only)
     tl.store(free_starts + insert, offset, mask=next_only)
     tl.store(free_sizes + insert, next_size + size, mask=next_only)
@@ -165,6 +169,7 @@ def _free_kernel(
     shift_left = both & (indices >= insert) & (next_indices < count)
     shifted_starts = tl.load(free_starts + next_indices, mask=shift_left, other=0)
     shifted_sizes = tl.load(free_sizes + next_indices, mask=shift_left, other=0)
+    tl.debug_barrier()
     tl.store(free_starts + indices, shifted_starts, mask=shift_left)
     tl.store(free_sizes + indices, shifted_sizes, mask=shift_left)
     tl.store(free_count, count - 1, mask=both)

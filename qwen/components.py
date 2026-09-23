@@ -9,7 +9,7 @@ from LCT.LCTensor import LCTTensor
 from LCT.comp_tensor import CompressedTensor
 from LCT.compress import compress, decompress
 from LCT.components.layers import dense_weight
-from qwen.dist_configs import activation_dist, weight_dist
+from qwen.dist_configs import activation_dist, attention_output_dist, weight_dist
 
 
 @dataclass
@@ -20,9 +20,9 @@ class Compression:
     buffer: object = None
 
 
-def save_activation(x, settings):
+def save_activation(x, settings, distribution=activation_dist):
     if settings is not None and settings.activations and x.numel() >= settings.min_elements:
-        return compress(x, distribution=activation_dist, buffer=settings.buffer)
+        return compress(x, distribution=distribution, buffer=settings.buffer)
     return x.detach()
 
 
@@ -206,25 +206,40 @@ class SwiGLULinearFunction(torch.autograd.Function):
         return grad_gate, grad_up, grad_weight, None
 
 
-class FlashAttentionFunction(torch.autograd.Function):
+class FlashAttentionLinearFunction(torch.autograd.Function):
+    """Share the saved attention output with its output projection."""
+
     @staticmethod
-    def forward(ctx, q, k, v, scale, dropout, settings):
+    def forward(ctx, q, k, v, weight, bias, scale, dropout, settings):
         out, lse, cq, ck, mq, mk, rng, unused, _ = torch.ops.aten._scaled_dot_product_flash_attention.default(
             q, k, v, dropout, True, False, scale=scale)
-        ctx.values = [save_activation(x, settings) for x in (q, k, v, out)]
+        ctx.values = [save_activation(x, settings) for x in (q, k, v)]
+        ctx.values.append(save_activation(out, settings, attention_output_dist))
         ctx.auxiliary = (lse, cq, ck, mq, mk, rng, unused)
         ctx.scale, ctx.dropout = scale, dropout
-        return out
+        ctx.save_for_backward(weight)
+        ctx.bias_dtype = bias.dtype if bias is not None else None
+        hidden = out.transpose(1, 2).reshape(q.shape[0], q.shape[2], -1)
+        return F.linear(hidden, dense_weight(weight), bias)
 
     @staticmethod
     def backward(ctx, grad):
-        q, k, v, out = [restore_activation(x) for x in ctx.values]
+        out = restore_activation(ctx.values.pop())
+        weight, = ctx.saved_tensors
+        g = grad.reshape(-1, grad.shape[-1])
+        grad_out = (g @ dense_weight(weight)).reshape(
+            out.shape[0], out.shape[2], out.shape[1], out.shape[3]).transpose(1, 2)
+        hidden = out.transpose(1, 2).reshape(-1, out.shape[1] * out.shape[3])
+        grad_weight = g.T @ hidden
+        grad_bias = g.sum(0).to(ctx.bias_dtype) if ctx.bias_dtype is not None else None
+        del hidden
+        q, k, v = [restore_activation(x) for x in ctx.values]
         ctx.values = None
         lse, cq, ck, mq, mk, rng, unused = ctx.auxiliary
         dq, dk, dv = torch.ops.aten._scaled_dot_product_flash_attention_backward.default(
-            grad, q, k, v, out, lse, cq, ck, mq, mk, ctx.dropout, True, rng, unused, scale=ctx.scale)
+            grad_out, q, k, v, out, lse, cq, ck, mq, mk, ctx.dropout, True, rng, unused, scale=ctx.scale)
         ctx.auxiliary = None
-        return dq, dk, dv, None, None, None
+        return dq, dk, dv, grad_weight, grad_bias, None, None, None
 
 
 def configure_compression(model, settings):

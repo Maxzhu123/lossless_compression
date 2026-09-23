@@ -21,7 +21,7 @@ import torch
 from torch import nn
 from qwen.components import (
     Linear, Embedding, RMSNormFunction, RMSNormQKVFunction,
-    RMSNormGateUpFunction, SwiGLULinearFunction, FlashAttentionFunction,
+    RMSNormGateUpFunction, SwiGLULinearFunction, FlashAttentionLinearFunction,
 )
 
 from transformers.activations import ACT2FN
@@ -293,10 +293,10 @@ class Qwen3Attention(nn.Module):
         if self.lct is not None and self.lct.activations and torch.is_grad_enabled():
             if attention_mask is not None or past_key_values is not None or self.sliding_window is not None:
                 raise ValueError("LCT attention supports unpadded causal training without a KV cache or sliding windows")
-            output = FlashAttentionFunction.apply(
-                query_states, key_states, value_states, self.scaling,
+            output = FlashAttentionLinearFunction.apply(
+                query_states, key_states, value_states, self.o_proj.weight, self.o_proj.bias, self.scaling,
                 self.attention_dropout if self.training else 0.0, self.lct)
-            return self.o_proj(output.transpose(1, 2).reshape(*input_shape, -1)), None
+            return output, None
 
         if past_key_values is not None:
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)

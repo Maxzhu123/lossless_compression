@@ -10,7 +10,7 @@ source .bashrc
 conda config --set auto_activate_base false
 source .bashrc
 
-mamba create -n bitsparse python=3.14.*
+mamba create -y -n bitsparse python=3.14.*
 mamba activate bitsparse
 
 git clone https://github.com/Maxzhu123/lossless_compression.git
