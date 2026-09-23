@@ -30,7 +30,7 @@ BUFFER = True  # Shared fallback arena; never reset while weights/state are live
 COMPILE = True  # Compile dense model regions; LCT operations run eagerly.
 CHECKPOINT_HEAD = True
 CHUNK_TOKENS = 4096  # Tokens per checkpointed output projection and loss.
-BUFFER_SIZE_MIB = 128  # Full-model/microbatch-32 checks used less than 77 MiB of fallback space.
+BUFFER_SIZE_MIB = 64
 MIN_COMPRESS_ELEMENTS = 65536  # Avoid padding small activations to a full codec block.
 TRAIN_STEPS = 3450
 SAVE_EVERY = 300
@@ -298,6 +298,16 @@ class GPT(nn.Module):
         )
 
 
+@torch.no_grad()
+def save_checkpoint(model, muon, step, path):
+    names = {id(p): name for name, p in model.named_trainable_tensors()}
+    momentum = {
+        names[id(p)]: dense_weight(m).detach().cpu() if m is not None else None
+        for p, m in zip(muon.params, muon.momentums)
+    }
+    torch.save({"step": step, "model": model.checkpoint(), "muon_momentum": momentum}, path)
+
+
 def initialize_model(model):
     """Apply the original GPT initialization before compressing any weights."""
     with torch.no_grad():
@@ -437,7 +447,7 @@ def train(device):
 
     # save model at step 0 before any training
     with torch.no_grad():
-        torch.save(model.checkpoint(), f"{model_dir}/0.pt")
+        save_checkpoint(model, optimizer2, 0, model_dir / "0.pt")
     torch.cuda.synchronize(device)
 
     # start the clock
@@ -500,7 +510,7 @@ def train(device):
         model.zero_grad(set_to_none=True)
         if (step + 1) % save_every == 0 or step + 1 == train_steps:
             with torch.no_grad():
-                torch.save(model.checkpoint(), f"{model_dir}/{step + 1}.pt")
+                save_checkpoint(model, optimizer2, step + 1, model_dir / f"{step + 1}.pt")
             torch.cuda.synchronize(device)
         torch.cuda.synchronize(device)
         approx_training_time = training_time + (time.perf_counter() - t0)

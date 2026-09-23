@@ -13,6 +13,14 @@ momentum_dist = Distribution(
     zero_prob=0.02,
 )
 
+# Momentum distribution
+momentum_first_dist = Distribution(
+    DistType.EMPIRICAL,
+    noise_level=NoiseLevel.CLEAN,
+    zero_prob=0.5,
+)
+
+
 # Activation distribution
 act_dist = Distribution(
     DistType.LAPLACE,

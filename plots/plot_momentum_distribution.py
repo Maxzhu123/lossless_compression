@@ -10,6 +10,7 @@ from plot_lib import sample_group_colors, format_axes, finish_plot
 from plot_tables import render
 
 CSV_PATH = None
+CHECKPOINT_CSV = None  # Optional exponents.csv from collect_nanogpt_momentum_exponents.py.
 RESULTS_DIR = Path(__file__).resolve().parents[1] / "artefacts" / "muon_momentum"
 OUTPUT_DIR = Path(__file__).resolve().parent / "plots"
 
@@ -72,11 +73,16 @@ def build(data, ylabel="Mean probability per buffer", labels=None, min_exponent=
     return fig, ax
 
 
-def plot(path, filename="momentum_evolution.pdf", ylabel="Mean probability per buffer"):
-    render({filename: load(path)}, lambda data: build(data, ylabel),
+def plot(path, filename="momentum_evolution.pdf", ylabel="Mean probability per buffer", checkpoint_path=None):
+    data = load(path)
+    if checkpoint_path is not None:
+        later = load(checkpoint_path)
+        data = (data[0] + later[0], np.concatenate((data[1], later[1])),
+                np.concatenate((data[2], later[2])))
+    render({filename: data}, lambda data: build(data, ylabel),
            output_dir=OUTPUT_DIR, wide=True, show=False)
     print(f"Saved {OUTPUT_DIR / filename}")
 
 
 if __name__ == "__main__":
-    plot(CSV_PATH or sorted(RESULTS_DIR.glob("*/exponents.csv"))[-1])
+    plot(CSV_PATH or sorted(RESULTS_DIR.glob("*/exponents.csv"))[-1], checkpoint_path=CHECKPOINT_CSV)

@@ -217,3 +217,15 @@ labels all curves as `Step <step>`. Checkpoint FP32 matrices are converted to BF
 compute representation. These are different training runs, not a continuous
 trajectory. The momentum plot uses only the recorded early steps because these
 checkpoints do not contain optimizer state.
+
+New `train_gpt_lct.py` checkpoints contain `model`, `step`, and
+`muon_momentum`. Momentum is saved as dense CPU BF16 tensors keyed by parameter
+name, regardless of its training storage format; uninitialized step-zero buffers
+are `None`. These files do not include AdamW state or RNG state for a full resume.
+The weight collector accepts both these checkpoints and the older flat model files.
+
+To add later momentum curves, set `CHECKPOINT_DIR` and `STEPS` in
+`collect_nanogpt_momentum_exponents.py` and run it. Counts are saved under
+`artefacts/muon_momentum_checkpoints/<run>/`. Set `CHECKPOINT_CSV` in
+`plot_momentum_distribution.py` to that run's `exponents.csv` and rerun the plot.
+Older checkpoints without momentum are rejected rather than reconstructed.

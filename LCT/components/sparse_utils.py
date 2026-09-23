@@ -6,7 +6,7 @@ from torch import Tensor
 
 from LCT.LCTensor import LCTTensor
 from LCT.compress import a_compA_add_B
-from LCT.dist_configs import momentum_dist
+from LCT.dist_configs import momentum_dist, momentum_first_dist
 from LCT.kernels.optimizer import muon_dense_update_kernel
 if TYPE_CHECKING:
     from LCT.tensor_buffer import TensorBuffer
@@ -122,6 +122,8 @@ class SparseMuon:
 
         self.neg_lr = torch.tensor([-self.lr], dtype=torch.float32, device="cuda")
 
+        self.first_step = True
+
     @torch.no_grad()
     def step(self):
         for i, p in enumerate(self.params):
@@ -139,7 +141,11 @@ class SparseMuon:
 
             update = muon_update(g, mom, mu=self.mu)
             if self.compressed:
-                mom = LCTTensor(mom, buffer=self.buffer, dist=self.distribution)
+                # There are a lot of zeros on the first step.
+                if self.first_step:
+                    mom = LCTTensor(update, buffer=self.buffer, dist=momentum_first_dist)
+                else:
+                    mom = LCTTensor(mom, buffer=self.buffer, dist=self.distribution)
             self.momentums[i] = mom
             del mom
 
@@ -160,6 +166,8 @@ class SparseMuon:
                 # automatic in-place version increment.
                 torch.autograd.graph.increment_version(p)
             del update
+
+        self.first_step = False
 
     def zero_grad(self):
         for p in self.params:
