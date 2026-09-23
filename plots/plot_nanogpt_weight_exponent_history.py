@@ -19,7 +19,7 @@ def build_weights(data):
     steps = list(EARLY_STEPS) + later[0]
     means = np.concatenate((early[1][indices], later[1]))
     zeros = np.concatenate((early[2][indices], later[2]))
-    fig, ax = build((steps, means, zeros), ylabel="Mean probability per weight matrix", min_exponent=-20)
+    fig, ax = build((steps, means, zeros), ylabel="Mean probability per feedforward matrix", min_exponent=-20)
     ax.set_ylim(bottom=1e-6)
     return fig, ax
 

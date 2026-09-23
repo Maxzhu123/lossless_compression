@@ -2,7 +2,6 @@
 import csv
 from datetime import datetime
 import gc
-import json
 from pathlib import Path
 
 import torch
@@ -53,30 +52,16 @@ def main(kind="momentum"):
 
     def tensors():
         if kind == "momentum":
-            return [(names[id(p)], m) for p, m in zip(muon.params, muon.momentums)]
+            return [(names[id(p)], m) for p, m in zip(muon.params, muon.momentums)
+                    if names[id(p)].endswith((".mlp.fc.weight", ".mlp.proj.weight"))]
         return [(name, p) for name, p in model.named_trainable_tensors()
-                if p.ndim == 2 and p.dtype == torch.bfloat16]
+                if name.endswith((".mlp.fc.weight", ".mlp.proj.weight"))
+                and p.ndim == 2 and p.dtype == torch.bfloat16]
 
     folder = {"momentum": "muon_momentum", "weights": "nanogpt_weights"}[kind]
     run_dir = ARTEFACTS / folder / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir.mkdir(parents=True)
     path = run_dir / "exponents.csv"
-    metadata = dict(steps=STEPS, seed=training.SEED, layers=training.NUM_LAYERS,
-                    width=training.MODEL_DIM, sequence_length=settings.SEQ_LEN,
-                    tokens_per_step=settings.TRAIN_BATCH_TOKENS,
-                    microbatch_sequences=settings.SEQUENCES_PER_MICROBATCH,
-                    kind=kind, tensor_count=len(tensors()), torch_version=str(torch.__version__),
-                    selection="Muon momentum buffers" if kind == "momentum" else
-                              "All BF16 weight matrices, including embedding and LM head; excludes biases and gains",
-                    source="FineWeb training shards; fresh model initialization",
-                    compress_weights=settings.COMPRESS_WEIGHTS,
-                    compress_activations=settings.COMPRESS_ACTIVATIONS,
-                    compress_momentum=settings.COMPRESS_OPTIMISER,
-                    compile=settings.COMPILE,
-                    buffer_mib=settings.BUFFER_SIZE_MIB if model.tensor_buffer is not None else 0,
-                    sampling="All elements, after each optimizer update; no histogram sampling",
-                    exponent="BF16 exponent byte minus 127; -127 includes zero/subnormal; 128 is nonfinite")
-    (run_dir / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
     print(f"Recording {len(tensors())} {kind} tensors to {path}", flush=True)
     with path.open("x", newline="") as file:
         writer = csv.writer(file)

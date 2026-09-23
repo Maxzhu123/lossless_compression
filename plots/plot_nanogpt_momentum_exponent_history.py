@@ -10,6 +10,7 @@ from plot_lib import sample_group_colors, format_axes, finish_plot
 from plot_tables import render
 
 CSV_PATH = None
+STEPS = (1, 4, 8)
 CHECKPOINT_CSV = None  # Optional exponents.csv from nanogpt/collect_nanogpt_momentum_exponents.py.
 RESULTS_DIR = Path(__file__).resolve().parents[1] / "artefacts" / "muon_momentum"
 OUTPUT_DIR = Path(__file__).resolve().parent / "plots"
@@ -20,10 +21,14 @@ def load(path):
     histograms, totals, zero_counts = {}, {}, {}
     with path.open(newline="") as file:
         for row in csv.DictReader(file):
+            if not row["parameter"].endswith((".mlp.fc.weight", ".mlp.proj.weight")):
+                continue
             key = (int(row["step"]), row["parameter"])
             histograms.setdefault(key, np.zeros(256, dtype=np.int64))[int(row["exponent"]) + 127] = int(row["count"])
             totals[key] = int(row["elements"])
             zero_counts[key] = zero_counts.get(key, 0) + int(row["zero_count"])
+    if not histograms:
+        raise ValueError(f"No feedforward weight or momentum histograms in {path}")
     steps = sorted({step for step, _ in histograms})
     means, zeros = [], []
     for step in steps:
@@ -38,7 +43,7 @@ def load(path):
     return steps, means, zeros
 
 
-def build(data, ylabel="Mean probability per buffer", labels=None, min_exponent=None):
+def build(data, ylabel="Mean probability per feedforward buffer", labels=None, min_exponent=None):
     steps, means, zeros = data
     exponents = np.arange(-126, 128)
     probabilities = means[:, 1:255]
@@ -75,12 +80,14 @@ def build(data, ylabel="Mean probability per buffer", labels=None, min_exponent=
     return fig, ax
 
 
-def plot(path, filename="nanogpt_momentum_exponent_history.pdf", ylabel="Mean probability per buffer", checkpoint_path=None):
+def plot(path, filename="nanogpt_momentum_exponent_history.pdf", ylabel="Mean probability per feedforward buffer", checkpoint_path=None):
     data = load(path)
     if checkpoint_path is not None:
         later = load(checkpoint_path)
         data = (data[0] + later[0], np.concatenate((data[1], later[1])),
                 np.concatenate((data[2], later[2])))
+    indices = [data[0].index(step) for step in STEPS]
+    data = (list(STEPS), data[1][indices], data[2][indices])
     render({filename: data}, lambda data: build(data, ylabel),
            output_dir=OUTPUT_DIR, wide=True, show=False)
     print(f"Saved {OUTPUT_DIR / filename}")

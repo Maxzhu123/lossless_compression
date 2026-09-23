@@ -1,6 +1,5 @@
 """Collect BF16-view weight exponents from selected saved nanoGPT checkpoints."""
 import csv
-import json
 from pathlib import Path
 
 import torch
@@ -16,7 +15,6 @@ def collect(checkpoint_dir=CHECKPOINT_DIR, steps=STEPS, output_dir=OUTPUT_DIR, k
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "exponents.csv"
-    sources = []
     with path.open("w", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(("step", "parameter", "exponent", "count", "elements", "zero_count"))
@@ -33,7 +31,7 @@ def collect(checkpoint_dir=CHECKPOINT_DIR, steps=STEPS, output_dir=OUTPUT_DIR, k
             for name, weight in state.items():
                 if weight is None:  # Momentum has not been initialized at step zero.
                     continue
-                if not name.endswith(".weight") or weight.ndim != 2:
+                if not name.endswith((".mlp.fc.weight", ".mlp.proj.weight")) or weight.ndim != 2:
                     continue
                 # The old trainer stores FP32 matrices but casts them to BF16 for forward.
                 bits = weight.to(torch.bfloat16).contiguous().view(torch.int16).flatten()
@@ -46,15 +44,8 @@ def collect(checkpoint_dir=CHECKPOINT_DIR, steps=STEPS, output_dir=OUTPUT_DIR, k
                 matrices += 1
                 del bits
             file.flush()
-            sources.append(dict(step=step, checkpoint=str(checkpoint), matrices=matrices))
             print(f"Recorded checkpoint {step}: {matrices} matrices", flush=True)
             del state
-    metadata = dict(sources=sources, kind=kind, dtype="BF16",
-                    selection="Muon momentum buffers" if kind == "momentum" else
-                              "All 2D weight matrices, including embedding and LM head; FP32 weights cast to BF16",
-                    counts="Exact counts of all elements; no sampling",
-                    comparison="Later checkpoints are a different training run from the early-step recordings")
-    (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
     print(f"Saved {path}", flush=True)
 
 

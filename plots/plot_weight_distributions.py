@@ -113,10 +113,6 @@ def plot_distributions(path, output, min_elements=500_000_000, coverage=0.999999
     ymin = 10 ** math.floor(math.log10(float(positive.min())))
     ymax = 10 ** math.ceil(math.log10(float(positive.max())))
     columns, rows = 2, math.ceil(len(groups)/2)
-    summary = {'source': str(path.resolve()), 'model_name': data['model_name'],
-               'selection': f'group count > {min_elements}', 'normalization': 'count / (all group values * bin width)',
-               'xlim': [-limit, limit], 'coverage_target': coverage,
-               'y_scale': 'logarithmic', 'smoothing_sigma_bins': smoothing_bins, 'groups': []}
     output.parent.mkdir(parents=True, exist_ok=True)
     with plot_style(wide=True, font_scale=1.1,
                     overrides={'figure.figsize': (8, 2.3*rows+0.4), 'axes.grid': False}):
@@ -146,18 +142,12 @@ def plot_distributions(path, output, min_elements=500_000_000, coverage=0.999999
                 ax.set_xlabel(value_label)
             displayed = int(counts[1:-1][visible].sum())
             assert displayed/total >= coverage-1e-12
-            summary['groups'].append({'label': label, 'numel': total,
-                'displayed_fraction': displayed/total,
-                'histogram_overflow': int(counts[0]+counts[-1]),
-                'minimum': float(data['extrema'][label][0]),
-                'maximum': float(data['extrema'][label][1])})
         for index in range(len(groups), rows*columns):
             axes.flat[index].set_visible(False)
         fig.tight_layout(pad=0.7, h_pad=1.5, w_pad=1.1)
         fig.savefig(output.with_suffix('.pdf'))
         plt.close(fig)
     print(f'Saved {output.with_suffix(".pdf")}')
-    return summary
 
 
 def main():

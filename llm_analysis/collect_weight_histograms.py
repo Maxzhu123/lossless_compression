@@ -57,7 +57,6 @@ def collect(output=DEFAULT_OUTPUT, min_elements=500_000_000, chunk_elements=4_19
     if not selected:
         raise ValueError('No parameter groups exceed the threshold')
     histograms, extrema = {}, {}
-    provenance = {}
     zero_counts = {}
     edges = None
     for label, (count, entries) in selected.items():
@@ -92,7 +91,6 @@ def collect(output=DEFAULT_OUTPUT, min_elements=500_000_000, chunk_elements=4_19
         histograms[label] = counts
         extrema[label] = (minimum, maximum)
         zero_counts[label] = zero_count
-        provenance[label] = {'numel': count, 'tensors': [key for key, _ in entries]}
         print(f'  complete: range [{float(minimum):.5g}, {float(maximum):.5g}]', flush=True)
     output.parent.mkdir(parents=True, exist_ok=True)
     if exponents_only:
@@ -103,10 +101,6 @@ def collect(output=DEFAULT_OUTPUT, min_elements=500_000_000, chunk_elements=4_19
     else:
         save_weight_results(output, histograms, edges, extrema, model_name=MODEL_NAME,
                             bin_width=bin_width, limit=limit, model_dtype=str(torch.bfloat16))
-    metadata = {'checkpoint': str(MODEL_PATH), 'selection': f'group numel > {min_elements}',
-                'collection': 'CPU streaming, all values (no sampling)', 'chunk_elements': chunk_elements,
-                'groups': provenance}
-    output.with_suffix('.metadata.json').write_text(json.dumps(metadata, indent=2)+'\n')
     print(f'Saved {output}', flush=True)
 
 

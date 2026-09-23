@@ -14,18 +14,6 @@ ROOT = Path(__file__).resolve().parents[1]
 RESULTS = ROOT / 'artefacts/weight_exponent_distribution_results.pt'
 
 
-def shortest_interval(counts, coverage=0.99):
-    """Shortest contiguous normal-exponent interval reaching the requested mass."""
-    target = coverage*counts.sum()
-    cumulative = np.concatenate(([0], np.cumsum(counts, dtype=np.int64)))
-    candidates = []
-    for left in range(len(counts)):
-        right = int(np.searchsorted(cumulative, cumulative[left]+target, side='left'))
-        if right <= len(counts):
-            candidates.append((right-left, left-126, right-1-126))
-    return min(candidates)
-
-
 def plot_exponents(results=RESULTS, output=Path(__file__).resolve().parent/'plots/weight_exponent_distributions',
                    min_elements=500_000_000, *, group_kind='weights'):
     data = torch.load(results, map_location='cpu', weights_only=True)
@@ -56,9 +44,6 @@ def plot_exponents(results=RESULTS, output=Path(__file__).resolve().parent/'plot
     columns, rows = 2, math.ceil(len(groups)/2)
     ymax = max(float(counts.max()/total) for _, counts, total in groups)
     ymax = math.ceil(ymax/0.05)*0.05
-    summary = {'source': str(results.resolve()), 'model_name': data['model_name'],
-               'normal_exponent_xlim': [lower, upper], 'probability_denominator': f'all {group_kind} in each group',
-               'left_bin': 'all exponent fields below the displayed normal range; includes field 0', 'groups': []}
     with plot_style(wide=True, font_scale=1.1,
                     overrides={'figure.figsize': (8, 2.3*rows+0.4), 'axes.grid': False}):
         fig, axes = plt.subplots(rows, columns, sharex=True, sharey=True, squeeze=False)
@@ -81,21 +66,7 @@ def plot_exponents(results=RESULTS, output=Path(__file__).resolve().parent/'plot
             if index + columns >= len(groups):
                 ax.tick_params(axis='x', labelbottom=True)
                 ax.set_xlabel('Exponent (bias removed)')
-            positive = probabilities[probabilities > 0]
-            entropy = float(-(positive*np.log2(positive)).sum())
-            width, lo, hi = shortest_interval(counts[1:255])
-            mass99 = int(counts[lo+127:hi+128].sum())/int(counts[1:255].sum())
-            assert mass99 >= 0.99-1e-12
-            normal_visible = int(counts[1:255][visible].sum())/int(counts[1:255].sum())
             assert np.isclose(left_mass+probabilities[1:255][visible].sum(), 1)
-            top_bins = int(np.searchsorted(np.cumsum(np.sort(counts)[::-1]), .99*total))+1
-            summary['groups'].append({'label': label, 'numel': total,
-                'entropy_bits': entropy, 'symbols_for_99pct': top_bins,
-                'left_aggregate_fraction': left_mass, 'normal_99pct_width': width, 'normal_99pct_interval': [lo, hi],
-                'normal_interval_mass': mass99, 'mode_exponent': int(np.argmax(counts[1:255]))-126,
-                'zero_fraction': data['zero_counts'][label]/total,
-                'subnormal_fraction': (int(counts[0])-data['zero_counts'][label])/total,
-                'visible_normal_fraction': normal_visible})
         for index in range(len(groups), rows*columns):
             axes.flat[index].set_visible(False)
         fig.tight_layout(pad=0.7, h_pad=1.5, w_pad=1.1)
@@ -103,7 +74,6 @@ def plot_exponents(results=RESULTS, output=Path(__file__).resolve().parent/'plot
         fig.savefig(output.with_suffix('.pdf'))
         plt.close(fig)
     print(f'Saved {output.with_suffix(".pdf")}')
-    return summary
 
 
 def main():

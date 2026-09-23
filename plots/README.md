@@ -83,8 +83,7 @@ reuse the shared colors and markers; nvCOMP styles are also defined centrally.
 ## Weight distributions
 
 `plot_weight_distributions.py` exports only `plots/plots/weight_distributions.pdf`
-(vector). Selection, counts, extrema, and displayed mass are computed from the
-saved histograms on demand and returned by `plot_distributions()` in memory:
+(vector), using the saved histograms:
 
 ```sh
 python plots/plot_weight_distributions.py
@@ -117,8 +116,8 @@ python llm_analysis/collect_weight_histograms.py
 
 It uses a metadata-only model to identify the same parameter groups, collects
 every value in the selected groups (no sampling), and saves a separate
-`artefacts/weight_distribution_large_results.pt` with 0.001-wide bins and a
-provenance sidecar. The six-group result is deliberately separate from a full
+`artefacts/weight_distribution_large_results.pt` with 0.001-wide bins.
+The six-group result is deliberately separate from a full
 all-group analysis. The collector never downloads weights or allocates CUDA
 tensors. Set `threads` inside `main()` to control CPU parallelism (default 4).
 
@@ -142,11 +141,7 @@ The counts are saved separately in
 only `plots/plots/weight_exponent_distributions.pdf`, with the same six
 groups, ordering, and colors as the raw-weight figure. It uses probabilities
 on a shared linear scale. Exponents below -20 are combined in a separate
-hatched bar; all weights remain in the normalization. `plot_exponents()` returns full
-exponent entropy, the number of most-frequent symbols needed to reach 99%,
-exact-zero/subnormal fractions, and the displayed tail mass. The 99% symbol
-set need not be contiguous. These statistics are computed from the saved counts
-on demand and kept in memory, with no JSON plot output. Collection and plotting never use CUDA.
+hatched bar; all weights remain in the normalization.
 
 ## Activation distributions
 
@@ -192,23 +187,24 @@ Plotting neither runs the model nor updates `paper/figures/`.
 
 Run `python nanogpt/record_momentum_distribution.py` to record the first eight
 nanoGPT optimizer steps using the current `qwen_time_mem.py` settings. Exact
-per-buffer BF16 exponent counts and run metadata are saved under
+BF16 exponent counts for feedforward momentum buffers are saved under
 `artefacts/muon_momentum/<run>/`.
 
 Run `python plots/plot_nanogpt_momentum_exponent_history.py` to plot the latest saved run,
 or set `CSV_PATH` in that script to choose one. It exports
-`plots/plots/nanogpt_momentum_exponent_history.pdf` using the shared styles. Each buffer's
-histogram is normalized separately, then averaged with equal weight. All steps
+`plots/plots/nanogpt_momentum_exponent_history.pdf` using the shared styles. Each feedforward buffer's
+histogram is normalized separately, then averaged with equal weight. Steps 1, 4, and 8
 appear on one logarithmic-probability plot; exact zeros are shown separately
 at the left and remain part of the probability normalization.
 
 For the matching nanoGPT weight plot, run
 `python nanogpt/record_weight_distribution.py`, then
-`python plots/plot_nanogpt_weight_exponent_history.py`. Counts and metadata are saved
+`python plots/plot_nanogpt_weight_exponent_history.py`. Counts are saved
 under `artefacts/nanogpt_weights/<run>/`, and the figure is exported to
 `plots/plots/nanogpt_weight_exponent_history.pdf`. It averages the normalized histograms
-of all BF16 weight matrices equally, including the embedding and LM head;
-FP32 biases and normalization gains are excluded.
+of the feedforward `.mlp.fc.weight` and `.mlp.proj.weight` matrices equally.
+Both history plots filter to these matrices before averaging; new recordings
+and checkpoint collections save only these matrices.
 
 `python nanogpt/collect_nanogpt_weight_exponents.py` adds saved-checkpoint counts
 for steps 300, 1500, and 3300 from `nanogpt/logs/2026-07-04_00-06-23` to
@@ -227,5 +223,6 @@ The weight collector accepts both these checkpoints and the older flat model fil
 To add later momentum curves, set `CHECKPOINT_DIR` and `STEPS` in
 `nanogpt/collect_nanogpt_momentum_exponents.py` and run it. Counts are saved under
 `artefacts/muon_momentum_checkpoints/<run>/`. Set `CHECKPOINT_CSV` in
-`plot_nanogpt_momentum_exponent_history.py` to that run's `exponents.csv` and rerun the plot.
+`plot_nanogpt_momentum_exponent_history.py` to that run's `exponents.csv`, add the desired
+steps to `STEPS` in that script, and rerun the plot.
 Older checkpoints without momentum are rejected rather than reconstructed.
