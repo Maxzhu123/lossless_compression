@@ -4,7 +4,7 @@ from pathlib import Path
 from collect_nanogpt_weight_exponents import collect
 
 ROOT = Path(__file__).resolve().parents[1]
-CHECKPOINT_DIR = None  # Set to a new train_gpt_lct run containing momentum checkpoints.
+CHECKPOINT_DIR = ROOT / "nanogpt/logs/2026-09-23_12-04-32_428546_lct"
 STEPS = (300, 1500, 3300)
 
 

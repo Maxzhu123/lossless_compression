@@ -10,8 +10,9 @@ from plot_lib import sample_group_colors, format_axes, finish_plot
 from plot_tables import render
 
 CSV_PATH = None
-STEPS = (1, 4, 8)
-CHECKPOINT_CSV = None  # Optional exponents.csv from nanogpt/collect_nanogpt_momentum_exponents.py.
+STEPS = (1, 4, 8, 300, 1500, 3300)
+CHECKPOINT_CSV = (Path(__file__).resolve().parents[1] / "artefacts/muon_momentum_checkpoints"
+                  / "2026-09-23_12-04-32_428546_lct/exponents.csv")
 RESULTS_DIR = Path(__file__).resolve().parents[1] / "artefacts" / "muon_momentum"
 OUTPUT_DIR = Path(__file__).resolve().parent / "plots"
 

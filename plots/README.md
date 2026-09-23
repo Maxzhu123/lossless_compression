@@ -193,7 +193,7 @@ BF16 exponent counts for feedforward momentum buffers are saved under
 Run `python plots/plot_nanogpt_momentum_exponent_history.py` to plot the latest saved run,
 or set `CSV_PATH` in that script to choose one. It exports
 `plots/plots/nanogpt_momentum_exponent_history.pdf` using the shared styles. Each feedforward buffer's
-histogram is normalized separately, then averaged with equal weight. Steps 1, 4, and 8
+histogram is normalized separately, then averaged with equal weight. Steps 1, 4, 8, 300, 1500, and 3300
 appear on one logarithmic-probability plot; exact zeros are shown separately
 at the left and remain part of the probability normalization.
 
@@ -211,8 +211,11 @@ for steps 300, 1500, and 3300 from `nanogpt/logs/2026-07-04_00-06-23` to
 `artefacts/nanogpt_weight_checkpoints/2026-07-04_00-06-23/`. The weight plot
 labels all curves as `Step <step>`. Checkpoint FP32 matrices are converted to BF16, matching their forward
 compute representation. These are different training runs, not a continuous
-trajectory. The momentum plot uses only the recorded early steps because these
-checkpoints do not contain optimizer state.
+trajectory. Those July weight checkpoints do not contain optimizer state.
+The momentum plot combines the recorded early steps with saved momentum from
+`nanogpt/logs/2026-09-23_12-04-32_428546_lct` at steps 300, 1500, and 3300,
+using `artefacts/muon_momentum_checkpoints/2026-09-23_12-04-32_428546_lct/exponents.csv`.
+Its early and later observations also come from separate training runs.
 
 New `train_gpt_lct.py` checkpoints contain `model`, `step`, and
 `muon_momentum`. Momentum is saved as dense CPU BF16 tensors keyed by parameter
