@@ -16,3 +16,6 @@ mamba activate bitsparse
 git clone https://github.com/Maxzhu123/lossless_compression.git
 cd lossless_compression
 pip install -r requirements.txt
+cd baselines
+./setup.sh
+cd ..

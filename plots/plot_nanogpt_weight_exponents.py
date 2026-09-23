@@ -7,7 +7,7 @@ from plot_momentum_distribution import load, build, OUTPUT_DIR
 from plot_tables import render
 
 CSV_PATH = None
-EARLY_STEPS = (1, 2, 4, 8)
+EARLY_STEPS = (1, 4, 8)
 RESULTS_DIR = Path(__file__).resolve().parents[1] / "artefacts" / "nanogpt_weights"
 CHECKPOINT_CSV = (Path(__file__).resolve().parents[1] / "artefacts" /
                   "nanogpt_weight_checkpoints/2026-07-04_00-06-23/exponents.csv")

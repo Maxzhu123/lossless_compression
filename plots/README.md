@@ -191,7 +191,7 @@ Plotting neither runs the model nor updates `paper/figures/`.
 ## Muon momentum evolution
 
 Run `python nanogpt/record_momentum_distribution.py` to record the first eight
-nanoGPT optimizer steps using the current `test_time_mem.py` settings. Exact
+nanoGPT optimizer steps using the current `qwen_time_mem.py` settings. Exact
 per-buffer BF16 exponent counts and run metadata are saved under
 `artefacts/muon_momentum/<run>/`.
 
