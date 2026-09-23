@@ -1,0 +1,9 @@
+torch
+numpy
+transformers==5.12.0
+git+https://github.com/Maccy-Z/c_print.git
+tqdm
+tabulate
+scipy
+matplotlib
+safetensors

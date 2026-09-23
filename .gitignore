@@ -20,6 +20,7 @@ nanogpt/data/fineweb10B/
 /benchmarks/results/
 *.csv
 *.txt
+!requirements.txt
 /program.md
 /.start
 /artefacts/
