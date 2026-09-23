@@ -44,7 +44,7 @@ SEED = 0
 SEQ_LEN = 1024
 TRAIN_BATCH_TOKENS = 8 * 64 * 1024  # Tokens per optimizer step.
 VAL_TOKENS = 20 * 524288
-TRAIN_MICROBATCH_SEQUENCES = 32  # Tune without changing tokens per optimizer step.
+TRAIN_MICROBATCH_SEQUENCES = 64  # Tune without changing tokens per optimizer step.
 VAL_MICROBATCH_SEQUENCES = 4
 
 

@@ -11,6 +11,8 @@ ENCODE_AUTOTUNE_CONFIGS = [
     triton.Config({}, num_warps=8, num_stages=2, maxnreg=64),
     triton.Config({}, num_warps=4, num_stages=2, maxnreg=64),
     triton.Config({}, num_warps=4, num_stages=3, maxnreg=64),
+    triton.Config({}, num_warps=8, num_stages=9, maxnreg=29),
+
 ]
 COMPACT_BAD_STREAMS_AUTOTUNE_CONFIGS = [
     triton.Config({"BLOCK": 1024}, num_warps=1, num_stages=2),
@@ -34,6 +36,8 @@ DECODE_AUTOTUNE_CONFIGS = [
     triton.Config({}, num_warps=4, num_stages=5, maxnreg=64),
     triton.Config({}, num_warps=2, num_stages=2, maxnreg=64),
     triton.Config({}, num_warps=2, num_stages=3, maxnreg=64),
+    triton.Config({}, num_warps=4, num_stages=1, maxnreg=48,
+    ),
 ]
 DUAL_DECODE_AUTOTUNE_CONFIGS = [
     triton.Config({}, num_warps=8, num_stages=3),

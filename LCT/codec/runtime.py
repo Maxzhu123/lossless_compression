@@ -333,7 +333,7 @@ def decode_dense(data: CompressedTensor) -> torch.Tensor:
         FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length,
         BLOCK=block_symbols, N_LANES=lanes, N_STEPS=steps,
         FIXED_WORDS=fixed_words,
-        ON_DEMAND=logical_numel > 100_000_000,
+        ON_DEMAND=logical_numel > 600_000_000,
     )
     scatter_meta = dict(
         LOGICAL_NUMEL=logical_numel,

@@ -4,8 +4,10 @@ from math import sqrt
 from pathlib import Path
 from statistics import mean, stdev
 import time
-
 import torch
+import sys
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from benchmarks.prepare import make_empirical, make_gaussian, make_laplace
 from LCT.comp_format import DistType, Distribution

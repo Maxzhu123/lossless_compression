@@ -9,7 +9,7 @@ import time
 import train_gpt_lct as training
 
 COMPRESS_WEIGHTS = False
-COMPRESS_ACTIVATIONS = True
+COMPRESS_ACTIVATIONS = False
 COMPRESS_OPTIMISER = False
 BUFFER = True
 COMPILE = True
