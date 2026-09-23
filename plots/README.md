@@ -70,6 +70,16 @@ Weight-distribution plots should load the saved CPU tensors from
 or rerunning data collection. No BitSparse measurements or generated figures
 are included in this directory.
 
+## Codec throughput
+
+Run `python plots/plot_codec_throughput.py` to generate
+`plots/plots/codec_throughput.pdf`. The script retains the supplied mean timings
+and plots encoding and decoding throughput in separate panels, excluding LZ4
+and Cascaded. Input sizes are interpreted as MiB (1024 = 1 GiB); throughput is
+`(size_mib / 1024) / (time_ms / 1000)` for both operations. The plot starts at
+16 MiB on a logarithmic size axis, with the same linear throughput scale across panels. Existing series
+reuse the shared colors and markers; nvCOMP styles are also defined centrally.
+
 ## Weight distributions
 
 `plot_weight_distributions.py` exports only `plots/plots/weight_distributions.pdf`

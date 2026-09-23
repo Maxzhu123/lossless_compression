@@ -19,6 +19,17 @@ applicable. Empty CUDA tensors are handled without invoking nvCOMP.
 
 Use the project's Python environment, with PyTorch and NumPy available.
 
+After activating that environment, run from the `baselines` folder:
+
+```bash
+bash setup.sh
+```
+
+The script installs setuptools, safetensors, nvCOMP matching PyTorch's CUDA major
+version, and Triton if missing. It builds ZipNN and caches DFloat11's native encoder.
+It assumes CUDA 12 or 13 PyTorch, NumPy, a C compiler (`cc`), matching Python
+development headers and POSIX pthreads are already available.
+
 - **SplitZip:** CUDA PyTorch + Triton, already used by LCT.
 - **DFloat11:** PyTorch + NumPy + a C compiler for the default native encoder
   (the reference encoder requires no compiler). The CUDA path loads the upstream PTX using the

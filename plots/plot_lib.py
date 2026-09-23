@@ -79,6 +79,8 @@ CONFIG_STYLES = {
     "DFloat11": {"color": "#009E73", "marker": "D"},
     "SplitZip": {"color": "#CC79A7", "marker": "P"},
     "ZipNN": {"color": "#56B4E9", "marker": "v"},
+    "nvCOMP-Bitcomp": {"color": "#E69F00", "marker": "o"},
+    "nvCOMP-ANS": {"color": "#333333", "marker": "^"},
 }
 
 # Line styles cycled across metrics when one figure carries several per group.
