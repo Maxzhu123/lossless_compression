@@ -102,7 +102,7 @@ class SparseMuon:
 
     def __init__(self, params: Iterable[LCTTensor | Tensor], lr=0.02, weight_decay=0, mu=0.95,
                  buffer: TensorBuffer|None=None, compressed=True, distribution=None,
-                 match_weight_update=False):
+                 match_weight_update=False, zero_first_step=False):
         self.params = list(params)
         for p in self.params:
             assert isinstance(p, (LCTTensor, Tensor)) and p.ndim >= 2, "Muon requires matrix parameters"
@@ -122,7 +122,7 @@ class SparseMuon:
 
         self.neg_lr = torch.tensor([-self.lr], dtype=torch.float32, device="cuda")
 
-        self.first_step = False
+        self.first_step = zero_first_step
 
     @torch.no_grad()
     def step(self):
