@@ -17,7 +17,7 @@ from LCT.comp_format import DistType, Distribution
 def main():
     # Same task settings as experiments/benchmark_lct.py. Edit before running.
     family = DistType.GAUSSIAN  # GAUSSIAN, EMPIRICAL, LAPLACE, or GAMMA
-    methods = ["nvcomp_lz4", "nvcomp_cascaded", "nvcomp_bitcomp",
+    methods = ["nvcomp_lz4", "nvcomp_bitcomp", "nvcomp_ans",
                "splitzip", "dfloat11", "zipnn"]
     elements = (1024 ** 3) // 2
     warmup, iterations = 3, 50
@@ -26,7 +26,7 @@ def main():
     empirical_scale = 0.5
     laplace_scale = 1.5
     gamma_shape, gamma_scale = 0.82, 2.43
-    threads = 1  # ZipNN CPU threads.
+    threads = 8  # ZipNN CPU threads.
     dfloat11_encoder = "native"  # native (compiled C) or reference (upstream Python).
 
     def make_data(data_seed):
@@ -52,6 +52,7 @@ def main():
     x = make_data(seed)
     output_dir = Path(__file__).resolve().parent / "results"
     output_dir.mkdir(parents=True, exist_ok=True)
+    output = output_dir / "baselines.csv"
     for name in methods:
         if name == "splitzip":
             calibration = make_data(seed + 1)
@@ -64,6 +65,7 @@ def main():
                 "nvcomp_lz4": lambda: NVComp("LZ4"),
                 "nvcomp_cascaded": lambda: NVComp("Cascaded"),
                 "nvcomp_bitcomp": lambda: NVComp("Bitcomp"),
+                "nvcomp_ans": lambda: NVComp("ANS"),
             }[name]()
         result = benchmark(codec, x, warmup=warmup, iterations=iterations, verify=False)
         print(
@@ -72,13 +74,13 @@ def main():
             f" | compression ratio (original/compressed): {result.original_bytes / result.compressed_bytes:.3f}x",
             flush=True,
         )
-        output = output_dir / f"{name}_{family.value}_{x.nbytes / 1024 ** 3:g}gib.csv"
         with output.open("a", newline="") as file:
             writer = csv.writer(file)
             if file.tell() == 0:
-                writer.writerow(("encode_mean_ms", "encode_sem_ms", "decode_mean_ms", "decode_sem_ms", "tensor_bytes"))
-            writer.writerow((result.compress_ms, result.compress_sem_ms,
-                             result.decompress_ms, result.decompress_sem_ms, x.nbytes))
+                writer.writerow(("name", "tensor_bytes", "distribution", "encode_mean_ms", "encode_sem_ms",
+                                 "decode_mean_ms", "decode_sem_ms"))
+            writer.writerow((name, x.nbytes, family.value, result.compress_ms, result.compress_sem_ms,
+                             result.decompress_ms, result.decompress_sem_ms))
         print(f"Results saved to {output}", flush=True)
         del codec
 

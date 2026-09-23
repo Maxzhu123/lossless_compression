@@ -8,13 +8,14 @@ ALGORITHMS = {
     "nvcomp_lz4": "LZ4",
     "nvcomp_cascaded": "Cascaded",
     "nvcomp_bitcomp": "Bitcomp",
+    "nvcomp_ans": "ANS",
 }
 
 
 class NVComp:
     def __init__(self, algorithm="LZ4"):
         if algorithm not in ALGORITHMS.values():
-            raise ValueError("algorithm must be LZ4, Cascaded, or Bitcomp")
+            raise ValueError("algorithm must be LZ4, Cascaded, Bitcomp, or ANS")
         self.algorithm = algorithm
         self.method = f"nvcomp_{algorithm.lower()}"
 

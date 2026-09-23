@@ -1,4 +1,4 @@
-"""Benchmark 1 GiB of BF16 data; save timing means and standard errors to CSV."""
+"""Benchmark BF16 data; append timing means and standard errors to CSV."""
 import csv
 from math import sqrt
 from pathlib import Path
@@ -70,21 +70,21 @@ def main():
         packed.free()
         del packed, restored
 
-    output = Path(__file__).with_name("results") / f"lct_{family.value}_1gib.csv"
+    output = Path(__file__).with_name("results") / f"lct_{family.value}.csv"
     output.parent.mkdir(parents=True, exist_ok=True)
     encode_times, decode_times = zip(*timings)
     with output.open("a", newline="") as file:
         writer = csv.writer(file)
         if file.tell() == 0:
-            writer.writerow(("encode_mean_ms", "encode_sem_ms", "decode_mean_ms", "decode_sem_ms", "tensor_bytes"))
+            writer.writerow(("tensor_bytes", "encode_mean_ms", "encode_sem_ms", "decode_mean_ms", "decode_sem_ms"))
         # SEM uses the sample standard deviation; one measurement is insufficient.
         encode_sem = stdev(encode_times) / sqrt(iterations) if iterations > 1 else float("nan")
         decode_sem = stdev(decode_times) / sqrt(iterations) if iterations > 1 else float("nan")
-        writer.writerow((mean(encode_times), encode_sem, mean(decode_times), decode_sem, x.nbytes))
+        writer.writerow((x.nbytes, mean(encode_times), encode_sem, mean(decode_times), decode_sem))
     print(
         f"LCT | encode: {mean(encode_times):.3f} ± {encode_sem:.3f} ms"
         f" | decode: {mean(decode_times):.3f} ± {decode_sem:.3f} ms"
-        f" | compression ratio (compressed/original): {1/compression_ratio:.4f}",
+        f" | compression ratio (original/compressed): {1/compression_ratio:.4f}",
         flush=True,
     )
     print(f"Results saved to {output}", flush=True)

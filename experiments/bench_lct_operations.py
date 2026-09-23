@@ -174,8 +174,8 @@ def main():
             writer = csv.writer(file)
             # LCT is the fused path, or standalone compress/decompress.
             if file.tell() == 0:
-                writer.writerow(("operation", "output", "lct_mean_ms", "lct_sem_ms",
-                                 "naive_mean_ms", "naive_sem_ms", "dense_mean_ms", "dense_sem_ms", "speedup", "tensor_bytes"))
+                writer.writerow(("operation", "tensor_bytes", "output", "lct_mean_ms", "lct_sem_ms",
+                                 "naive_mean_ms", "naive_sem_ms", "dense_mean_ms", "dense_sem_ms", "speedup"))
             for name, output_kind, functions, reference in cases:
                 results = measure(functions, reference, a.shape, warmup, iterations)
                 timings = {
@@ -193,8 +193,8 @@ def main():
                 speedup = ""
                 if "fused" in results:
                     speedup = naive_mean / lct_mean
-                writer.writerow((name, output_kind, lct_mean, lct_sem,
-                                 naive_mean, naive_sem, dense_mean, dense_sem, speedup, a.nbytes))
+                writer.writerow((name, a.nbytes, output_kind, lct_mean, lct_sem,
+                                 naive_mean, naive_sem, dense_mean, dense_sem, speedup))
                 file.flush()
     finally:
         a_comp.free()
