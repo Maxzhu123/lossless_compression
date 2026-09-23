@@ -8,9 +8,9 @@ import time
 
 import train_gpt_lct as training
 
-COMPRESS_WEIGHTS = False
-COMPRESS_ACTIVATIONS = False
-COMPRESS_OPTIMISER = False
+COMPRESS_WEIGHTS = True
+COMPRESS_ACTIVATIONS = True
+COMPRESS_OPTIMISER = True
 BUFFER = True
 COMPILE = True
 LOG_GRAPH_BREAKS = True
@@ -24,7 +24,7 @@ MEASURE_STEPS = 5
 
 def main():
     import torch
-    from LCT.tensor_buffer import TensorBuffer
+    from LCT.tensor_buffer import TensorBuffer, _free_regions_snapshot
 
     # Emit graph-break reasons and source locations while Dynamo traces the model.
     torch._logging.set_logs(graph_breaks=LOG_GRAPH_BREAKS)
@@ -84,9 +84,15 @@ def main():
         if not warmup:
             peaks.append(peak)
             step_times.append(elapsed)
+        buffer_stats = ""
+        buffer = model.tensor_buffer
+        if buffer is not None:
+            used = buffer.capacity_bytes - sum(size for _, size in _free_regions_snapshot(buffer))
+            buffer_stats = f"buffer_allocated:{used / 2**20:.1f}/{buffer.capacity_bytes / 2**20:.1f}MiB, "
         print(f"{mode} step {step+1} ({'warmup' if warmup else 'measured'}): "
-              f"peak={peak:.1f} MiB, reserved={torch.cuda.max_memory_reserved()/2**20:.1f} MiB, "
+              f"peak={peak:.1f} MiB, "
               f"after step={torch.cuda.memory_allocated()/2**20:.1f} MiB, "
+              f"{buffer_stats}"
               f"loss={total_loss.item()/tokens:.4f}, time={elapsed:.2f}s", flush=True)
     print(f"Peak allocated after warmup: {max(peaks):.1f} MiB", flush=True)
     print(f"Mean step time after warmup: {sum(step_times)/len(step_times):.3f}s", flush=True)

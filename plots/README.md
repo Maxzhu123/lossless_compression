@@ -187,3 +187,33 @@ The scripts have editable settings inside `main()` and export only:
 As with weights, plotting loads only saved CPU counts, shares `plot_style()`,
 and returns group counts, extrema, coverage, and exponent statistics in memory.
 Plotting neither runs the model nor updates `paper/figures/`.
+
+## Muon momentum evolution
+
+Run `python nanogpt/record_momentum_distribution.py` to record the first eight
+nanoGPT optimizer steps using the current `test_time_mem.py` settings. Exact
+per-buffer BF16 exponent counts and run metadata are saved under
+`artefacts/muon_momentum/<run>/`.
+
+Run `python plots/plot_momentum_distribution.py` to plot the latest saved run,
+or set `CSV_PATH` in that script to choose one. It exports
+`plots/plots/momentum_evolution.pdf` using the shared styles. Each buffer's
+histogram is normalized separately, then averaged with equal weight. All steps
+appear on one logarithmic-probability plot; exact zeros are shown separately
+at the left and remain part of the probability normalization.
+
+For the matching nanoGPT weight plot, run
+`python nanogpt/record_weight_distribution.py`, then
+`python plots/plot_nanogpt_weight_exponents.py`. Counts and metadata are saved
+under `artefacts/nanogpt_weights/<run>/`, and the figure is exported to
+`plots/plots/nanogpt_weight_evolution.pdf`. It averages the normalized histograms
+of all BF16 weight matrices equally, including the embedding and LM head;
+FP32 biases and normalization gains are excluded.
+
+`python plots/collect_nanogpt_weight_exponents.py` adds saved-checkpoint counts
+for steps 300, 1500, and 3300 from `nanogpt/logs/2026-07-04_00-06-23` to
+`artefacts/nanogpt_weight_checkpoints/2026-07-04_00-06-23/`. The weight plot
+labels all curves as `Step <step>`. Checkpoint FP32 matrices are converted to BF16, matching their forward
+compute representation. These are different training runs, not a continuous
+trajectory. The momentum plot uses only the recorded early steps because these
+checkpoints do not contain optimizer state.
