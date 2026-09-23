@@ -1,4 +1,4 @@
-"""Plot the latest recorded Muon run, or set CSV_PATH to a specific exponents.csv."""
+"""Plot nanoGPT Muon momentum exponent history across recorded training steps."""
 import csv
 from pathlib import Path
 
@@ -10,7 +10,7 @@ from plot_lib import sample_group_colors, format_axes, finish_plot
 from plot_tables import render
 
 CSV_PATH = None
-CHECKPOINT_CSV = None  # Optional exponents.csv from collect_nanogpt_momentum_exponents.py.
+CHECKPOINT_CSV = None  # Optional exponents.csv from nanogpt/collect_nanogpt_momentum_exponents.py.
 RESULTS_DIR = Path(__file__).resolve().parents[1] / "artefacts" / "muon_momentum"
 OUTPUT_DIR = Path(__file__).resolve().parent / "plots"
 
@@ -52,9 +52,11 @@ def build(data, ylabel="Mean probability per buffer", labels=None, min_exponent=
     fig, ax = plt.subplots()
     for i, (step, color) in enumerate(zip(steps, sample_group_colors(len(steps)))):
         values = np.where(probabilities[i] > 0, probabilities[i], np.nan)
+        zero_percent = 100 * zeros[i]
+        zero_label = "~0%" if 0 < zero_percent < 0.01 else f"{zero_percent:.3g}%"
         ax.plot(exponents, values, color=color,
                 linestyle="-" if i % 2 == 0 else "--",
-                label=f"{labels[i] if labels is not None else f'Step {step}'}  ({100 * zeros[i]:.3g}% zero)")
+                label=f"{labels[i] if labels is not None else f'Step {step}'}  ({zero_label} zero)")
         if zeros[i] > 0:
             ax.plot(zero_x, zeros[i], marker="o" if i % 2 == 0 else "s",
                     color=color, markerfacecolor="white", linestyle="none")
@@ -73,7 +75,7 @@ def build(data, ylabel="Mean probability per buffer", labels=None, min_exponent=
     return fig, ax
 
 
-def plot(path, filename="momentum_evolution.pdf", ylabel="Mean probability per buffer", checkpoint_path=None):
+def plot(path, filename="nanogpt_momentum_exponent_history.pdf", ylabel="Mean probability per buffer", checkpoint_path=None):
     data = load(path)
     if checkpoint_path is not None:
         later = load(checkpoint_path)

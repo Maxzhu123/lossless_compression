@@ -3,17 +3,15 @@ from collections import defaultdict
 import json
 import math
 from pathlib import Path
-import sys
 
 import torch
 from safetensors import safe_open
 from transformers.models.nemotron_h.configuration_nemotron_h import NemotronHConfig
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'llm_analysis'))
 from weight_distribution import MODEL_PATH, MODEL_NAME, NemotronHForCausalLM, group_parameters, save_weight_results
 from histogram import tensor_histogram
 
+ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = ROOT / 'artefacts/weight_distribution_large_results.pt'
 EXPONENT_OUTPUT = ROOT / 'artefacts/weight_exponent_distribution_results.pt'
 

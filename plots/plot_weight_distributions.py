@@ -169,7 +169,7 @@ def main():
     smoothing_bins = 3.0  # Gaussian kernel standard deviation; 0 shows raw bins.
 
     if not results.exists():
-        raise FileNotFoundError(f'No saved histograms at {results}; run python plots/collect_weight_histograms.py first')
+        raise FileNotFoundError(f'No saved histograms at {results}; run python llm_analysis/collect_weight_histograms.py first')
     plot_distributions(results, output, min_elements, coverage, smoothing_bins=smoothing_bins)
 
 

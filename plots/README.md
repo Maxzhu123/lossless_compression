@@ -112,7 +112,7 @@ For a machine without enough free RAM to load the full model, the companion
 collector reads the local safetensors checkpoint in CPU chunks:
 
 ```sh
-python plots/collect_weight_histograms.py
+python llm_analysis/collect_weight_histograms.py
 ```
 
 It uses a metadata-only model to identify the same parameter groups, collects
@@ -132,7 +132,7 @@ Densities are normalized by the full group size and shown on a logarithmic scale
 Collect exact eight-bit BF16 exponent-field counts on the CPU, then plot them:
 
 ```sh
-python plots/collect_weight_histograms.py
+python llm_analysis/collect_weight_histograms.py
 python plots/plot_weight_exponents.py
 ```
 
@@ -195,22 +195,22 @@ nanoGPT optimizer steps using the current `qwen_time_mem.py` settings. Exact
 per-buffer BF16 exponent counts and run metadata are saved under
 `artefacts/muon_momentum/<run>/`.
 
-Run `python plots/plot_momentum_distribution.py` to plot the latest saved run,
+Run `python plots/plot_nanogpt_momentum_exponent_history.py` to plot the latest saved run,
 or set `CSV_PATH` in that script to choose one. It exports
-`plots/plots/momentum_evolution.pdf` using the shared styles. Each buffer's
+`plots/plots/nanogpt_momentum_exponent_history.pdf` using the shared styles. Each buffer's
 histogram is normalized separately, then averaged with equal weight. All steps
 appear on one logarithmic-probability plot; exact zeros are shown separately
 at the left and remain part of the probability normalization.
 
 For the matching nanoGPT weight plot, run
 `python nanogpt/record_weight_distribution.py`, then
-`python plots/plot_nanogpt_weight_exponents.py`. Counts and metadata are saved
+`python plots/plot_nanogpt_weight_exponent_history.py`. Counts and metadata are saved
 under `artefacts/nanogpt_weights/<run>/`, and the figure is exported to
-`plots/plots/nanogpt_weight_evolution.pdf`. It averages the normalized histograms
+`plots/plots/nanogpt_weight_exponent_history.pdf`. It averages the normalized histograms
 of all BF16 weight matrices equally, including the embedding and LM head;
 FP32 biases and normalization gains are excluded.
 
-`python plots/collect_nanogpt_weight_exponents.py` adds saved-checkpoint counts
+`python nanogpt/collect_nanogpt_weight_exponents.py` adds saved-checkpoint counts
 for steps 300, 1500, and 3300 from `nanogpt/logs/2026-07-04_00-06-23` to
 `artefacts/nanogpt_weight_checkpoints/2026-07-04_00-06-23/`. The weight plot
 labels all curves as `Step <step>`. Checkpoint FP32 matrices are converted to BF16, matching their forward
@@ -225,7 +225,7 @@ are `None`. These files do not include AdamW state or RNG state for a full resum
 The weight collector accepts both these checkpoints and the older flat model files.
 
 To add later momentum curves, set `CHECKPOINT_DIR` and `STEPS` in
-`collect_nanogpt_momentum_exponents.py` and run it. Counts are saved under
+`nanogpt/collect_nanogpt_momentum_exponents.py` and run it. Counts are saved under
 `artefacts/muon_momentum_checkpoints/<run>/`. Set `CHECKPOINT_CSV` in
-`plot_momentum_distribution.py` to that run's `exponents.csv` and rerun the plot.
+`plot_nanogpt_momentum_exponent_history.py` to that run's `exponents.csv` and rerun the plot.
 Older checkpoints without momentum are rejected rather than reconstructed.

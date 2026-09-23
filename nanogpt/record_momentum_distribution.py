@@ -100,7 +100,7 @@ def main(kind="momentum"):
             print(f"Step {step}: loss/token={total_loss.item()/settings.TRAIN_BATCH_TOKENS:.4f}, "
                   f"mean zero fraction={zero_fraction:.2%}", flush=True)
 
-    script = "plot_momentum_distribution.py" if kind == "momentum" else "plot_nanogpt_weight_exponents.py"
+    script = "plot_nanogpt_momentum_exponent_history.py" if kind == "momentum" else "plot_nanogpt_weight_exponent_history.py"
     print(f"Plot with: python plots/{script}", flush=True)
 
 
