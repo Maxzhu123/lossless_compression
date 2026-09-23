@@ -75,7 +75,7 @@ def zeropower_via_newtonschulz5(G: Tensor) -> Tensor:
 
     X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
     a, b, c = 2, -1.5, 0.5
-    for _ in range(12):
+    for _ in range(5):
         A = X @ X.mT
         B = b * A + c * A @ A
         X = a * X + B @ X
@@ -122,7 +122,7 @@ class SparseMuon:
 
         self.neg_lr = torch.tensor([-self.lr], dtype=torch.float32, device="cuda")
 
-        self.first_step = True
+        self.first_step = False
 
     @torch.no_grad()
     def step(self):
@@ -143,7 +143,7 @@ class SparseMuon:
             if self.compressed:
                 # There are a lot of zeros on the first step.
                 if self.first_step:
-                    mom = LCTTensor(update, buffer=self.buffer, dist=momentum_first_dist)
+                    mom = LCTTensor(mom, buffer=self.buffer, dist=momentum_first_dist)
                 else:
                     mom = LCTTensor(mom, buffer=self.buffer, dist=self.distribution)
             self.momentums[i] = mom
