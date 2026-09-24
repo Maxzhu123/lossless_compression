@@ -4,6 +4,9 @@ train_gpt_lct.py: independent lossless LCT storage options for nanoGPT.
 This file descends from the [NanoGPT speedrun](https://github.com/KellerJordan/modded-nanogpt).
 It was prepared as a simplified version of the speedrun for use in neural net optimization research.
 """
+import sys
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 from pathlib import Path
@@ -23,16 +26,16 @@ from LCT.tensor_buffer import TensorBuffer, _free_regions_snapshot
 
 DATA_ROOT = Path(__file__).resolve().parent
 LOG_ROOT = DATA_ROOT / "logs"
-COMPRESS_WEIGHTS = False  # All BF16 matrices, including embeing and LM head.
+COMPRESS_WEIGHTS = True  # All BF16 matrices, including embeing and LM head.
 COMPRESS_ACTIVATIONS = True  # BF16 saves, including native FlashAttention Q/K/V/output.
-COMPRESS_OPTIMISER = False  # Muon momentum only; AdamW moments stay dense.
+COMPRESS_OPTIMISER = True  # Muon momentum only; AdamW moments stay dense.
 BUFFER = True  # Shared fallback arena; never reset while weights/state are live.
 COMPILE = True  # Compile dense model regions; LCT operations run eagerly.
 CHECKPOINT_HEAD = True
 CHUNK_TOKENS = 4096  # Tokens per checkpointed output projection and loss.
 BUFFER_SIZE_MIB = 64
 MIN_COMPRESS_ELEMENTS = 65536  # Avoid padding small activations to a full codec block.
-TRAIN_STEPS = 3450
+TRAIN_STEPS = 3350
 SAVE_EVERY = 300
 VOCAB_SIZE = 50304
 NUM_LAYERS = 12
