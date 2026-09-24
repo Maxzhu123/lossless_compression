@@ -5,11 +5,12 @@ This file descends from the [NanoGPT speedrun](https://github.com/KellerJordan/m
 It was prepared as a simplified version of the speedrun for use in neural net optimization research.
 """
 import sys
+from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
-from pathlib import Path
+
 import time
 from datetime import datetime
 
