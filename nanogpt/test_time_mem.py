@@ -11,7 +11,7 @@ import train_gpt_lct as training
 COMPRESS_WEIGHTS = True
 COMPRESS_ACTIVATIONS = True
 COMPRESS_OPTIMISER = True
-BUFFER = False
+BUFFER = True
 COMPILE = True
 LOG_GRAPH_BREAKS = True
 BUFFER_SIZE_MIB = 64

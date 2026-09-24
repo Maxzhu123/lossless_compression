@@ -12,9 +12,9 @@ import qwen.train_qwen_lct as training
 MODEL_ID = training.MODEL_ID
 DATA_DIR = training.DATA_DIR
 PRETRAINED = True  # False uses random weights with the same model architecture.
-COMPRESS_WEIGHTS = False
-COMPRESS_ACTIVATIONS = False
-COMPRESS_OPTIMISER = False  # Muon momentum only; AdamW moments remain dense.
+COMPRESS_WEIGHTS = True
+COMPRESS_ACTIVATIONS = True
+COMPRESS_OPTIMISER = True  # Muon momentum only; AdamW moments remain dense.
 BUFFER = False
 BUFFER_SIZE_MIB = 256
 MIN_COMPRESS_ELEMENTS = 65536
@@ -24,7 +24,7 @@ CHECKPOINT_LAYERS = False
 CHECKPOINT_HEAD = False
 OPTIMIZER_IN_BACKWARD = True
 OPTIMIZER = 'muon'  # 'muon' or 'adamw'
-SEQ_LEN = 500  # Tokens per sequence; edit this to benchmark other sequence lengths.
+SEQ_LEN = None  # Tokens per sequence; edit this to benchmark other sequence lengths.
 HEAD_CHUNK_TOKENS = training.HEAD_CHUNK_TOKENS
 WARMUP_STEPS = 3
 MEASURE_STEPS = 5
@@ -133,7 +133,7 @@ def main():
 if __name__ == '__main__':
     # global SEQ_LEN
 
-    for seq_len in [1500]:
+    for seq_len in [500, 1000, 1500, 2500, 3500]:
         SEQ_LEN = seq_len
         print(f'\n=== Benchmarking sequence length {SEQ_LEN} ===', flush=True)
         main()

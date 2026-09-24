@@ -27,16 +27,16 @@ from LCT.tensor_buffer import TensorBuffer, _free_regions_snapshot
 
 DATA_ROOT = Path(__file__).resolve().parent
 LOG_ROOT = DATA_ROOT / "logs"
-COMPRESS_WEIGHTS = True  # All BF16 matrices, including embeing and LM head.
-COMPRESS_ACTIVATIONS = True  # BF16 saves, including native FlashAttention Q/K/V/output.
-COMPRESS_OPTIMISER = True  # Muon momentum only; AdamW moments stay dense.
-BUFFER = True  # Shared fallback arena; never reset while weights/state are live.
+COMPRESS_WEIGHTS = False  # All BF16 matrices, including embeing and LM head.
+COMPRESS_ACTIVATIONS = False  # BF16 saves, including native FlashAttention Q/K/V/output.
+COMPRESS_OPTIMISER = False  # Muon momentum only; AdamW moments stay dense.
+BUFFER = False  # Shared fallback arena; never reset while weights/state are live.
 COMPILE = True  # Compile dense model regions; LCT operations run eagerly.
 CHECKPOINT_HEAD = True
 CHUNK_TOKENS = 4096  # Tokens per checkpointed output projection and loss.
 BUFFER_SIZE_MIB = 64
 MIN_COMPRESS_ELEMENTS = 65536  # Avoid padding small activations to a full codec block.
-TRAIN_STEPS = 3350
+TRAIN_STEPS = 3450
 SAVE_EVERY = 300
 VOCAB_SIZE = 50304
 NUM_LAYERS = 12

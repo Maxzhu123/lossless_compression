@@ -43,6 +43,7 @@ def _estimate_center_kernel(
             exp = value - 127
         else:
             exp = ((value >> 7) & 0xFF) - 127
+        mask = mask & (exp >= -120)  # Exclude tiny values from centering only.
         if IGNORE_ZERO:
             nonzero = mask & (exp != -127)
             total += tl.where(nonzero, exp, 0)

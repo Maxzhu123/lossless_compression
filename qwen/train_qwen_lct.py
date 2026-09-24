@@ -83,7 +83,7 @@ def make_optimizers(model, buffer=None, parameterwise=False):
     def muon(params):
         return SparseMuon(params,lr=MUON_LR,weight_decay=WEIGHT_DECAY,
                           compressed=COMPRESS_OPTIMISER,buffer=buffer,
-                          distribution=momentum_dist,match_weight_update=True)
+                          distribution=momentum_dist,match_weight_update=True, zero_first_step=False, ns_iters=5)
     if OPTIMIZER not in ('adamw', 'muon'):
         raise ValueError("OPTIMIZER must be 'muon' or 'adamw'")
     if parameterwise:
