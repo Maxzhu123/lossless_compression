@@ -5,6 +5,7 @@ import numpy as np
 
 from plot_nanogpt_momentum_exponent_history import load, build, OUTPUT_DIR
 from plot_tables import render
+from plot_lib import WIDE_FONT_SCALE
 
 CSV_PATH = None
 EARLY_STEPS = (1, 4, 8)
@@ -27,5 +28,5 @@ def build_weights(data):
 if __name__ == "__main__":
     path = CSV_PATH or sorted(RESULTS_DIR.glob("*/exponents.csv"))[-1]
     render({"nanogpt_weight_exponent_history.pdf": (load(path), load(CHECKPOINT_CSV))},
-           build_weights, output_dir=OUTPUT_DIR, wide=True, show=False)
+           build_weights, output_dir=OUTPUT_DIR, font_scale=WIDE_FONT_SCALE, show=False)
     print(f"Saved {OUTPUT_DIR / 'nanogpt_weight_exponent_history.pdf'}")

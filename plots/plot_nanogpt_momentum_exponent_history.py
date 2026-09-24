@@ -6,7 +6,8 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 import numpy as np
 
-from plot_lib import sample_group_colors, format_axes, finish_plot
+from plot_lib import (sample_group_colors, format_axes, WIDE_FONT_SCALE,
+                      LEGEND_HANDLE_LENGTH, LEGEND_HANDLE_TEXT_PAD)
 from plot_tables import render
 
 CSV_PATH = None
@@ -55,7 +56,7 @@ def build(data, ylabel="Mean probability per feedforward buffer", labels=None, m
     low, high = exponents[occupied][[0, -1]]
     zero_x = low - 5
 
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(5.5, 5.2))
     for i, (step, color) in enumerate(zip(steps, sample_group_colors(len(steps)))):
         values = np.where(probabilities[i] > 0, probabilities[i], np.nan)
         zero_percent = 100 * zeros[i]
@@ -71,13 +72,19 @@ def build(data, ylabel="Mean probability per feedforward buffer", labels=None, m
     positive = np.concatenate((probabilities[probabilities > 0], zeros[zeros > 0]))
     ax.set_ylim(positive.min() / 2, positive.max() * 1.5)
     ax.set_xlim(zero_x - 2, high + 1)
-    ticks = MaxNLocator(nbins=6, integer=True).tick_values(low, high)
+    ticks = MaxNLocator(nbins=4, integer=True).tick_values(low, high)
     ticks = ticks[(ticks >= low) & (ticks <= high)]
     ax.set_xticks([zero_x, *ticks], ["Zero", *[str(int(t)) for t in ticks]])
-    format_axes(ax, xlabel="Exponent (bias removed; zero separate)",
-                ylabel=ylabel, xformat=None)
+    format_axes(ax, xlabel="Exponent",
+                ylabel="Mean probability", xformat=None)
     ax.grid(axis="x", visible=False)
-    finish_plot(ax, legend_outside=True)
+    handles, legend_labels = ax.get_legend_handles_labels()
+    fig.legend(handles, legend_labels, loc="lower center", ncol=2,
+               bbox_to_anchor=(0.5, 0),
+               handlelength=LEGEND_HANDLE_LENGTH,
+               handletextpad=LEGEND_HANDLE_TEXT_PAD,
+               columnspacing=0.8, fontsize=16)
+    fig.subplots_adjust(left=0.19, right=0.98, top=0.98, bottom=0.36)
     return fig, ax
 
 
@@ -90,7 +97,7 @@ def plot(path, filename="nanogpt_momentum_exponent_history.pdf", ylabel="Mean pr
     indices = [data[0].index(step) for step in STEPS]
     data = (list(STEPS), data[1][indices], data[2][indices])
     render({filename: data}, lambda data: build(data, ylabel),
-           output_dir=OUTPUT_DIR, wide=True, show=False)
+           output_dir=OUTPUT_DIR, font_scale=WIDE_FONT_SCALE, show=False)
     print(f"Saved {OUTPUT_DIR / filename}")
 
 
