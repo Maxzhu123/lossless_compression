@@ -340,7 +340,7 @@ def make_optimizers(model, compressed=False):
     ], compressed=False, buffer=model.tensor_buffer)
     muon = SparseMuon([p for name, p in named.items() if name.startswith("blocks.") and p.ndim >= 2],
                       lr=0.035, weight_decay=0.025, compressed=compressed, buffer=model.tensor_buffer,
-                      distribution=momentum_dist, match_weight_update=True, zero_first_step=True)
+                      distribution=momentum_dist, match_weight_update=True, zero_first_step=True, ns_iters=12)
     parameters = [p for group in adam.param_groups for p in group['params']] + muon.params
     assert len(parameters) == len(named) and {id(p) for p in parameters} == {id(p) for p in named.values()}
     for group in adam.param_groups:

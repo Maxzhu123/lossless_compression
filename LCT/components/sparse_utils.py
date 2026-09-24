@@ -67,7 +67,7 @@ class SparseSGDM:
             p.grad = None
 
 
-def zeropower_via_newtonschulz5(G: Tensor) -> Tensor:
+def zeropower_via_newtonschulz5(G: Tensor, ns_iters: int) -> Tensor:
     assert G.ndim >= 2
     X = G.bfloat16()
     if G.size(-2) > G.size(-1):
@@ -75,7 +75,7 @@ def zeropower_via_newtonschulz5(G: Tensor) -> Tensor:
 
     X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
     a, b, c = 2, -1.5, 0.5
-    for _ in range(5):
+    for _ in range(ns_iters):
         A = X @ X.mT
         B = b * A + c * A @ A
         X = a * X + B @ X
@@ -86,13 +86,13 @@ def zeropower_via_newtonschulz5(G: Tensor) -> Tensor:
 
 
 @torch.compile(fullgraph=True)
-def muon_update(grad, momentum, mu=0.95, nesterov=True):
+def muon_update(grad, momentum, mu=0.95, nesterov=True, ns_iters=5):
     momentum.lerp_(grad.to(momentum.dtype), 1 - mu)
     if nesterov:
         update = grad.lerp_(momentum.to(grad.dtype), mu)
     else:
         update = momentum
-    update = zeropower_via_newtonschulz5(update)
+    update = zeropower_via_newtonschulz5(update, ns_iters)
     update *= max(1, grad.size(-2) / grad.size(-1))**0.5
     return update
 
@@ -102,7 +102,7 @@ class SparseMuon:
 
     def __init__(self, params: Iterable[LCTTensor | Tensor], lr=0.02, weight_decay=0, mu=0.95,
                  buffer: TensorBuffer|None=None, compressed=True, distribution=None,
-                 match_weight_update=False, zero_first_step=False):
+                 match_weight_update=False, zero_first_step=False, ns_iters=5):
         self.params = list(params)
         for p in self.params:
             assert isinstance(p, (LCTTensor, Tensor)) and p.ndim >= 2, "Muon requires matrix parameters"
@@ -123,6 +123,7 @@ class SparseMuon:
         self.neg_lr = torch.tensor([-self.lr], dtype=torch.float32, device="cuda")
 
         self.first_step = zero_first_step
+        self.ns_iters = ns_iters
 
     @torch.no_grad()
     def step(self):
@@ -139,7 +140,7 @@ class SparseMuon:
                 mom = mom.decompress_free()
             self.momentums[i] = None
 
-            update = muon_update(g, mom, mu=self.mu)
+            update = muon_update(g, mom, mu=self.mu, ns_iters=self.ns_iters)
             if self.compressed:
                 # There are a lot of zeros on the first step.
                 if self.first_step:
