@@ -7,7 +7,6 @@ the FineWeb validation data.
 import csv
 import time
 from pathlib import Path
-from cprint import c_print
 import torch
 from torch import Tensor
 
@@ -137,7 +136,7 @@ def evaluate_checkpoint(
         "peak_memory": peak_memory,
     }
 
-    c_print(f"loss: {loss:.5f}, seq_len: {seq_len}, avg_time: {avg_time:.4f}s, peak_memory: {peak_memory} MB", color="bright_cyan")
+    print(f"loss: {loss:.5f}, seq_len: {seq_len}, avg_time: {avg_time:.4f}s, peak_memory: {peak_memory} MB")
     del model
     torch.cuda.empty_cache()
     return result
