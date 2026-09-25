@@ -1,6 +1,6 @@
 # LCT: Lossless Tensor Compression with GPU-Friendly Execution
 
-Supplementary code and materials for the ICLR paper in [`paper/`](paper/). LCT is a lossless codec for BF16 tensors that compresses exponents while preserving every input bit. The project includes GPU kernels and training integrations for storing activations, weights, and optimizer momentum in compressed form.
+Supplementary code for the accompanying ICLR paper, *LCT: Lossless Tensor Compression with GPU-Friendly Execution*. LCT is a lossless codec for BF16 tensors that compresses exponents while preserving every input bit. The project includes GPU kernels and training integrations for storing activations, weights, and optimizer momentum in compressed form.
 
 ## Folder guide
 
@@ -19,4 +19,4 @@ Supplementary code and materials for the ICLR paper in [`paper/`](paper/). LCT i
 
 The main training entry points are `nanogpt/train_gpt_lct.py` and `qwen/train_qwen_lct.py`. Codec comparisons are in `experiments/benchmark_lct.py` and `experiments/bench_baselines.py`.
 
-Dependencies are listed in [`requirements.txt`](requirements.txt). Experiments may need to be manually configured in the files by chaning the settings / parameters in the scripts.  
+Dependencies are listed in [`requirements.txt`](requirements.txt). GPU experiments require a compatible CUDA-enabled PyTorch and Triton environment. Before running an experiment, configure the settings and paths in its script and prepare the required datasets and model checkpoints. Refer to the accompanying paper for the experimental configurations.
