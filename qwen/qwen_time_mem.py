@@ -133,7 +133,7 @@ def main():
 if __name__ == '__main__':
     # global SEQ_LEN
 
-    for seq_len in [500, 1000, 1500, 2500, 3500]:
+    for seq_len in [3500]:
         SEQ_LEN = seq_len
         print(f'\n=== Benchmarking sequence length {SEQ_LEN} ===', flush=True)
         main()

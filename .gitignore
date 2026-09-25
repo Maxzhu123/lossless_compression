@@ -25,3 +25,4 @@ nanogpt/data/fineweb10B/
 /.start
 /artefacts/
 *.sh
+/A100_OPTIMIZATION_NOTES.md
