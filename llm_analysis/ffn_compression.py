@@ -37,7 +37,7 @@ if __package__ in (None, ""):
 
 from LCT.comp_format import DistType, Distribution, NoiseLevel
 from LCT.compress import compress, decompress
-from LCT.codec.runtime import geometry
+from LCT.codec.geometry import geometry
 
 
 # Edit these settings before running. Compression always uses CUDA.

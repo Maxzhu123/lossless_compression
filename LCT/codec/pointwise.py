@@ -7,8 +7,9 @@ import triton
 from ..comp_tensor import CompressedTensor
 from ..comp_format import StorageLayout
 from ..compression.huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
-from .runtime import compress_components, compress_dense, decode_dense, geometry
-from ..kernels.main_kernels import _shift_decoding_table_kernel
+from .dispatch import compress_components, compress_dense, decode_dense
+from .geometry import geometry
+from ..kernels.common.tables import _shift_decoding_table_kernel
 from ..kernels.pointwise import (
     COMPRESSED_OUTPUT,
     DENSE_OUTPUT,

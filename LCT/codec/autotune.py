@@ -1,6 +1,9 @@
-"""Shared Triton autotuning configurations."""
+"""Triton configs selected once at import time for the user's GPU model."""
 
+import torch
 import triton
+
+from .device import device_profile
 
 
 ESTIMATE_CENTER_AUTOTUNE_CONFIGS = [
@@ -12,8 +15,6 @@ ENCODE_AUTOTUNE_CONFIGS = [
     triton.Config({}, num_warps=8, num_stages=2, maxnreg=64),
     triton.Config({}, num_warps=4, num_stages=2, maxnreg=64),
     triton.Config({}, num_warps=4, num_stages=3, maxnreg=64),
-    triton.Config({}, num_warps=8, num_stages=9, maxnreg=29),
-
 ]
 COMPACT_BAD_STREAMS_AUTOTUNE_CONFIGS = [
     triton.Config({"BLOCK": 1024}, num_warps=1, num_stages=2),
@@ -43,3 +44,11 @@ DECODE_AUTOTUNE_CONFIGS = [
 DUAL_DECODE_AUTOTUNE_CONFIGS = [
     triton.Config({}, num_warps=8, num_stages=3),
 ]
+
+
+_gpu = device_profile(torch.device("cuda"))
+if "a100" in _gpu.model:
+    ENCODE_AUTOTUNE_CONFIGS = [
+        *ENCODE_AUTOTUNE_CONFIGS,
+        triton.Config({}, num_warps=8, num_stages=9, maxnreg=29),
+    ]
