@@ -120,18 +120,24 @@ def run_case(
         compressed = compress(x, distribution=distribution, buffer=buffer)
         restored = decompress(compressed)
         compressed.free()
+
     torch.cuda.synchronize()
 
     start = time.perf_counter()
     for i in range(ITERS):
         compressed = compress(x, distribution=distribution, buffer=buffer)
-        restored = decompress(compressed)
-        # Keep the final compressed object live so ratio can be measured after
-        # the timed loop.  Every earlier iteration is released and reused.
+        # Keep the final result for decoding and the compression-ratio check.
         if i != ITERS - 1:
             compressed.free()
     torch.cuda.synchronize()
-    elapsed_ms = (time.perf_counter() - start) / ITERS * 1000.0
+    encode_ms = (time.perf_counter() - start) / ITERS * 1000.0
+
+    start = time.perf_counter()
+    for _ in range(ITERS):
+        restored = decompress(compressed)
+    torch.cuda.synchronize()
+    decode_ms = (time.perf_counter() - start) / ITERS * 1000.0
+    elapsed_ms = encode_ms + decode_ms
 
     ratio = compressed.memory_size() / x.nbytes
     assert ratio <= max_ratio, (
@@ -140,7 +146,9 @@ def run_case(
 
     print(
         f"{name:32s} n={n / 1e6:6.0f}M  "
-        f"time={elapsed_ms:7.3f} ms"
+        f"encode={encode_ms:7.3f} ms  "
+        f"decode={decode_ms:7.3f} ms  "
+        f"total={elapsed_ms:7.3f} ms"
     )
     compressed.free()
     del x, compressed, restored
