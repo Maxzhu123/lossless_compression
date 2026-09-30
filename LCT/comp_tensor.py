@@ -3,7 +3,7 @@ from dataclasses import dataclass, field, fields
 import math
 import torch
 
-from .comp_format import Distribution, StorageLayout
+from .comp_format import Distribution, DistType, NoiseLevel, StorageLayout
 
 if TYPE_CHECKING:
     from .tensor_buffer import TensorBuffer
@@ -29,6 +29,22 @@ class CompressedTensor:
     center: torch.Tensor | int = 0  # CUDA center scalar used by encode/decode.
     shape: tuple[int, ...] = ()  # Original tensor shape.
     layout: StorageLayout = StorageLayout.RAW
+    stream_geometry: tuple[int, int, int, int] | None = None
+
+    @property
+    def codec_geometry(self) -> tuple[int, int, int, int]:
+        """Stored layout, independent of the GPU used to read this tensor."""
+        if self.stream_geometry is not None:
+            return self.stream_geometry
+        # Tensors created before GPU-specific geometry use the original layout.
+        from .codec.geometry import geometry
+
+        if (
+            self.distribution.family == DistType.GAUSSIAN
+            and self.distribution.noise_level == NoiseLevel.CLEAN
+        ):
+            return 65536, 256, 256, 24
+        return geometry(self.distribution)
 
     def memory_size(self) -> int:
         """Return GPU allocation bytes owned by one compressed tensor.

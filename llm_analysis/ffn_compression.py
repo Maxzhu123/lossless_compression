@@ -37,7 +37,6 @@ if __package__ in (None, ""):
 
 from LCT.comp_format import DistType, Distribution, NoiseLevel
 from LCT.compress import compress, decompress
-from LCT.codec.geometry import geometry
 
 
 # Edit these settings before running. Compression always uses CUDA.
@@ -141,7 +140,7 @@ def measure(tensor, distribution):
             raise AssertionError("LCT round trip changed shape or dtype")
         if not torch.equal(tensor.view(torch.int16), restored.view(torch.int16)):
             raise AssertionError("LCT round trip changed BF16 bits")
-        block_symbols, lanes, _, _ = geometry(distribution)
+        block_symbols, lanes, _, _ = packed.codec_geometry
         streams = (packed.storage_numel // block_symbols) * lanes
         overflow_streams = int(packed.fallback_count.item())
         return packed.memory_size(), streams, overflow_streams

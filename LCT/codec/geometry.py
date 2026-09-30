@@ -1,27 +1,36 @@
-"""GPU-independent geometry of the compressed storage format."""
+"""Distribution and GPU-specific geometry of the compressed storage format."""
+
+import torch
 
 from ..comp_format import Distribution, DistType, NoiseLevel
+from .device import device_profile
 
 BLOCK_SYMBOLS = 65536
 LANES = 256
 LANE_BITS = 800
 
+if device_profile(torch.device("cuda")).model == "a100_80gb_pcie":
+    GAUSSIAN_BLOCK_SYMBOLS = 32768
+    GAUSSIAN_LANE_BITS = 400 - 16
+else:
+    GAUSSIAN_BLOCK_SYMBOLS = BLOCK_SYMBOLS
+    GAUSSIAN_LANE_BITS = LANE_BITS - 32
+
 
 def geometry(distribution: Distribution) -> tuple[int, int, int, int]:
-    """Return ``(block_symbols, lanes, steps, fixed_words)`` for the codec.
+    """Return ``(block_symbols, lanes, steps, fixed_words)`` for new storage.
 
-    Each lane encodes ``steps`` symbols within a fixed bit budget, returned
-    as a count of 32-bit words. Symbols exceeding that budget use overflow
-    storage. Geometry depends on the distribution, not the GPU backend.
+    GPU-specific constants are selected once at import for this process.
+    Readers use the geometry saved on the compressed tensor.
     """
     steps = BLOCK_SYMBOLS // LANES
     if distribution.noise_level == NoiseLevel.CLEAN:
         block_symbols = BLOCK_SYMBOLS
-        lane_bits = (
-            LANE_BITS
-            if distribution.family != DistType.GAUSSIAN
-            else LANE_BITS - 32
-        )
+        lane_bits = LANE_BITS
+        if distribution.family == DistType.GAUSSIAN:
+            block_symbols = GAUSSIAN_BLOCK_SYMBOLS
+            steps = block_symbols // LANES
+            lane_bits = GAUSSIAN_LANE_BITS
     elif distribution.noise_level == NoiseLevel.SPARSE:
         block_symbols = BLOCK_SYMBOLS
         lane_bits = 5 * steps // 2

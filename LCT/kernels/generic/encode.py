@@ -332,7 +332,8 @@ def encode_components(
         logical_numel: Flattened logical element count (1D storage mapping).
     """
     # Geometry fixes the independent stream count and per-stream bit budget.
-    block_symbols, lanes, steps, fixed_words = geometry(distribution)
+    stream_geometry = geometry(distribution)
+    block_symbols, lanes, steps, fixed_words = stream_geometry
     blocks = triton.cdiv(size, block_symbols)
     streams = blocks * lanes
     if center is None:
@@ -435,6 +436,7 @@ def encode_components(
         fallback_used=counts[1:2] if buffered else fallback_total,
         distribution=distribution, center=center, shape=shape,
         layout=StorageLayout.COMPRESSED,
+        stream_geometry=stream_geometry,
     )
 
 

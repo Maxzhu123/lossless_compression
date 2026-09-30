@@ -39,7 +39,7 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
         decode_table, data.center, shifted_decode,
         BLOCK=1 << FIRST_BITS,
     )
-    block_symbols, lanes, steps, fixed_words = geometry(data.distribution)
+    block_symbols, lanes, steps, fixed_words = data.codec_geometry
     blocks = triton.cdiv(data.size, block_symbols)
     if output_policy == DENSE_OUTPUT:
         output = torch.empty(
@@ -114,7 +114,7 @@ def _launch_scalar_mul_add_compressed_dense(
         decode_table, data.center, shifted_decode,
         BLOCK=1 << FIRST_BITS,
     )
-    block_symbols, lanes, steps, fixed_words = geometry(data.distribution)
+    block_symbols, lanes, steps, fixed_words = data.codec_geometry
     blocks = triton.cdiv(data.size, block_symbols)
     if output_policy == DENSE_OUTPUT:
         output = torch.empty(
@@ -197,7 +197,7 @@ def _launch_scalar_mul_add_compressed_compressed(
     b_shifted_decode = torch.empty(
         1 << FIRST_BITS, dtype=torch.int32, device=data.data.device,
     )
-    block_symbols, lanes, steps, fixed_words = geometry(data.distribution)
+    block_symbols, lanes, steps, fixed_words = data.codec_geometry
     blocks = triton.cdiv(data.size, block_symbols)
 
     if output_policy == DENSE_OUTPUT:
@@ -300,8 +300,15 @@ def pointwise_scale_add_compressed(
         "pointwise_scale_add_compressed requires both inputs to be buffer-backed "
         "or both to be non-buffer-backed"
     )
-    if same_layout and geometry(data.distribution) == geometry(other.distribution):
+    if same_layout and data.codec_geometry == other.codec_geometry:
         result_distribution = distribution or data.distribution
+        if (
+            not dense_output
+            and geometry(result_distribution) != data.codec_geometry
+        ):
+            raise ValueError(
+                "matrix compressed output must preserve the input stream geometry"
+            )
         policy = DENSE_OUTPUT if dense_output else COMPRESSED_OUTPUT
         values, auxiliary = _launch_scalar_mul_add_compressed_compressed(
             data, other, alpha, policy,
@@ -354,7 +361,7 @@ def pointwise_compressed_dense(
     if (
         data.layout == StorageLayout.COMPRESSED
         and not dense_output
-        and geometry(result_distribution) != geometry(data.distribution)
+        and geometry(result_distribution) != data.codec_geometry
     ):
         raise ValueError(
             "matrix compressed output must preserve the input stream geometry"

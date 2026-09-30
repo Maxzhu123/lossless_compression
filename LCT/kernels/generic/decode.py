@@ -5,7 +5,6 @@ import triton
 from triton import language as tl
 
 from ...codec.autotune import DECODE_AUTOTUNE_CONFIGS
-from ...codec.geometry import geometry
 from ...comp_tensor import CompressedTensor
 from ...compression.huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
 from ..common.tables import _shift_decoding_table_kernel
@@ -218,7 +217,7 @@ def decode(data: CompressedTensor) -> torch.Tensor:
         decode_table, data.center, shifted_decode,
         BLOCK=1 << FIRST_BITS,
     )
-    block_symbols, lanes, steps, fixed_words = geometry(data.distribution)
+    block_symbols, lanes, steps, fixed_words = data.codec_geometry
     blocks = triton.cdiv(data.size, block_symbols)
     streams = blocks * lanes
     output = torch.empty(logical_numel, dtype=torch.int16, device=device)
