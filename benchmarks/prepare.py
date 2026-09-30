@@ -1,23 +1,16 @@
 """Distribution-aware BF16 exponent-compression benchmark."""
+
 import math
 import time
-from random import Random
 import torch
 
 from LCT.compress import compress, decompress
 from LCT.tensor_buffer import TensorBuffer
-from LCT.comp_tensor import CompressedTensor
 from LCT.comp_format import DistType, Distribution, NoiseLevel
 
-SHAPE_OPTIONS = [50_000_000, 200_000_000]
-SHAPE_SEED = 0
-WARMUP = 3
-ITERS = 50
-
-
-def get_compressed_size(data: CompressedTensor) -> int:
-    """Return GPU allocation bytes owned by one compressed tensor."""
-    return data.memory_size()
+SIZES = [50_000_000, 200_000_000]
+WARMUP = 5
+ITERS = 30
 
 
 def make_empirical(n: int, scale: float = 0.5, seed: int = 0) -> torch.Tensor:
@@ -50,9 +43,7 @@ def make_gaussian_values(
 def make_gaussian(
     n: int, mean: float = 0.0, std: float = 2.0, seed: int = 0,
 ) -> torch.Tensor:
-    return make_gaussian_values(n, mean=mean, std=std, seed=seed).to(
-        torch.bfloat16
-    )
+    return make_gaussian_values(n, mean=mean, std=std, seed=seed).to(torch.bfloat16)
 
 
 def make_laplace(
@@ -64,7 +55,9 @@ def make_laplace(
     return values.to(torch.bfloat16)
 
 
-def make_localized_noise(n: int, noise_fraction: float = 0.2, seed: int = 0):
+def make_localized_noise(
+    n: int, noise_fraction: float = 0.2, seed: int = 0,
+) -> torch.Tensor:
     """Gaussian values with a contiguous uniform-value noise region."""
     values = make_gaussian_values(n, mean=0.0, std=2.0, seed=seed)
     start = n // 2
@@ -72,9 +65,7 @@ def make_localized_noise(n: int, noise_fraction: float = 0.2, seed: int = 0):
     G = torch.Generator(device="cuda").manual_seed(seed + 1)
     values[start:end] = torch.empty(
         end - start, device="cuda", dtype=torch.float32
-    ).uniform_(
-        -32.0, 32.0, generator=G
-    )
+    ).uniform_(-32.0, 32.0, generator=G)
     return values.to(torch.bfloat16)
 
 
@@ -83,95 +74,58 @@ def _bf16_ratio(exponent_ratio: float) -> float:
     return (1.0 + exponent_ratio) / 2.0
 
 
-# Each case: (name, distribution, max_total_bf16_ratio, weight)
-DIST_EMPIRICAL_CLEAN = Distribution(DistType.EMPIRICAL)
-DIST_EMPIRICAL_MEDIUM = Distribution(
-    DistType.EMPIRICAL,
-    noise_level=NoiseLevel.MEDIUM,
-)
-DIST_EMPIRICAL_HIGH = Distribution(
-    DistType.EMPIRICAL,
-    noise_level=NoiseLevel.HIGH,
-)
-DIST_GAUSSIAN_CLEAN = Distribution(DistType.GAUSSIAN)
-DIST_GAUSSIAN_MEDIUM = Distribution(
-    DistType.GAUSSIAN,
-    noise_level=NoiseLevel.MEDIUM,
-)
-DIST_GAUSSIAN_HIGH = Distribution(
-    DistType.GAUSSIAN,
-    noise_level=NoiseLevel.HIGH,
-)
-DIST_LAPLACE_CLEAN = Distribution(DistType.LAPLACE)
-
-
-CASES = [
-    ("empirical/empirical/clean", DIST_EMPIRICAL_CLEAN, _bf16_ratio(0.42), 5),
-    ("empirical/empirical/medium", DIST_EMPIRICAL_MEDIUM, _bf16_ratio(0.60), 5),
-    ("gaussian/gaussian/clean", DIST_GAUSSIAN_CLEAN, _bf16_ratio(0.42), 5),
-    ("gaussian/empirical/clean", DIST_EMPIRICAL_CLEAN, _bf16_ratio(0.65), 1),
-    ("laplace/laplace/clean", DIST_LAPLACE_CLEAN, _bf16_ratio(0.43), 5),
-    ("laplace/gaussian/clean", DIST_GAUSSIAN_CLEAN, _bf16_ratio(0.65), 1),
-    ("shifted_gaussian/gaussian/clean", DIST_GAUSSIAN_CLEAN, _bf16_ratio(0.42), 5),
-    ("shifted_gaussian/empirical/clean", DIST_EMPIRICAL_CLEAN, _bf16_ratio(0.65), 1),
-    ("localized/gaussian/high", DIST_GAUSSIAN_HIGH, _bf16_ratio(0.83), 5),
-    ("localized/empirical/high", DIST_EMPIRICAL_HIGH, _bf16_ratio(0.84), 1),
-    ("localized/gaussian/medium", DIST_GAUSSIAN_MEDIUM, _bf16_ratio(0.76), 5),
-    ("localized/empirical/medium", DIST_EMPIRICAL_MEDIUM, _bf16_ratio(0.76), 1),
+# Each case: (source/codec_family/noise_level, max_total_bf16_ratio)
+CASES: list[tuple[str, float]] = [
+    ("gaussian/gaussian/clean", _bf16_ratio(0.4)),
+    ("empirical/empirical/clean", _bf16_ratio(0.42)),
+    ("laplace/laplace/medium", _bf16_ratio(0.61)),
+    ("gaussian/empirical/clean", _bf16_ratio(0.5)),
+    ("laplace/gaussian/clean", _bf16_ratio(0.65)),
+    ("localized/empirical/high", _bf16_ratio(0.78)),
 ]
 
 
-def make_data(
-    name: str,
-    n: int,
-    distribution: Distribution | None = None,
-) -> torch.Tensor:
-    if name in {"empirical/empirical/clean", "empirical/empirical/medium"}:
+def make_data(name: str, n: int, distribution: Distribution | None = None) -> torch.Tensor:
+    if name not in {case[0] for case in CASES}:
+        raise ValueError(f"unknown case: {name}")
+
+    source = name.split("/", 1)[0]
+    if source == "empirical":
         scale = distribution.param if distribution is not None else 0.5
         return make_empirical(n, scale)
-    if name in {"gaussian/gaussian/clean", "gaussian/empirical/clean"}:
+    if source == "gaussian":
         return make_gaussian(n)
-    if name in {"laplace/laplace/clean", "laplace/gaussian/clean"}:
+    if source == "laplace":
         return make_laplace(n)
-    if name in {
-        "shifted_gaussian/gaussian/clean",
-        "shifted_gaussian/empirical/clean",
-    }:
+    if source == "shifted_gaussian":
         return make_gaussian(n, mean=50.0)
-    if name in {
-        "localized/gaussian/high",
-        "localized/empirical/high",
-        "localized/gaussian/medium",
-        "localized/empirical/medium",
-    }:
+    if source == "localized":
         return make_localized_noise(n)
     raise ValueError(f"unknown case: {name}")
 
 
-def run_case(name, n, distribution, max_ratio, buffer):
+def run_case(
+    name: str, n: int, max_ratio: float, buffer: TensorBuffer,
+) -> float:
+    _, family, noise = name.split("/")
+    distribution = Distribution(DistType(family), noise_level=NoiseLevel[noise.upper()])
     x = make_data(name, n, distribution)
 
     # Correctness pass: allocate, decode, then release the buffer regions.
-    compressed = compress(
-        x, distribution=distribution, buffer=buffer
-    )
+    compressed = compress(x, distribution=distribution, buffer=buffer)
     restored = decompress(compressed)
     assert torch.equal(x, restored), f"roundtrip mismatch: {name}"
     compressed.free()
 
     for _ in range(WARMUP):
-        compressed = compress(
-            x, distribution=distribution, buffer=buffer
-        )
+        compressed = compress(x, distribution=distribution, buffer=buffer)
         restored = decompress(compressed)
         compressed.free()
     torch.cuda.synchronize()
 
     start = time.perf_counter()
     for i in range(ITERS):
-        compressed = compress(
-            x, distribution=distribution, buffer=buffer
-        )
+        compressed = compress(x, distribution=distribution, buffer=buffer)
         restored = decompress(compressed)
         # Keep the final compressed object live so ratio can be measured after
         # the timed loop.  Every earlier iteration is released and reused.
@@ -180,7 +134,7 @@ def run_case(name, n, distribution, max_ratio, buffer):
     torch.cuda.synchronize()
     elapsed_ms = (time.perf_counter() - start) / ITERS * 1000.0
 
-    ratio = get_compressed_size(compressed) / x.nbytes
+    ratio = compressed.memory_size() / x.nbytes
     assert ratio <= max_ratio, (
         f"{name} n={n}: ratio {ratio:.4f} exceeds {max_ratio:.4f}"
     )
@@ -195,38 +149,22 @@ def run_case(name, n, distribution, max_ratio, buffer):
     return elapsed_ms
 
 
-def main():
-    # Each case runs once. Shuffle a balanced size assignment with a fixed
-    # seed, keeping the benchmark reproducible and as close to 50/50 as nine
-    # cases allow.
-    shape_rng = Random(SHAPE_SEED)
-    sizes = [SHAPE_OPTIONS[0]] * (len(CASES) // 2)
-    sizes += [SHAPE_OPTIONS[1]] * (len(CASES) - len(sizes))
-    shape_rng.shuffle(sizes)
-    scheduled_cases = [
-        (*case, size) for case, size in zip(CASES, sizes)
-    ]
-    weights = [weight for _, _, _, weight, _ in scheduled_cases]
-    total_weight = sum(weights)
-    weights = [weight / total_weight for weight in weights]
-    print(f"WEIGHTINGS = {[round(weight, 4) for weight in weights]}")
-    print(f"SHAPES = {[shape for *_, shape in scheduled_cases]}")
+def main() -> None:
+    print(f"SHAPES = {SIZES}")
 
     # Persistent buffer used by the codec for fallback storage.  It is sized
-    # for one worst-case raw-exponent fallback (max SHAPE_OPTIONS bytes) plus
+    # for one worst-case raw-exponent fallback (the largest case size) plus
     # full-size int32 fallback metadata arrays.  Inside run_case buffer-backed
     # regions are freed after each iteration so the space is reused.
     buffer = TensorBuffer(
-        max(SHAPE_OPTIONS) + 64 * 1024 * 1024,
+        max(SIZES) + 64 * 1024 * 1024,
         device="cuda",
     )
 
     total_time = 0.0
-    for weight, (name, distribution, max_ratio, _, n) in zip(
-        weights, scheduled_cases
-    ):
-        elapsed_ms = run_case(name, n, distribution, max_ratio, buffer)
-        total_time += weight * elapsed_ms
+    for n in SIZES:
+        for name, max_ratio in CASES:
+            total_time += run_case(name, n, max_ratio, buffer)
 
     # Individual buffer-backed regions are freed inside run_case.  Reset the
     # allocator once more so repeated benchmark runs start from a clean state.

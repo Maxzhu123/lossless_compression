@@ -49,6 +49,7 @@ DUAL_DECODE_AUTOTUNE_CONFIGS = [
 _gpu = device_profile(torch.device("cuda"))
 if "a100" in _gpu.model:
     ENCODE_AUTOTUNE_CONFIGS = [
-        *ENCODE_AUTOTUNE_CONFIGS,
         triton.Config({}, num_warps=8, num_stages=9, maxnreg=29),
+        triton.Config({}, num_warps=8, num_stages=2),
+        triton.Config({}, num_warps=4, num_stages=3, maxnreg=64),
     ]
