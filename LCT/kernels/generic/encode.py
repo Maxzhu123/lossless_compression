@@ -19,11 +19,14 @@ from .compaction import (
 CENTER_SAMPLE_SIZE = 4096
 
 
+@triton.autotune(
+    configs=ENCODE_AUTOTUNE_CONFIGS,
+    key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS", "PRECOMPUTED"],
+)
 @triton.jit
-def _encode_impl(
+def _encode_kernel(
     source_bits, sign_mantissa, encoded, encode_table,
-    extra_starts,
-    n_elements, n_streams,
+    extra_starts, n_elements, n_streams,
     PRECOMPUTED: tl.constexpr,
     LOGICAL_NUMEL: tl.constexpr,
     FIXED_WORDS: tl.constexpr,
@@ -180,48 +183,6 @@ def _encode_impl(
     )
 
 
-@triton.autotune(
-    configs=ENCODE_AUTOTUNE_CONFIGS,
-    key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS"],
-)
-@triton.jit
-def _encode_components_kernel(
-    source_bits, sign_mantissa, encoded, encode_table,
-    extra_starts, n_elements, n_streams,
-    LOGICAL_NUMEL: tl.constexpr,
-    FIXED_WORDS: tl.constexpr,
-    BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
-):
-    """Encode flattened precomputed exponent planes into 1D storage."""
-    _encode_impl(
-        source_bits, sign_mantissa, encoded, encode_table, extra_starts,
-        n_elements, n_streams, True,
-        LOGICAL_NUMEL,
-        FIXED_WORDS, BLOCK, N_LANES, N_STEPS,
-    )
-
-
-@triton.autotune(
-    configs=ENCODE_AUTOTUNE_CONFIGS,
-    key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS"],
-)
-@triton.jit
-def _encode_kernel(
-    source_bits, sign_mantissa, encoded, encode_table,
-    extra_starts, n_elements, n_streams,
-    LOGICAL_NUMEL: tl.constexpr,
-    FIXED_WORDS: tl.constexpr,
-    BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
-):
-    """Encode a flattened tensor through the 1D codec mapping."""
-    _encode_impl(
-        source_bits, sign_mantissa, encoded, encode_table, extra_starts,
-        n_elements, n_streams, False,
-        LOGICAL_NUMEL,
-        FIXED_WORDS, BLOCK, N_LANES, N_STEPS,
-    )
-
-
 def _estimate_center(source, size, *, precomputed, ignore_zero=False):
     """Estimate the exponent center from stratified jittered GPU samples."""
     sample_size = min(size, CENTER_SAMPLE_SIZE)
@@ -231,29 +192,6 @@ def _estimate_center(source, size, *, precomputed, ignore_zero=False):
         PRECOMPUTED=precomputed, IGNORE_ZERO=ignore_zero,
     )
     return center
-
-
-def _launch_encode(
-    source_values, sign_mantissa, encoded, encode_table, extra_starts,
-    size, streams, *,
-    precomputed, logical_numel,
-    fixed_words, block_symbols, lanes, steps, blocks,
-):
-    """Launch the 1D encode kernel for raw BF16 or precomputed components."""
-    if precomputed:
-        _encode_components_kernel[(blocks,)](
-            source_values, sign_mantissa, encoded, encode_table, extra_starts,
-            size, streams, LOGICAL_NUMEL=logical_numel,
-            FIXED_WORDS=fixed_words, BLOCK=block_symbols,
-            N_LANES=lanes, N_STEPS=steps,
-        )
-    else:
-        _encode_kernel[(blocks,)](
-            source_values, sign_mantissa, encoded, encode_table, extra_starts,
-            size, streams, LOGICAL_NUMEL=logical_numel,
-            FIXED_WORDS=fixed_words, BLOCK=block_symbols,
-            N_LANES=lanes, N_STEPS=steps,
-        )
 
 
 def _compact_bad_streams(
@@ -355,12 +293,12 @@ def encode_components(
     extra_starts = torch.empty(
         streams, dtype=torch.uint8, device=source_values.device
     )
-    _launch_encode(
+    _encode_kernel[(blocks,)](
         source_values, sign_mantissa, encoded, shifted_encode, extra_starts,
         size, streams,
-        precomputed=precomputed,
-        logical_numel=logical_numel, fixed_words=fixed_words,
-        block_symbols=block_symbols, lanes=lanes, steps=steps, blocks=blocks,
+        PRECOMPUTED=precomputed, LOGICAL_NUMEL=logical_numel,
+        FIXED_WORDS=fixed_words, BLOCK=block_symbols,
+        N_LANES=lanes, N_STEPS=steps,
     )
 
     # Count overflow streams and bytes once.  For a shared buffer these counts
