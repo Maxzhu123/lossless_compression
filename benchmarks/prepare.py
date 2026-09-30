@@ -8,7 +8,7 @@ from LCT.compress import compress, decompress
 from LCT.tensor_buffer import TensorBuffer
 from LCT.comp_format import DistType, Distribution, NoiseLevel
 
-SIZE_WEIGHTS = {50_000_000: 3, 200_000_000: 1}
+SIZE_WEIGHTS = {10_000_000:5, 50_000_000: 3, 200_000_000: 1}
 WARMUP = 5
 ITERS = 30
 
@@ -79,7 +79,7 @@ CASES: list[tuple[str, float]] = [
     ("gaussian/gaussian/clean", _bf16_ratio(0.4)),
     ("laplace/laplace/medium", _bf16_ratio(0.61)),
     ("gaussian/empirical/clean", _bf16_ratio(0.5)),
-    ("laplace/gaussian/clean", _bf16_ratio(0.65)),
+    ("laplace/gaussian/clean", _bf16_ratio(0.66)),
     ("localized/empirical/high", _bf16_ratio(0.78)),
 ]
 

@@ -53,3 +53,19 @@ if "a100" in _gpu.model:
         triton.Config({}, num_warps=8, num_stages=2),
         triton.Config({}, num_warps=4, num_stages=3, maxnreg=64),
     ]
+elif _gpu.model == "geforce_rtx_3070_laptop_gpu":
+    # Winners observed on prepare.py's 10M, 50M and 200M cases.
+    ENCODE_AUTOTUNE_CONFIGS = [
+        triton.Config({}, num_warps=8, num_stages=2),
+        triton.Config({}, num_warps=8, num_stages=1, maxnreg=32),
+        triton.Config({}, num_warps=8, num_stages=2, maxnreg=64),
+        triton.Config({}, num_warps=4, num_stages=2, maxnreg=64),
+        triton.Config({}, num_warps=8, num_stages=3, maxnreg=32),
+    ]
+    DECODE_AUTOTUNE_CONFIGS = [
+        triton.Config({}, num_warps=8, num_stages=2),
+        triton.Config({}, num_warps=4, num_stages=5, maxnreg=64),
+        triton.Config({}, num_warps=4, num_stages=1, maxnreg=48),
+        triton.Config({}, num_warps=4, num_stages=2, maxnreg=48),
+        triton.Config({}, num_warps=8, num_stages=2, maxnreg=32),
+    ]
