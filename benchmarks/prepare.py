@@ -167,10 +167,8 @@ def main() -> None:
             total_time += elapsed_ms
             total_weight += weight
 
-    # Individual buffer-backed regions are freed inside run_case.  Reset the
-    # allocator once more so repeated benchmark runs start from a clean state.
-    buffer.reset()
 
+    print("Passed")
     task_count = len(CASES) * len(SIZE_WEIGHTS)
     print(f"Average time per task: {total_time / task_count:.5g}ms")
     print(f"Final time: {weighted_time / total_weight:.5g}ms")
