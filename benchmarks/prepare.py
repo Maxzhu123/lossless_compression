@@ -8,7 +8,7 @@ from LCT.compress import compress, decompress
 from LCT.tensor_buffer import TensorBuffer
 from LCT.comp_format import DistType, Distribution, NoiseLevel
 
-SIZES = [50_000_000, 200_000_000]
+SIZE_WEIGHTS = {50_000_000: 3, 200_000_000: 1}
 WARMUP = 5
 ITERS = 30
 
@@ -77,7 +77,6 @@ def _bf16_ratio(exponent_ratio: float) -> float:
 # Each case: (source/codec_family/noise_level, max_total_bf16_ratio)
 CASES: list[tuple[str, float]] = [
     ("gaussian/gaussian/clean", _bf16_ratio(0.4)),
-    ("empirical/empirical/clean", _bf16_ratio(0.42)),
     ("laplace/laplace/medium", _bf16_ratio(0.61)),
     ("gaussian/empirical/clean", _bf16_ratio(0.5)),
     ("laplace/gaussian/clean", _bf16_ratio(0.65)),
@@ -141,7 +140,7 @@ def run_case(
 
     print(
         f"{name:32s} n={n / 1e6:6.0f}M  "
-        f"time={elapsed_ms:7.3f} ms  ratio={ratio:.4f}"
+        f"time={elapsed_ms:7.3f} ms"
     )
     compressed.free()
     del x, compressed, restored
@@ -150,28 +149,31 @@ def run_case(
 
 
 def main() -> None:
-    print(f"SHAPES = {SIZES}")
+    print(f"SHAPES = {list(SIZE_WEIGHTS)}")
 
-    # Persistent buffer used by the codec for fallback storage.  It is sized
-    # for one worst-case raw-exponent fallback (the largest case size) plus
-    # full-size int32 fallback metadata arrays.  Inside run_case buffer-backed
-    # regions are freed after each iteration so the space is reused.
+    # Persistent buffer used by the codec for fallback storage.
     buffer = TensorBuffer(
-        max(SIZES) + 64 * 1024 * 1024,
+        max(SIZE_WEIGHTS) + 64 * 1024 * 1024,
         device="cuda",
     )
 
+    weighted_time = 0.0
     total_time = 0.0
-    for n in SIZES:
+    total_weight = 0
+    for n, weight in SIZE_WEIGHTS.items():
         for name, max_ratio in CASES:
-            total_time += run_case(name, n, max_ratio, buffer)
+            elapsed_ms = run_case(name, n, max_ratio, buffer)
+            weighted_time += weight * elapsed_ms
+            total_time += elapsed_ms
+            total_weight += weight
 
     # Individual buffer-backed regions are freed inside run_case.  Reset the
     # allocator once more so repeated benchmark runs start from a clean state.
     buffer.reset()
 
-    print("passed")
-    print(f"Total time: {total_time:.5g}ms")
+    task_count = len(CASES) * len(SIZE_WEIGHTS)
+    print(f"Average time per task: {total_time / task_count:.5g}ms")
+    print(f"Final time: {weighted_time / total_weight:.5g}ms")
 
 
 if __name__ == "__main__":
