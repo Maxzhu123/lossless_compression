@@ -192,6 +192,19 @@ def _free_kernel(
     _unlock(lock)
 
 
+@triton.jit
+def _free_storage_kernel(
+    storage, descriptor, status, MAX_FREE_REGIONS: tl.constexpr,
+):
+    """Derive metadata pointers on the GPU instead of constructing host views."""
+    metadata = storage.to(tl.pointer_type(tl.int32))
+    _free_kernel(
+        descriptor, metadata, metadata + MAX_FREE_REGIONS,
+        metadata + 2 * MAX_FREE_REGIONS, metadata + 2 * MAX_FREE_REGIONS + 1,
+        metadata + 2 * MAX_FREE_REGIONS + 2, status, MAX_FREE_REGIONS,
+    )
+
+
 @dataclass(frozen=True)
 class Allocation:
     """A CUDA ``[offset, aligned_size, status, generation]`` descriptor."""

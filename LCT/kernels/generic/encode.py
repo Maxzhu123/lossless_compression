@@ -4,33 +4,40 @@ import torch
 import triton
 from triton import language as tl
 
-from ...codec.autotune import ENCODE_AUTOTUNE_CONFIGS
+from ...codec.autotune import (
+    ENCODE_AUTOTUNE_CONFIGS, SUMMARY_BLOCK_LIMIT, COMPACT_GRID_LIMIT,
+)
 from ...codec.geometry import geometry
 from ...comp_format import Distribution, StorageLayout
 from ...comp_tensor import CompressedTensor
 from ...compression.huffman_tables import get_distribution_tables
-from ...tensor_buffer import TensorBuffer
-from ..common.tables import _estimate_center_kernel, _shift_encoding_table_kernel
+from ...tensor_buffer import Allocation, TensorBuffer
+from ..common.tables import (
+    _shift_encoding_table_kernel,
+    _estimate_and_shift_encoding_table_kernel,
+)
 from .compaction import (
     _count_bad_streams_kernel, _compact_bad_streams_kernel,
     _compact_extra_kernel, _compact_components_extra_kernel,
 )
+from .metadata import _prefix_allocate_kernel, _compact_metadata_kernel
 
 CENTER_SAMPLE_SIZE = 4096
 
 
 @triton.autotune(
     configs=ENCODE_AUTOTUNE_CONFIGS,
-    key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS", "PRECOMPUTED"],
+    key=["n_elements", "N_LANES", "N_STEPS", "FIXED_WORDS", "PRECOMPUTED", "WRITE_SUMMARY"],
 )
 @triton.jit
 def _encode_kernel(
     source_bits, sign_mantissa, encoded, encode_table,
-    extra_starts, n_elements, n_streams,
+    extra_starts, summaries, n_elements, n_streams,
     PRECOMPUTED: tl.constexpr,
     LOGICAL_NUMEL: tl.constexpr,
     FIXED_WORDS: tl.constexpr,
     BLOCK: tl.constexpr, N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
+    WRITE_SUMMARY: tl.constexpr = False,
 ):
     """Encode one flattened contiguous block per program (1D storage).
 
@@ -182,16 +189,12 @@ def _encode_kernel(
         tl.where(has_data & overflow, extra_start, 255),
     )
 
-
-def _estimate_center(source, size, *, precomputed, ignore_zero=False):
-    """Estimate the exponent center from stratified jittered GPU samples."""
-    sample_size = min(size, CENTER_SAMPLE_SIZE)
-    center = torch.empty(1, dtype=torch.int32, device=source.device)
-    _estimate_center_kernel[(1,)](
-        source, center, size, SAMPLE_SIZE=sample_size,
-        PRECOMPUTED=precomputed, IGNORE_ZERO=ignore_zero,
-    )
-    return center
+    if WRITE_SUMMARY:
+        bad = has_data & overflow
+        count = tl.sum(bad.to(tl.int32), axis=0)
+        total = tl.sum(tl.where(bad, N_STEPS - extra_start, 0), axis=0)
+        tl.store(summaries + block, count)
+        tl.store(summaries + tl.num_programs(0) + block, total)
 
 
 def _compact_bad_streams(
@@ -222,25 +225,17 @@ def _compact_extra(
     block_symbols, lanes, steps,
 ):
     """Compact fallback tail values for a buffered or private fallback path."""
-    compact_grid = lambda meta: (triton.cdiv(streams, meta["TILE"]),)
-    if precomputed:
-        _compact_components_extra_kernel[compact_grid](
-            source_values, bad_streams, bad_starts, fallback_offsets,
-            fallback_data, metadata_buffer, allocation_descriptor,
-            final_counts, bad_count, size,
-            BUFFERED=buffered, LOGICAL_NUMEL=logical_numel,
-            BLOCK=block_symbols,
-            N_LANES=lanes, N_STEPS=steps,
-        )
-    else:
-        _compact_extra_kernel[compact_grid](
-            source_values, bad_streams, bad_starts, fallback_offsets,
-            fallback_data, metadata_buffer, allocation_descriptor,
-            final_counts, bad_count, size,
-            BUFFERED=buffered, LOGICAL_NUMEL=logical_numel,
-            BLOCK=block_symbols,
-            N_LANES=lanes, N_STEPS=steps,
-        )
+    def compact_grid(meta):
+        return (min(triton.cdiv(streams, meta["TILE"]), COMPACT_GRID_LIMIT),)
+
+    kernel = _compact_components_extra_kernel if precomputed else _compact_extra_kernel
+    kernel[compact_grid](
+        source_values, bad_streams, bad_starts, fallback_offsets,
+        fallback_data, metadata_buffer, allocation_descriptor,
+        final_counts, bad_count, size,
+        BUFFERED=buffered, LOGICAL_NUMEL=logical_numel,
+        BLOCK=block_symbols, N_LANES=lanes, N_STEPS=steps,
+    )
 
 
 def encode_components(
@@ -269,21 +264,27 @@ def encode_components(
         center: Precomputed exponent center, or ``None`` to estimate it.
         logical_numel: Flattened logical element count (1D storage mapping).
     """
+    if buffer is not None and buffer.capacity_bytes % 4:
+        raise ValueError("TensorBuffer capacity must be divisible by 4")
     # Geometry fixes the independent stream count and per-stream bit budget.
     stream_geometry = geometry(distribution)
     block_symbols, lanes, steps, fixed_words = stream_geometry
     blocks = triton.cdiv(size, block_symbols)
     streams = blocks * lanes
-    if center is None:
-        center = _estimate_center(
-            source_values, logical_numel, precomputed=precomputed,
-            ignore_zero=distribution.zero_prob > 0,
-        )
     encode_table, _, _ = get_distribution_tables(distribution)
     shifted_encode = torch.empty(256, dtype=torch.int32, device=source_values.device)
-    _shift_encoding_table_kernel[(1,)](
-        encode_table, center, shifted_encode, BLOCK=256,
-    )
+    if center is None:
+        center = torch.empty(1, dtype=torch.int32, device=source_values.device)
+        _estimate_and_shift_encoding_table_kernel[(1,)](
+            source_values, center, logical_numel, encode_table, shifted_encode,
+            SAMPLE_SIZE=min(logical_numel, CENTER_SAMPLE_SIZE),
+            PRECOMPUTED=precomputed, IGNORE_ZERO=distribution.zero_prob > 0,
+            BLOCK=4096, num_warps=4, num_stages=2,
+        )
+    else:
+        _shift_encoding_table_kernel[(1,)](
+            encode_table, center, shifted_encode, BLOCK=256,
+        )
     # Encode and decode share this sampled center through the result metadata.
     encoded = torch.empty(
         streams * fixed_words + 4,
@@ -293,28 +294,57 @@ def encode_components(
     extra_starts = torch.empty(
         streams, dtype=torch.uint8, device=source_values.device
     )
+    # Bound the single-program prefix scan; larger tensors keep the prior path.
+    use_summaries = blocks <= SUMMARY_BLOCK_LIMIT
+    summaries = (
+        torch.empty(4 * blocks, dtype=torch.int32, device=source_values.device)
+        if use_summaries else extra_starts
+    )
     _encode_kernel[(blocks,)](
-        source_values, sign_mantissa, encoded, shifted_encode, extra_starts,
+        source_values, sign_mantissa, encoded, shifted_encode, extra_starts, summaries,
         size, streams,
         PRECOMPUTED=precomputed, LOGICAL_NUMEL=logical_numel,
         FIXED_WORDS=fixed_words, BLOCK=block_symbols,
-        N_LANES=lanes, N_STEPS=steps,
+        N_LANES=lanes, N_STEPS=steps, WRITE_SUMMARY=use_summaries,
     )
 
     # Count overflow streams and bytes once.  For a shared buffer these counts
     # are used asynchronously by the allocator; for private fallback they tell
     # us how much exact-size storage to allocate.
-    counts = torch.zeros(4, dtype=torch.int32, device=source_values.device)
-    count_grid = lambda meta: (triton.cdiv(streams, meta["BLOCK"]),)
-    _count_bad_streams_kernel[count_grid](
-        extra_starts, counts[:1], counts[1:2], streams, steps,
-    )
+    make_counts = torch.empty if use_summaries else torch.zeros
+    counts = make_counts(4, dtype=torch.int32, device=source_values.device)
+    final_count = counts[:1]
+    final_total = counts[1:2]
+    compact_count = counts[2:3]
+    compact_total = counts[3:]
+    if use_summaries:
+        descriptor = (
+            torch.empty(4, dtype=torch.int32, device=source_values.device)
+            if buffer is not None else counts
+        )
+        state = (
+            (buffer._free_starts, buffer._free_sizes, buffer._free_count,
+             buffer._lock, buffer._generation)
+            if buffer is not None else (counts,) * 5
+        )
+        _prefix_allocate_kernel[(1,)](
+            summaries, counts, descriptor, *state, blocks,
+            BUFFERED=buffer is not None, BLOCK=triton.next_power_of_2(blocks),
+            MAX_FREE_REGIONS=buffer.max_free_regions if buffer is not None else 256,
+            num_warps=4, num_stages=2,
+        )
+    else:
+        count_grid = lambda meta: (triton.cdiv(streams, meta["BLOCK"]),)
+        _count_bad_streams_kernel[count_grid](
+            extra_starts, final_count, final_total, streams, steps,
+        )
 
     buffered = buffer is not None
     if buffer is not None:
-        if buffer.capacity_bytes % 4:
-            raise ValueError("TensorBuffer capacity must be divisible by 4")
-        allocation = buffer.allocate_with_items(counts[1:2], counts[:1], 9)
+        if use_summaries:
+            allocation = Allocation(descriptor, buffer)
+        else:
+            allocation = buffer.allocate_with_items(final_total, final_count, 9)
         metadata = buffer.data.view(torch.int32)
         fallback_buffer = buffer.data
         bad_streams_out = metadata
@@ -326,9 +356,9 @@ def encode_components(
         # counts[0] and counts[1] are the final counts used by the buffered
         # metadata layout; counts[2] and counts[3] are zeroed compaction
         # accumulators.
-        final_counts = counts[:1]
-        bad_count = counts[2:3]
-        fallback_total = counts[3:]
+        final_counts = final_count
+        bad_count = compact_count
+        fallback_total = compact_total
     else:
         count, fallback_size = (int(value) for value in counts[:2].tolist())
         bad_streams_out = torch.empty(count, dtype=torch.int32, device=source_values.device)
@@ -342,18 +372,28 @@ def encode_components(
         metadata_buffer = bad_streams_out
         # Private compaction does not use the descriptor/final count path, so
         # the zeroed counts[2] and counts[3] act as the atomic accumulators.
-        allocation_descriptor = counts[2:3]
+        allocation_descriptor = compact_count
         descriptor = None
-        final_counts = counts[2:3]
-        bad_count = counts[2:3]
-        fallback_total = counts[3:]
+        final_counts = compact_count
+        bad_count = compact_count
+        fallback_total = compact_total
 
-    _compact_bad_streams(
-        extra_starts, bad_streams_out, bad_starts_out, fallback_offsets_out,
-        metadata_buffer, allocation_descriptor, final_counts,
-        bad_count, fallback_total, streams, steps,
-        buffered=buffered,
-    )
+    if use_summaries:
+        _compact_metadata_kernel[(blocks,)](
+            extra_starts, summaries, counts, allocation_descriptor, metadata_buffer,
+            bad_streams_out, bad_starts_out, fallback_offsets_out,
+            blocks, streams, BUFFERED=buffered, N_LANES=lanes, N_STEPS=steps,
+            num_warps=4, num_stages=2,
+        )
+        bad_count = final_count
+        fallback_total = final_total
+    else:
+        _compact_bad_streams(
+            extra_starts, bad_streams_out, bad_starts_out, fallback_offsets_out,
+            metadata_buffer, allocation_descriptor, final_counts,
+            bad_count, fallback_total, streams, steps,
+            buffered=buffered,
+        )
     _compact_extra(
         source_values, bad_streams_out, bad_starts_out, fallback_offsets_out,
         fallback_buffer, metadata_buffer, allocation_descriptor,
@@ -370,8 +410,8 @@ def encode_components(
         fallback_buffer=fallback_buffer,
         fallback_descriptor=descriptor,
         buffer=buffer,
-        fallback_count=counts[:1] if buffered else bad_count,
-        fallback_used=counts[1:2] if buffered else fallback_total,
+        fallback_count=final_count if buffered else bad_count,
+        fallback_used=final_total if buffered else fallback_total,
         distribution=distribution, center=center, shape=shape,
         layout=StorageLayout.COMPRESSED,
         stream_geometry=stream_geometry,

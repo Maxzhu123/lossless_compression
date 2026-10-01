@@ -1,4 +1,4 @@
-"""Triton configs selected once at import time for the user's GPU model."""
+"""Triton launch configurations and bounded-grid limits."""
 
 import torch
 import triton
@@ -21,11 +21,9 @@ COMPACT_BAD_STREAMS_AUTOTUNE_CONFIGS = [
     triton.Config({"BLOCK": 1024}, num_warps=2, num_stages=2),
     triton.Config({"BLOCK": 1024}, num_warps=2, num_stages=3),
 ]
+# Absolute-row overflow processing is the default on every supported GPU.
 COMPACT_EXTRA_AUTOTUNE_CONFIGS = [
-    triton.Config({"TILE": 32}, num_warps=1, num_stages=2),
-    triton.Config({"TILE": 32}, num_warps=2, num_stages=2),
-    triton.Config({"TILE": 32}, num_warps=4, num_stages=2),
-    triton.Config({"TILE": 32}, num_warps=2, num_stages=3),
+    triton.Config({"TILE": 32, "ROW_TILE": 16}, num_warps=4, num_stages=2),
 ]
 SCATTER_FALLBACK_AUTOTUNE_CONFIGS = [
     triton.Config({}, num_warps=1, num_stages=2),
@@ -69,3 +67,14 @@ elif _gpu.model == "geforce_rtx_3070_laptop_gpu":
         triton.Config({}, num_warps=4, num_stages=2, maxnreg=48),
         triton.Config({}, num_warps=8, num_stages=2, maxnreg=32),
     ]
+
+
+# Standalone scatter is separate from the fused-operation fallback configs.
+DENSE_SCATTER_AUTOTUNE_CONFIGS = [
+    triton.Config({"ROW_TILE": 16}, num_warps=4, num_stages=2),
+]
+
+# Bound the single-program prefix scan and persistent overflow grids.
+SUMMARY_BLOCK_LIMIT = 8192
+COMPACT_GRID_LIMIT = 820
+SCATTER_GRID_LIMIT = 410

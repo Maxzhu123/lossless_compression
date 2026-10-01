@@ -4,7 +4,9 @@ import torch
 import triton
 from triton import language as tl
 
-from ...codec.autotune import DECODE_AUTOTUNE_CONFIGS
+from ...codec.autotune import (
+    DECODE_AUTOTUNE_CONFIGS, SCATTER_GRID_LIMIT,
+)
 from ...comp_tensor import CompressedTensor
 from ...compression.huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
 from ..common.tables import _shift_decoding_table_kernel
@@ -236,16 +238,21 @@ def decode(data: CompressedTensor) -> torch.Tensor:
         LOGICAL_NUMEL=logical_numel,
         TILE=scatter_tile, BLOCK=block_symbols, N_LANES=lanes, N_STEPS=steps,
     )
+
+    def scatter_grid(stream_count):
+        programs = triton.cdiv(stream_count, scatter_tile)
+        return (min(programs, SCATTER_GRID_LIMIT),)
+
     if data.fallback_descriptor is not None:
         metadata = data.fallback_buffer.view(torch.int32)
-        _scatter_blocked_fallback_kernel[(triton.cdiv(streams, scatter_tile),)](
+        _scatter_blocked_fallback_kernel[scatter_grid(streams)](
             metadata, data.fallback_buffer, metadata, data.fallback_buffer, 0,
             metadata, data.fallback_descriptor, data.fallback_count,
             data.sign_mantissa, output, data.size,
             BUFFERED=True, **scatter_meta,
         )
     elif data.offsets.numel():
-        _scatter_blocked_fallback_kernel[(triton.cdiv(data.offsets.numel(), scatter_tile),)](
+        _scatter_blocked_fallback_kernel[scatter_grid(data.offsets.numel())](
             data.offsets, data.fallback_starts, data.fallback_offsets,
             data.fallback_buffer, data.fallback_base, data.offsets,
             data.offsets, data.fallback_count, data.sign_mantissa,

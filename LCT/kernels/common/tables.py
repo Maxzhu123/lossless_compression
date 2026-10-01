@@ -6,16 +6,11 @@ from triton import language as tl
 from ...codec.autotune import ESTIMATE_CENTER_AUTOTUNE_CONFIGS
 
 
-@triton.autotune(
-    configs=ESTIMATE_CENTER_AUTOTUNE_CONFIGS,
-    key=["SAMPLE_SIZE"],
-)
 @triton.jit
-def _estimate_center_kernel(
-    source_bits, center_out, size,
+def _estimate_center_impl(
+    source_bits, size,
     SAMPLE_SIZE: tl.constexpr, PRECOMPUTED: tl.constexpr,
-    IGNORE_ZERO: tl.constexpr,
-    BLOCK: tl.constexpr,
+    IGNORE_ZERO: tl.constexpr, BLOCK: tl.constexpr,
 ):
     offsets = tl.arange(0, BLOCK)
     total = tl.zeros((BLOCK,), tl.int32)
@@ -57,17 +52,31 @@ def _estimate_center_kernel(
     )
     center = tl.where(n > 0, center, 0)
     center = tl.minimum(tl.maximum(center, -128), 127)
+    return center
+
+
+@triton.autotune(
+    configs=ESTIMATE_CENTER_AUTOTUNE_CONFIGS,
+    key=["SAMPLE_SIZE"],
+)
+@triton.jit
+def _estimate_center_kernel(
+    source_bits, center_out, size,
+    SAMPLE_SIZE: tl.constexpr, PRECOMPUTED: tl.constexpr,
+    IGNORE_ZERO: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    center = _estimate_center_impl(
+        source_bits, size, SAMPLE_SIZE, PRECOMPUTED, IGNORE_ZERO, BLOCK,
+    )
     tl.store(center_out, center)
 
 
 @triton.jit
-def _shift_encoding_table_kernel(
-    base_encode, center, shifted_encode,
-    BLOCK: tl.constexpr,
+def _shift_encoding_table_impl(
+    base_encode, center_value, shifted_encode, BLOCK: tl.constexpr,
 ):
-    """Create a raw-exponent-byte-indexed encode table for one center."""
     idx = tl.arange(0, BLOCK)
-    center_value = tl.load(center).to(tl.int32)
     zero_delta = (-127 - center_value) & 255
     raw_byte = idx
     exp = raw_byte - 127
@@ -79,6 +88,29 @@ def _shift_encoding_table_kernel(
     )
     packed = tl.load(base_encode + table_index).to(tl.uint32)
     tl.store(shifted_encode + raw_byte, packed)
+
+
+@triton.jit
+def _shift_encoding_table_kernel(
+    base_encode, center, shifted_encode, BLOCK: tl.constexpr,
+):
+    """Create a raw-exponent-byte-indexed encode table for one center."""
+    center_value = tl.load(center).to(tl.int32)
+    _shift_encoding_table_impl(base_encode, center_value, shifted_encode, BLOCK)
+
+
+@triton.jit
+def _estimate_and_shift_encoding_table_kernel(
+    source_bits, center_out, size, base_encode, shifted_encode,
+    SAMPLE_SIZE: tl.constexpr, PRECOMPUTED: tl.constexpr,
+    IGNORE_ZERO: tl.constexpr, BLOCK: tl.constexpr,
+):
+    """Reuse the sampled center directly when building the encoding table."""
+    center = _estimate_center_impl(
+        source_bits, size, SAMPLE_SIZE, PRECOMPUTED, IGNORE_ZERO, BLOCK,
+    )
+    tl.store(center_out, center)
+    _shift_encoding_table_impl(base_encode, center, shifted_encode, BLOCK=256)
 
 
 @triton.jit
