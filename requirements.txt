@@ -7,3 +7,4 @@ tabulate
 scipy
 matplotlib
 safetensors
+tilelang>=0.1.8

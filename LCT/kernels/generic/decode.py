@@ -233,6 +233,16 @@ def decode(data: CompressedTensor) -> torch.Tensor:
         FIXED_WORDS=fixed_words,
         ON_DEMAND=logical_numel > 600_000_000,
     )
+    _restore_fallback(data, output)
+    return output.view(torch.bfloat16).reshape(data.shape)
+
+
+def _restore_fallback(data: CompressedTensor, output: torch.Tensor) -> None:
+    """Restore compact overflow tails for either fixed-payload decoder."""
+    logical_numel = data.logical_numel
+    block_symbols, lanes, steps, _ = data.codec_geometry
+    blocks = triton.cdiv(data.size, block_symbols)
+    streams = blocks * lanes
     scatter_tile = 64
     scatter_meta = dict(
         LOGICAL_NUMEL=logical_numel,
@@ -258,4 +268,3 @@ def decode(data: CompressedTensor) -> torch.Tensor:
             data.offsets, data.fallback_count, data.sign_mantissa,
             output, data.size, BUFFERED=False, **scatter_meta,
         )
-    return output.view(torch.bfloat16).reshape(data.shape)

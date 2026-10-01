@@ -2,18 +2,27 @@
 
 import torch
 
-from ..kernels.generic.decode import decode
+from ..kernels.generic.decode import decode as decode_triton
 from ..kernels.generic.encode import encode, encode_components
 from .device import device_profile
 from .interfaces import KernelBackend
+
+
+def decode(data):
+    """Use the optimized CUDA decoder and retain the portable Triton backend."""
+    if torch.version.hip is not None:
+        return decode_triton(data)
+    from ..kernels.tilelang.decode import decode as decode_tilelang
+
+    return decode_tilelang(data)
 
 
 GENERIC = KernelBackend(
     encode=encode, encode_components=encode_components, decode=decode,
 )
 
-# Register only working implementations. Every GPU currently uses the existing
-# generic kernels. Specializations can override individual fields with replace().
+# The generic backend composes shared encoding with the optimized decoder.
+# Specializations can override individual fields with replace().
 FAMILY_BACKENDS: dict[str, KernelBackend] = {"generic": GENERIC}
 MODEL_BACKENDS: dict[str, KernelBackend] = {}
 
