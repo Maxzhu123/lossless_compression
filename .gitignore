@@ -28,3 +28,6 @@ nanogpt/data/fineweb10B/
 /A100_OPTIMIZATION_NOTES.md
 /supplement.zip
 /nanogpt/logs/
+
+# TileLang runtime tuning diagnostics
+/autotuner.log

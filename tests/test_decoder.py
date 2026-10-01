@@ -113,6 +113,62 @@ class DecoderTests(unittest.TestCase):
         finally:
             encoded.free()
 
+    def test_all_autotune_configurations(self):
+        from LCT.kernels.tilelang.autotune import DECODE_AUTOTUNE_CONFIGS
+        bits = torch.arange(131329, dtype=torch.int32, device="cuda").to(torch.int16)
+        source = bits.view(torch.bfloat16)
+        for noise in (NoiseLevel.CLEAN, NoiseLevel.MEDIUM):
+            encoded = compress(source, Distribution(DistType.GAUSSIAN, noise_level=noise), self.arena)
+            try:
+                _, base, rare = get_distribution_tables(encoded.distribution)
+                capability = torch.cuda.get_device_capability()
+                target = f"cuda -arch=sm_{capability[0]}{capability[1]}"
+                output = torch.empty_like(source, dtype=torch.int16)
+                for config in DECODE_AUTOTUNE_CONFIGS:
+                    with self.subTest(noise=noise, config=config):
+                        output.fill_(-12345)
+                        kernel = _decode_kernel(*encoded.codec_geometry, rare, target, "int32", **config)
+                        kernel(encoded.data, encoded.sign_mantissa, base, encoded.center, output)
+                        _restore_fallback(encoded, output)
+                        self.assertTrue(torch.equal(output, source.view(torch.int16)))
+            finally:
+                encoded.free()
+
+    def test_tuning_cache_and_uncached_graph_capture(self):
+        decoder = importlib.import_module("LCT.kernels.tilelang.decode")
+        distribution = Distribution(DistType.GAMMA, mean=7.0, zero_prob=0.15)
+        source = torch.randn(262145, device="cuda").bfloat16()
+        encoded = compress(source, distribution, self.arena)
+        try:
+            self.assert_bits(decode_tilelang(encoded), source)
+            self.assertIsNotNone(decoder.get_decode_config(encoded))
+            with patch.object(decoder, "AutoTuner", side_effect=AssertionError("warm decode retuned")):
+                self.assert_bits(decode_tilelang(encoded), source)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    result = decode_tilelang(encoded)
+                graph.replay()
+                self.assert_bits(result, source)
+        finally:
+            encoded.free()
+        # Same geometry, new size bucket: capture must use the compiled default
+        # without benchmarking, device synchronization, or poisoning outputs.
+        source = torch.randn(524289, device="cuda").bfloat16()
+        encoded = compress(source, distribution, self.arena)
+        try:
+            self.assertIsNone(decoder.get_decode_config(encoded))
+            with patch.object(decoder, "AutoTuner", side_effect=AssertionError("capture started tuning")):
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    result = decode_tilelang(encoded)
+                graph.replay()
+                self.assert_bits(result, source)
+            self.assertIsNone(decoder.get_decode_config(encoded))
+            self.assert_bits(decode_tilelang(encoded), source)
+            self.assertIsNotNone(decoder.get_decode_config(encoded))
+        finally:
+            encoded.free()
+
     def test_fused_operation_outputs(self):
         x = torch.randn(131329, device="cuda").bfloat16()
         x[::3] *= 512
