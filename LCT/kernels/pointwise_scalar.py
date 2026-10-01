@@ -9,11 +9,12 @@ from triton import language as tl
 
 from ..codec.autotune import (
     DECODE_AUTOTUNE_CONFIGS,
-    SCATTER_FALLBACK_AUTOTUNE_CONFIGS,
+    POINTWISE_FALLBACK_AUTOTUNE_CONFIGS,
 )
 from .primitives import decode_symbol, pack_bf16
 from .pointwise import (
     _pointwise_location,
+    _pointwise_fallback_impl,
     _store_result,
 )
 
@@ -174,8 +175,8 @@ def pointwise_scalar_mul_add_dense_kernel(
 
 
 @triton.autotune(
-    configs=SCATTER_FALLBACK_AUTOTUNE_CONFIGS,
-    key=["n_elements", "N_LANES", "N_STEPS", "BLOCK", "SCALE_OTHER", "ALPHA_IS_ONE"],
+    configs=POINTWISE_FALLBACK_AUTOTUNE_CONFIGS,
+    key=["n_elements", "N_LANES", "N_STEPS", "BLOCK", "OUTPUT_POLICY", "SCALE_OTHER", "ALPHA_IS_ONE"],
 )
 @triton.jit
 def pointwise_scalar_mul_add_dense_fallback_kernel(
@@ -187,62 +188,26 @@ def pointwise_scalar_mul_add_dense_fallback_kernel(
     OUTPUT_POLICY: tl.constexpr, BUFFERED: tl.constexpr,
     LOGICAL_NUMEL: tl.constexpr,
     TILE: tl.constexpr, BLOCK: tl.constexpr,
-    N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
+    N_LANES: tl.constexpr, N_STEPS: tl.constexpr, ROW_TILE: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    tile = pid * TILE + tl.arange(0, TILE)
+    count = tl.load(fallback_count).to(tl.int32)
+    if tl.program_id(0) * TILE >= count:
+        return
     alpha_value = 1.0
     if not ALPHA_IS_ONE:
         alpha_value = tl.load(alpha).to(tl.float32)
     beta_value = 1.0
     if SCALE_OTHER:
         beta_value = tl.load(beta).to(tl.float32)
-    count = tl.load(fallback_count).to(tl.int32)
-    if pid * TILE >= count:
-        return
-    valid = tile < count
-    if BUFFERED:
-        base = tl.load(descriptor).to(tl.int32)
-        base_words = base // 4
-        stream = tl.load(metadata + base_words + tile, mask=valid, other=0)
-        start = tl.load(
-            bad_starts + base + 8 * count + tile,
-            mask=valid, other=N_STEPS,
-        )
-        fallback_offset = tl.load(
-            metadata + base_words + count + tile, mask=valid, other=0,
-        )
-        fallback_base = base + 9 * count
-    else:
-        stream = tl.load(bad_streams + tile, mask=valid, other=0)
-        start = tl.load(bad_starts + tile, mask=valid, other=N_STEPS)
-        fallback_offset = tl.load(fallback_offsets + tile, mask=valid, other=0)
-    stream = stream.to(tl.int32)
-    start = start.to(tl.int32)
-    fallback_offset = fallback_offset.to(tl.int32)
-    block = stream // N_LANES
-    lane = stream - block * N_LANES
-    tail_steps = N_STEPS - start
-    max_tail = tl.max(tl.where(valid, tail_steps, 0), axis=0)
-    for tail_step in tl.range(0, max_tail):
-        step = start + tail_step
-        offset, logical_offset, storage_valid, logical_valid = _pointwise_location(
-            block, step, lane, n_elements, LOGICAL_NUMEL,
-            BLOCK, N_LANES, N_STEPS,
-        )
-        active = valid & (tail_step < tail_steps) & storage_valid
-        logical_active = active & logical_valid
-        exponent = tl.load(
-            fallback_buffer + fallback_base + fallback_offset + tail_step,
-            mask=active, other=0,
-        ).to(tl.int32)
-        sm = tl.load(sign_mantissa + offset, mask=active, other=0, cache_modifier='.cg')
-        left = pack_bf16(exponent, sm).to(tl.int16).to(
-            tl.bfloat16, bitcast=True
-        )
-        right = tl.load(other + logical_offset, mask=logical_active, other=0.0, cache_modifier='.cg')
-        _store_result(
-            _scaled_sum(left, right, alpha_value, beta_value, SCALE_OTHER, ALPHA_IS_ONE),
-            output, auxiliary, offset, logical_offset,
-            logical_active, active, OUTPUT_POLICY,
+    for tile_id in tl.range(tl.program_id(0), tl.cdiv(count, TILE), tl.num_programs(0)):
+        _pointwise_fallback_impl(
+            bad_streams, bad_starts, fallback_offsets, fallback_buffer,
+            fallback_base, metadata, descriptor, count,
+            sign_mantissa, other, output, auxiliary, n_elements, tile_id,
+            alpha_value, beta_value,
+            OP=_scaled_sum, SCALED=True,
+            SCALE_OTHER=SCALE_OTHER, ALPHA_IS_ONE=ALPHA_IS_ONE,
+            OUTPUT_POLICY=OUTPUT_POLICY, BUFFERED=BUFFERED,
+            LOGICAL_NUMEL=LOGICAL_NUMEL, TILE=TILE, ROW_TILE=ROW_TILE,
+            BLOCK=BLOCK, N_LANES=N_LANES, N_STEPS=N_STEPS,
         )

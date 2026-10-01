@@ -5,7 +5,7 @@ from triton import language as tl
 
 from ..codec.autotune import (
     DECODE_AUTOTUNE_CONFIGS,
-    SCATTER_FALLBACK_AUTOTUNE_CONFIGS,
+    POINTWISE_FALLBACK_AUTOTUNE_CONFIGS,
 )
 from .primitives import decode_symbol, pack_bf16
 
@@ -200,26 +200,21 @@ def pointwise_compressed_dense_kernel(
             shift = tl.where(crosses_word, next_shift - 32, next_shift)
 
 
-@triton.autotune(
-    configs=SCATTER_FALLBACK_AUTOTUNE_CONFIGS,
-    key=["n_elements", "N_LANES", "N_STEPS", "BLOCK"],
-)
 @triton.jit
-def pointwise_compressed_dense_fallback_kernel(
+def _pointwise_fallback_impl(
     bad_streams, bad_starts, fallback_offsets,
-    fallback_buffer, fallback_base, metadata, descriptor, fallback_count,
-    sign_mantissa, other, output, auxiliary, n_elements,
-    OP: tl.constexpr, OUTPUT_POLICY: tl.constexpr, BUFFERED: tl.constexpr,
+    fallback_buffer, fallback_base, metadata, descriptor, count,
+    sign_mantissa, other, output, auxiliary, n_elements, tile_id,
+    alpha_value, beta_value,
+    OP: tl.constexpr, SCALED: tl.constexpr,
+    SCALE_OTHER: tl.constexpr, ALPHA_IS_ONE: tl.constexpr,
+    OUTPUT_POLICY: tl.constexpr, BUFFERED: tl.constexpr,
     LOGICAL_NUMEL: tl.constexpr,
-    TILE: tl.constexpr, BLOCK: tl.constexpr,
+    TILE: tl.constexpr, ROW_TILE: tl.constexpr, BLOCK: tl.constexpr,
     N_LANES: tl.constexpr, N_STEPS: tl.constexpr,
 ):
-    """Recompute pointwise results for stream tails stored in fallback storage."""
-    pid = tl.program_id(0)
-    tile = pid * TILE + tl.arange(0, TILE)
-    count = tl.load(fallback_count).to(tl.int32)
-    if pid * TILE >= count:
-        return
+    """Process absolute overflow rows with coalesced side-byte and operand loads."""
+    tile = tile_id * TILE + tl.arange(0, TILE)
     valid = tile < count
     if BUFFERED:
         base = tl.load(descriptor).to(tl.int32)
@@ -236,36 +231,71 @@ def pointwise_compressed_dense_fallback_kernel(
     else:
         stream = tl.load(bad_streams + tile, mask=valid, other=0)
         start = tl.load(bad_starts + tile, mask=valid, other=N_STEPS)
-        fallback_offset = tl.load(
-            fallback_offsets + tile, mask=valid, other=0,
-        )
+        fallback_offset = tl.load(fallback_offsets + tile, mask=valid, other=0)
     stream = stream.to(tl.int32)
     start = start.to(tl.int32)
     fallback_offset = fallback_offset.to(tl.int32)
     block = stream // N_LANES
-    lane = stream - block * N_LANES
-    tail_steps = N_STEPS - start
-    max_tail = tl.max(tl.where(valid, tail_steps, 0), axis=0)
-    for tail_step in tl.range(0, max_tail):
-        step = start + tail_step
+    lane = stream % N_LANES
+    first_step = tl.min(tl.where(valid, start, N_STEPS), axis=0)
+    row_offsets = tl.arange(0, ROW_TILE)
+    for first in tl.range(first_step, N_STEPS, ROW_TILE):
+        row = first + row_offsets
         offset, logical_offset, storage_valid, logical_valid = _pointwise_location(
-            block, step, lane, n_elements, LOGICAL_NUMEL,
-            BLOCK, N_LANES, N_STEPS,
+            block[None, :], row[:, None], lane[None, :], n_elements,
+            LOGICAL_NUMEL, BLOCK, N_LANES, N_STEPS,
         )
-        active = valid & (tail_step < tail_steps) & storage_valid
+        active = (
+            valid[None, :] & (row[:, None] >= start[None, :])
+            & (row[:, None] < N_STEPS) & storage_valid
+        )
         logical_active = active & logical_valid
+        tail_offset = fallback_offset[None, :] + row[:, None] - start[None, :]
         exponent = tl.load(
-            fallback_buffer + fallback_base + fallback_offset + tail_step,
+            fallback_buffer + fallback_base + tail_offset,
             mask=active, other=0,
         ).to(tl.int32)
         sm = tl.load(sign_mantissa + offset, mask=active, other=0, cache_modifier='.cg')
-        left = pack_bf16(exponent, sm).to(tl.int16).to(
-            tl.bfloat16, bitcast=True
-        )
+        left = pack_bf16(exponent, sm).to(tl.int16).to(tl.bfloat16, bitcast=True)
         right = tl.load(other + logical_offset, mask=logical_active, other=0.0, cache_modifier='.cg')
+        if SCALED:
+            result = OP(left, right, alpha_value, beta_value, SCALE_OTHER, ALPHA_IS_ONE)
+        else:
+            result = OP(left, right)
         _store_result(
-            OP(left, right), output, auxiliary, offset, logical_offset,
+            result, output, auxiliary, offset, logical_offset,
             logical_active, active, OUTPUT_POLICY,
+        )
+
+
+@triton.autotune(
+    configs=POINTWISE_FALLBACK_AUTOTUNE_CONFIGS,
+    key=["n_elements", "N_LANES", "N_STEPS", "BLOCK", "OUTPUT_POLICY", "OP"],
+)
+@triton.jit
+def pointwise_compressed_dense_fallback_kernel(
+    bad_streams, bad_starts, fallback_offsets,
+    fallback_buffer, fallback_base, metadata, descriptor, fallback_count,
+    sign_mantissa, other, output, auxiliary, n_elements,
+    OP: tl.constexpr, OUTPUT_POLICY: tl.constexpr, BUFFERED: tl.constexpr,
+    LOGICAL_NUMEL: tl.constexpr,
+    TILE: tl.constexpr, BLOCK: tl.constexpr,
+    N_LANES: tl.constexpr, N_STEPS: tl.constexpr, ROW_TILE: tl.constexpr,
+):
+    """Recompute overflow results using a bounded grid of persistent programs."""
+    count = tl.load(fallback_count).to(tl.int32)
+    if tl.program_id(0) * TILE >= count:
+        return
+    for tile_id in tl.range(tl.program_id(0), tl.cdiv(count, TILE), tl.num_programs(0)):
+        _pointwise_fallback_impl(
+            bad_streams, bad_starts, fallback_offsets, fallback_buffer,
+            fallback_base, metadata, descriptor, count,
+            sign_mantissa, other, output, auxiliary, n_elements, tile_id,
+            1.0, 1.0,
+            OP=OP, SCALED=False, SCALE_OTHER=False, ALPHA_IS_ONE=False,
+            OUTPUT_POLICY=OUTPUT_POLICY, BUFFERED=BUFFERED,
+            LOGICAL_NUMEL=LOGICAL_NUMEL, TILE=TILE, ROW_TILE=ROW_TILE,
+            BLOCK=BLOCK, N_LANES=N_LANES, N_STEPS=N_STEPS,
         )
 
 

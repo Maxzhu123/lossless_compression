@@ -7,6 +7,7 @@ import triton
 from ..comp_tensor import CompressedTensor
 from ..comp_format import StorageLayout
 from ..compression.huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
+from .autotune import SCATTER_GRID_LIMIT
 from .dispatch import compress_components, compress_dense, decode_dense
 from .geometry import geometry
 from ..kernels.common.tables import _shift_decoding_table_kernel
@@ -22,6 +23,7 @@ from ..kernels.pointwise_scalar import (
     pointwise_scalar_mul_add_dense_kernel,
 )
 from ..kernels.pointwise_scalar_dual import (
+    _initialize_dual_maps_kernel,
     _prepare_dual_tables_and_maps_kernel,
     pointwise_scalar_mul_add_compressed_compressed_mapped_kernel,
 )
@@ -78,7 +80,7 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
             BUFFERED=True, TILE=64, BLOCK=block_symbols,
             N_LANES=lanes, N_STEPS=steps,
         )
-        fallback_grid = (triton.cdiv(blocks * lanes, 64),)
+        fallback_grid = (min(triton.cdiv(blocks * lanes, 64), SCATTER_GRID_LIMIT),)
         pointwise_compressed_dense_fallback_kernel[fallback_grid](
             *fallback_args, LOGICAL_NUMEL=data.logical_numel, **fallback_meta,
         )
@@ -94,7 +96,7 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
             BUFFERED=False, TILE=64, BLOCK=block_symbols,
             N_LANES=lanes, N_STEPS=steps,
         )
-        fallback_grid = (triton.cdiv(data.offsets.numel(), 64),)
+        fallback_grid = (min(triton.cdiv(data.offsets.numel(), 64), SCATTER_GRID_LIMIT),)
         pointwise_compressed_dense_fallback_kernel[fallback_grid](
             *fallback_args, LOGICAL_NUMEL=data.logical_numel, **fallback_meta,
         )
@@ -157,7 +159,7 @@ def _launch_scalar_mul_add_compressed_dense(
             BUFFERED=True, TILE=64, BLOCK=block_symbols,
             N_LANES=lanes, N_STEPS=steps,
         )
-        fallback_grid = (triton.cdiv(blocks * lanes, 64),)
+        fallback_grid = (min(triton.cdiv(blocks * lanes, 64), SCATTER_GRID_LIMIT),)
         pointwise_scalar_mul_add_dense_fallback_kernel[fallback_grid](
             *fallback_args, LOGICAL_NUMEL=data.logical_numel, **fallback_meta,
         )
@@ -175,7 +177,7 @@ def _launch_scalar_mul_add_compressed_dense(
             BUFFERED=False, TILE=64, BLOCK=block_symbols,
             N_LANES=lanes, N_STEPS=steps,
         )
-        fallback_grid = (triton.cdiv(data.offsets.numel(), 64),)
+        fallback_grid = (min(triton.cdiv(data.offsets.numel(), 64), SCATTER_GRID_LIMIT),)
         pointwise_scalar_mul_add_dense_fallback_kernel[fallback_grid](
             *fallback_args, LOGICAL_NUMEL=data.logical_numel, **fallback_meta,
         )
@@ -185,7 +187,7 @@ def _launch_scalar_mul_add_compressed_dense(
 def _launch_scalar_mul_add_compressed_compressed(
     data, other, alpha, output_policy,
 ):
-    """Launch fixed-main and fallback-tile passes for two compressed operands."""
+    """Prepare fallback maps, then decode and compute both compressed operands."""
     _, a_decode_table, rare_length_a = get_distribution_tables(data.distribution)
     _, b_decode_table, rare_length_b = get_distribution_tables(other.distribution)
     if rare_length_a != rare_length_b:
@@ -227,14 +229,20 @@ def _launch_scalar_mul_add_compressed_compressed(
 
     streams = blocks * lanes
 
-    # Direct per-stream fallback maps make the fallback tile pass O(fallback_count)
-    # instead of O(blocks * fallback_count).
-    a_stream_starts = torch.full((streams,), steps, dtype=torch.int32, device=data.data.device)
-    a_stream_offsets = torch.zeros(streams, dtype=torch.int32, device=data.data.device)
-    b_stream_starts = torch.full((streams,), steps, dtype=torch.int32, device=other.data.device)
-    b_stream_offsets = torch.zeros(streams, dtype=torch.int32, device=other.data.device)
+    # Direct maps avoid scanning the full fallback list in every codec block.
+    # Initialize before scattering metadata so the launches cannot race.
+    a_stream_starts = torch.empty(streams, dtype=torch.int32, device=data.data.device)
+    a_stream_offsets = torch.empty(streams, dtype=torch.int32, device=data.data.device)
+    b_stream_starts = torch.empty(streams, dtype=torch.int32, device=other.data.device)
+    b_stream_offsets = torch.empty(streams, dtype=torch.int32, device=other.data.device)
 
-    _prepare_dual_tables_and_maps_kernel[(2 + triton.cdiv(streams, 1024),)](
+    _initialize_dual_maps_kernel[(triton.cdiv(streams, 1024),)](
+        a_stream_starts, a_stream_offsets, b_stream_starts, b_stream_offsets,
+        data.fallback_count, other.fallback_count, streams,
+        N_STEPS=steps, BLOCK=1024,
+    )
+    map_grid = (2 + min(triton.cdiv(streams, 1024), SCATTER_GRID_LIMIT),)
+    _prepare_dual_tables_and_maps_kernel[map_grid](
         a_decode_table, data.center, a_shifted_decode,
         b_decode_table, other.center, b_shifted_decode,
         a_bad_streams, a_bad_starts, a_fb_offsets, a_metadata,
@@ -285,9 +293,8 @@ def pointwise_scale_add_compressed(
 ) -> torch.Tensor | CompressedTensor:
     """Apply ``alpha * data + other`` where both operands are compressed.
 
-    Uses the fused two-compressed matrix path (fixed-main and fallback-tile
-    passes) for blocked operands with the same geometry, including both
-    private and buffered fallback storage.
+    Uses one fused decode/compute pass for blocked operands with the same
+    geometry, including both private and buffered fallback storage.
     """
     same_layout = (
         data.layout == StorageLayout.COMPRESSED

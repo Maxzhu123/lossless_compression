@@ -1,8 +1,8 @@
 """Fused pointwise kernels for two compressed BF16 operands.
 
 Computes ``output = alpha * a + b`` without materialising either operand as a
-dense tensor.  The implementation uses a fixed-stream main kernel followed by
-parallel fallback-tile kernels, handling private and buffered fallback storage.
+dense tensor. Per-stream maps let the main kernel read either fixed payload
+or overflow storage, supporting private and buffered allocations.
 """
 
 import triton
@@ -11,6 +11,24 @@ from triton import language as tl
 from ..codec.autotune import DUAL_DECODE_AUTOTUNE_CONFIGS
 from .primitives import decode_symbol, pack_bf16
 from .pointwise import _pointwise_location, _store_result
+
+
+@triton.jit
+def _initialize_dual_maps_kernel(
+    a_stream_starts, a_stream_offsets, b_stream_starts, b_stream_offsets,
+    a_fallback_count, b_fallback_count, n_streams,
+    N_STEPS: tl.constexpr, BLOCK: tl.constexpr,
+):
+    """Initialize both operands' maps in one launch when the decoder needs them."""
+    count = tl.load(a_fallback_count) + tl.load(b_fallback_count)
+    if count <= 16:
+        return
+    idx = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    valid = idx < n_streams
+    tl.store(a_stream_starts + idx, N_STEPS, mask=valid)
+    tl.store(b_stream_starts + idx, N_STEPS, mask=valid)
+    tl.store(a_stream_offsets + idx, 0, mask=valid)
+    tl.store(b_stream_offsets + idx, 0, mask=valid)
 
 
 @triton.jit
@@ -53,39 +71,44 @@ def _prepare_dual_tables_and_maps_kernel(
         tl.store(shifted_decode + idx, shifted)
         return
 
-    offs = (pid - N_SHIFT) * 1024 + tl.arange(0, 1024)
-
     a_count = tl.load(a_fallback_count).to(tl.int32)
-    a_valid = offs < a_count
-    if tl.sum(a_valid.to(tl.int32)) > 0:
-        if BUFFERED:
-            base = tl.load(a_descriptor).to(tl.int32)
-            base_words = base // 4
-            stream = tl.load(a_metadata + base_words + offs, mask=a_valid, other=0).to(tl.int32)
-            start = tl.load(a_bad_starts + base + 8 * a_count + offs, mask=a_valid, other=0).to(tl.int32)
-            offset = tl.load(a_metadata + base_words + a_count + offs, mask=a_valid, other=0).to(tl.int32)
-        else:
-            stream = tl.load(a_bad_streams + offs, mask=a_valid, other=0).to(tl.int32)
-            start = tl.load(a_bad_starts + offs, mask=a_valid, other=0).to(tl.int32)
-            offset = tl.load(a_fallback_offsets + offs, mask=a_valid, other=0).to(tl.int32)
-        tl.store(a_stream_starts + stream, start, mask=a_valid)
-        tl.store(a_stream_offsets + stream, offset, mask=a_valid)
-
     b_count = tl.load(b_fallback_count).to(tl.int32)
-    b_valid = offs < b_count
-    if tl.sum(b_valid.to(tl.int32)) > 0:
-        if BUFFERED:
-            base = tl.load(b_descriptor).to(tl.int32)
-            base_words = base // 4
-            stream = tl.load(b_metadata + base_words + offs, mask=b_valid, other=0).to(tl.int32)
-            start = tl.load(b_bad_starts + base + 8 * b_count + offs, mask=b_valid, other=0).to(tl.int32)
-            offset = tl.load(b_metadata + base_words + b_count + offs, mask=b_valid, other=0).to(tl.int32)
-        else:
-            stream = tl.load(b_bad_streams + offs, mask=b_valid, other=0).to(tl.int32)
-            start = tl.load(b_bad_starts + offs, mask=b_valid, other=0).to(tl.int32)
-            offset = tl.load(b_fallback_offsets + offs, mask=b_valid, other=0).to(tl.int32)
-        tl.store(b_stream_starts + stream, start, mask=b_valid)
-        tl.store(b_stream_offsets + stream, offset, mask=b_valid)
+    if a_count + b_count <= 16:
+        return
+    # A separate initialization launch precedes these disjoint scatter writes.
+    # Iterate over the actual GPU counts instead of every possible stream.
+    tiles = tl.cdiv(tl.maximum(a_count, b_count), 1024)
+    for tile in tl.range(pid - N_SHIFT, tiles, tl.num_programs(0) - N_SHIFT):
+        offs = tile * 1024 + tl.arange(0, 1024)
+        a_valid = offs < a_count
+        if tl.sum(a_valid.to(tl.int32)) > 0:
+            if BUFFERED:
+                base = tl.load(a_descriptor).to(tl.int32)
+                base_words = base // 4
+                stream = tl.load(a_metadata + base_words + offs, mask=a_valid, other=0).to(tl.int32)
+                start = tl.load(a_bad_starts + base + 8 * a_count + offs, mask=a_valid, other=0).to(tl.int32)
+                offset = tl.load(a_metadata + base_words + a_count + offs, mask=a_valid, other=0).to(tl.int32)
+            else:
+                stream = tl.load(a_bad_streams + offs, mask=a_valid, other=0).to(tl.int32)
+                start = tl.load(a_bad_starts + offs, mask=a_valid, other=0).to(tl.int32)
+                offset = tl.load(a_fallback_offsets + offs, mask=a_valid, other=0).to(tl.int32)
+            tl.store(a_stream_starts + stream, start, mask=a_valid)
+            tl.store(a_stream_offsets + stream, offset, mask=a_valid)
+
+        b_valid = offs < b_count
+        if tl.sum(b_valid.to(tl.int32)) > 0:
+            if BUFFERED:
+                base = tl.load(b_descriptor).to(tl.int32)
+                base_words = base // 4
+                stream = tl.load(b_metadata + base_words + offs, mask=b_valid, other=0).to(tl.int32)
+                start = tl.load(b_bad_starts + base + 8 * b_count + offs, mask=b_valid, other=0).to(tl.int32)
+                offset = tl.load(b_metadata + base_words + b_count + offs, mask=b_valid, other=0).to(tl.int32)
+            else:
+                stream = tl.load(b_bad_streams + offs, mask=b_valid, other=0).to(tl.int32)
+                start = tl.load(b_bad_starts + offs, mask=b_valid, other=0).to(tl.int32)
+                offset = tl.load(b_fallback_offsets + offs, mask=b_valid, other=0).to(tl.int32)
+            tl.store(b_stream_starts + stream, start, mask=b_valid)
+            tl.store(b_stream_offsets + stream, offset, mask=b_valid)
 
 
 @triton.autotune(

@@ -25,11 +25,8 @@ COMPACT_BAD_STREAMS_AUTOTUNE_CONFIGS = [
 COMPACT_EXTRA_AUTOTUNE_CONFIGS = [
     triton.Config({"TILE": 32, "ROW_TILE": 16}, num_warps=4, num_stages=2),
 ]
-SCATTER_FALLBACK_AUTOTUNE_CONFIGS = [
-    triton.Config({}, num_warps=1, num_stages=2),
-    triton.Config({}, num_warps=2, num_stages=2),
-    triton.Config({}, num_warps=4, num_stages=2),
-    triton.Config({}, num_warps=2, num_stages=3),
+POINTWISE_FALLBACK_AUTOTUNE_CONFIGS = [
+    triton.Config({"ROW_TILE": 16}, num_warps=4, num_stages=2),
 ]
 DECODE_AUTOTUNE_CONFIGS = [
     triton.Config({}, num_warps=8, num_stages=2),
