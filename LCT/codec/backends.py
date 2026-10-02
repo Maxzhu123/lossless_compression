@@ -11,11 +11,13 @@ from .interfaces import KernelBackend
 
 def decode(data):
     """Select the decoder from the runtime configuration without probing support."""
-    if not config.use_tilelang:
+    if config.use_tilelang:
+        from ..kernels.tilelang.decode import decode as decode_tilelang
+        return decode_tilelang(data)
+    else:
         return decode_triton(data)
-    from ..kernels.tilelang.decode import decode as decode_tilelang
 
-    return decode_tilelang(data)
+
 
 
 GENERIC = KernelBackend(

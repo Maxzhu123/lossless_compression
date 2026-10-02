@@ -6,7 +6,7 @@ When enabled, TileLang is assumed to be installed and usable on the device.
 
 import os
 
-use_tilelang: bool = True
+use_tilelang: bool = False
 
 # Retune on each program run, retaining compiled kernels.
 reset_cache: bool = True
