@@ -9,7 +9,7 @@ import os
 use_tilelang: bool = True
 
 # Retune on each program run, retaining compiled kernels.
-reset_cache: bool = False
+reset_cache: bool = True
 
 if use_tilelang and reset_cache:
     os.environ["TILELANG_AUTO_TUNING_DISABLE_CACHE"] = "1"

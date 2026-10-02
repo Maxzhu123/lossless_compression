@@ -1,5 +1,8 @@
 """TileLang Huffman decoding with native autotuning."""
 
+import logging
+import os
+
 import torch
 import tilelang
 import tilelang.language as T
@@ -10,6 +13,65 @@ from .autotune import DECODE_AUTOTUNE_CONFIGS
 
 
 _PASS_CONFIGS = {"tl.disable_safe_memory_legalize": True, "tl.disable_warp_specialized": True}
+
+
+class _QuietTqdm:
+    """No-op stand-in for the tuner's ``tqdm``, silencing bars and writes."""
+
+    def __init__(self, *args, **kwargs):
+        self.n = 0
+        self.total = kwargs.get("total", 0)
+
+    def update(self, n=1):
+        self.n += n
+
+    def set_postfix(self, *args, **kwargs):
+        pass
+
+    def refresh(self):
+        pass
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    @staticmethod
+    def write(*args, **kwargs):
+        pass
+
+
+def silence_autotune() -> None:
+    """Mute TileLang's autotuning console chatter for the current process.
+
+    TileLang prints progress bars, a ``Tuned Latency`` line per candidate,
+    kernel compile notices, and tuner log records while autotuning. None of it
+    is actionable during normal decoding, so this drops the console side:
+
+    * progress bars and ``tqdm.write`` output (via a quiet ``tqdm`` shim —
+      ``TQDM_DISABLE`` alone is not enough because tqdm reads it at import time
+      and ``tqdm.write`` ignores it),
+    * ``[TileLang:...]`` compile notices, and
+    * the autotuner logger's INFO/WARNING records.
+
+    The on-disk ``autotuner.log`` keeps recording, and real errors still show.
+    Set ``LCT_TILELANG_VERBOSE=1`` to keep the output.
+    """
+    os.environ.setdefault("TQDM_DISABLE", "1")
+    # tilelang.set_log_level(logging.ERROR)
+    logging.getLogger("tilelang.autotuner.tuner").setLevel(logging.ERROR)
+    from tilelang.autotuner import tuner as _tuner
+
+    _tuner.tqdm = _QuietTqdm
+
+
+if os.environ.get("LCT_TILELANG_VERBOSE", "").lower() not in ("1", "true", "yes", "on"):
+    silence_autotune()
+
 
 # Integer intrinsics preserve every BF16 representation, including NaN payloads.
 _DEVICE_SOURCE = r"""
@@ -23,8 +85,8 @@ __device__ __forceinline__ void lct_decode_store4(short* output, const short* so
 """
 
 
-@tilelang.autotune(configs=list(DECODE_AUTOTUNE_CONFIGS), warmup=3, rep=15)
-@tilelang.jit(pass_configs=_PASS_CONFIGS)
+@tilelang.autotune(configs=list(DECODE_AUTOTUNE_CONFIGS), warmup=3, rep=5)
+@tilelang.jit(pass_configs=_PASS_CONFIGS, verbose=False)
 def decode_kernel(encoded, side, base_table, center, output,
                   block_symbols, lanes, steps, fixed_words, rare_length,
                   index_dtype="int32", threads=256, row_tile=8, unroll=4):
