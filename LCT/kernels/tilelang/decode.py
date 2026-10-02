@@ -1,76 +1,17 @@
 """TileLang Huffman decoding with native autotuning."""
 
-import logging
-import os
-
 import torch
 import tilelang
 import tilelang.language as T
 
-from ...compression.huffman_tables import get_distribution_tables
-from ..generic.decode import _restore_fallback
 from .autotune import DECODE_AUTOTUNE_CONFIGS
+from .tilelang_utils import silence_autotune
 
 
 _PASS_CONFIGS = {"tl.disable_safe_memory_legalize": True, "tl.disable_warp_specialized": True}
 
 
-class _QuietTqdm:
-    """No-op stand-in for the tuner's ``tqdm``, silencing bars and writes."""
-
-    def __init__(self, *args, **kwargs):
-        self.n = 0
-        self.total = kwargs.get("total", 0)
-
-    def update(self, n=1):
-        self.n += n
-
-    def set_postfix(self, *args, **kwargs):
-        pass
-
-    def refresh(self):
-        pass
-
-    def close(self):
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-    @staticmethod
-    def write(*args, **kwargs):
-        pass
-
-
-def silence_autotune() -> None:
-    """Mute TileLang's autotuning console chatter for the current process.
-
-    TileLang prints progress bars, a ``Tuned Latency`` line per candidate,
-    kernel compile notices, and tuner log records while autotuning. None of it
-    is actionable during normal decoding, so this drops the console side:
-
-    * progress bars and ``tqdm.write`` output (via a quiet ``tqdm`` shim —
-      ``TQDM_DISABLE`` alone is not enough because tqdm reads it at import time
-      and ``tqdm.write`` ignores it),
-    * ``[TileLang:...]`` compile notices, and
-    * the autotuner logger's INFO/WARNING records.
-
-    The on-disk ``autotuner.log`` keeps recording, and real errors still show.
-    Set ``LCT_TILELANG_VERBOSE=1`` to keep the output.
-    """
-    os.environ.setdefault("TQDM_DISABLE", "1")
-    # tilelang.set_log_level(logging.ERROR)
-    logging.getLogger("tilelang.autotuner.tuner").setLevel(logging.ERROR)
-    from tilelang.autotuner import tuner as _tuner
-
-    _tuner.tqdm = _QuietTqdm
-
-
-if os.environ.get("LCT_TILELANG_VERBOSE", "").lower() not in ("1", "true", "yes", "on"):
-    silence_autotune()
+silence_autotune()
 
 
 # Integer intrinsics preserve every BF16 representation, including NaN payloads.
@@ -87,9 +28,10 @@ __device__ __forceinline__ void lct_decode_store4(short* output, const short* so
 
 @tilelang.autotune(configs=list(DECODE_AUTOTUNE_CONFIGS), warmup=3, rep=5)
 @tilelang.jit(pass_configs=_PASS_CONFIGS, verbose=False)
-def decode_kernel(encoded, side, base_table, center, output,
-                  block_symbols, lanes, steps, fixed_words, rare_length,
-                  index_dtype="int32", threads=256, row_tile=8, unroll=4):
+def decode_kernel(encoded: torch.Tensor, side: torch.Tensor, base_table: torch.Tensor,
+                  center: torch.Tensor, output: torch.Tensor,
+                  block_symbols: int, lanes: int, steps: int, fixed_words: int, rare_length: int,
+                  threads: int = 256, row_tile: int = 8, unroll: int = 4) -> None:
     """Autotune and launch the Huffman decoder in TileLang's eager style.
 
     The three runtime sizes come from the tensor shapes (``encoded``, ``side``
@@ -102,9 +44,7 @@ def decode_kernel(encoded, side, base_table, center, output,
     if row_tile < 4 or row_tile % 2 or steps % row_tile or unroll < 1:
         raise ValueError("Decoder row tiles must divide the stream length and contain whole pairs")
     streams_per_thread = lanes // threads
-    logical_numel = T.const("logical_numel", dtype=index_dtype)
-    storage_numel = T.const("storage_numel", dtype=index_dtype)
-    payload_numel = T.const("payload_numel", dtype=index_dtype)
+    logical_numel, storage_numel, payload_numel = T.const("logical_numel, storage_numel, payload_numel")
     encoded: T.Tensor((payload_numel,), "int32")
     side: T.Tensor((storage_numel,), "uint8")
     base_table: T.Tensor((1024,), "int32")
@@ -200,20 +140,3 @@ def decode_kernel(encoded, side, base_table, center, output,
                                 if out + item < logical_numel:
                                     output[out + item] = decoded[row, col_start + item]
                     T.sync_threads()
-
-
-def decode(data):
-    """Decode using TileLang's eager autotuned decoder."""
-    logical_numel = data.logical_numel
-    output = torch.empty(logical_numel, dtype=torch.int16, device=data.data.device)
-    if logical_numel:
-        _, base_table, rare_length = get_distribution_tables(data.distribution)
-        index_dtype = "int32" if max(logical_numel, data.size, data.data.numel()) < 2**31 - 65536 else "int64"
-        block_symbols, lanes, steps, fixed_words = data.codec_geometry
-        with torch.cuda.device(data.data.device):
-            decode_kernel(data.data, data.sign_mantissa, base_table, data.center, output,
-                          block_symbols, lanes, steps, fixed_words, rare_length,
-                          index_dtype=index_dtype)
-        _restore_fallback(data, output)
-    return output.view(torch.bfloat16).reshape(data.shape)
-

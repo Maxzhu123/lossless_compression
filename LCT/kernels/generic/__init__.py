@@ -1,1 +1,1 @@
-"""Generic codec implementation; operation modules own kernels and launches."""
+"""Generic Triton codec kernels, launched by the shared codec pipeline."""

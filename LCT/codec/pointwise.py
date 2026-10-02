@@ -8,7 +8,8 @@ from ..comp_tensor import CompressedTensor
 from ..comp_format import StorageLayout
 from ..compression.huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
 from .autotune import SCATTER_GRID_LIMIT
-from .dispatch import compress_components, compress_dense, decode_dense
+from .encode import encode as compress_dense, encode_components as compress_components
+from .decode import decode as decode_dense
 from .geometry import geometry
 from ..kernels.common.tables import _shift_decoding_table_kernel
 from ..kernels.pointwise import (

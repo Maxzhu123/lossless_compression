@@ -3,7 +3,7 @@
 import torch
 
 from ..comp_format import Distribution, DistType, NoiseLevel
-from .device import device_profile
+from ..kernels.device import device_profile
 
 BLOCK_SYMBOLS = 65536
 LANES = 256

@@ -3,7 +3,7 @@
 import torch
 import triton
 
-from .device import device_profile
+from ..kernels.device import device_profile
 
 
 ESTIMATE_CENTER_AUTOTUNE_CONFIGS = [

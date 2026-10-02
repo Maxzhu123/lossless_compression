@@ -3,7 +3,8 @@ from typing import TYPE_CHECKING
 import torch
 
 from .comp_format import Distribution, StorageLayout
-from .codec.dispatch import compress_dense, decode_dense
+from .codec.encode import encode as compress_dense
+from .codec.decode import decode as decode_dense
 from .codec.pointwise import (
     ADD, MULTIPLY, SCALAR_MUL_ADD,
     pointwise_compressed_dense, pointwise_scale_add_compressed,

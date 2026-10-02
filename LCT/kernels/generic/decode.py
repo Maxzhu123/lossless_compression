@@ -1,16 +1,9 @@
-"""Generic dense decoding and overflow restoration."""
+"""Triton fixed-payload Huffman decoding kernel."""
 
-import torch
 import triton
 from triton import language as tl
 
-from ...codec.autotune import (
-    DECODE_AUTOTUNE_CONFIGS, SCATTER_GRID_LIMIT,
-)
-from ...comp_tensor import CompressedTensor
-from ...compression.huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
-from ..common.tables import _shift_decoding_table_kernel
-from .compaction import _scatter_blocked_fallback_kernel
+from ...codec.autotune import DECODE_AUTOTUNE_CONFIGS
 
 
 @triton.autotune(
@@ -205,66 +198,3 @@ def _decode_kernel(
             word += crosses_word
             shift = tl.where(crosses_word, next_shift - 32, next_shift)
             storage_offset += 2 * N_LANES
-
-
-def decode(data: CompressedTensor) -> torch.Tensor:
-    """Decode blocked storage directly into its original logical tensor shape."""
-    device = data.data.device
-    logical_numel = data.logical_numel
-    _, decode_table, rare_length = get_distribution_tables(data.distribution)
-    shifted_decode = torch.empty(
-        1 << FIRST_BITS, dtype=torch.int32, device=device,
-    )
-    _shift_decoding_table_kernel[(1,)](
-        decode_table, data.center, shifted_decode,
-        BLOCK=1 << FIRST_BITS,
-    )
-    block_symbols, lanes, steps, fixed_words = data.codec_geometry
-    blocks = triton.cdiv(data.size, block_symbols)
-    streams = blocks * lanes
-    output = torch.empty(logical_numel, dtype=torch.int16, device=device)
-
-    _decode_kernel[(blocks,)](
-        data.data, data.sign_mantissa, output, shifted_decode,
-        data.size, streams, data.center,
-        LOGICAL_NUMEL=logical_numel,
-        FIRST_MASK=FIRST_MASK, RARE_LENGTH=rare_length,
-        BLOCK=block_symbols, N_LANES=lanes, N_STEPS=steps,
-        FIXED_WORDS=fixed_words,
-        ON_DEMAND=logical_numel > 600_000_000,
-    )
-    _restore_fallback(data, output)
-    return output.view(torch.bfloat16).reshape(data.shape)
-
-
-def _restore_fallback(data: CompressedTensor, output: torch.Tensor) -> None:
-    """Restore compact overflow tails for either fixed-payload decoder."""
-    logical_numel = data.logical_numel
-    block_symbols, lanes, steps, _ = data.codec_geometry
-    blocks = triton.cdiv(data.size, block_symbols)
-    streams = blocks * lanes
-    scatter_tile = 64
-    scatter_meta = dict(
-        LOGICAL_NUMEL=logical_numel,
-        TILE=scatter_tile, BLOCK=block_symbols, N_LANES=lanes, N_STEPS=steps,
-    )
-
-    def scatter_grid(stream_count):
-        programs = triton.cdiv(stream_count, scatter_tile)
-        return (min(programs, SCATTER_GRID_LIMIT),)
-
-    if data.fallback_descriptor is not None:
-        metadata = data.fallback_buffer.view(torch.int32)
-        _scatter_blocked_fallback_kernel[scatter_grid(streams)](
-            metadata, data.fallback_buffer, metadata, data.fallback_buffer, 0,
-            metadata, data.fallback_descriptor, data.fallback_count,
-            data.sign_mantissa, output, data.size,
-            BUFFERED=True, **scatter_meta,
-        )
-    elif data.offsets.numel():
-        _scatter_blocked_fallback_kernel[scatter_grid(data.offsets.numel())](
-            data.offsets, data.fallback_starts, data.fallback_offsets,
-            data.fallback_buffer, data.fallback_base, data.offsets,
-            data.offsets, data.fallback_count, data.sign_mantissa,
-            output, data.size, BUFFERED=False, **scatter_meta,
-        )
