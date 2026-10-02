@@ -8,8 +8,8 @@ or overflow storage, supporting private and buffered allocations.
 import triton
 from triton import language as tl
 
-from ..codec.autotune import DUAL_DECODE_AUTOTUNE_CONFIGS
-from .primitives import decode_symbol, pack_bf16
+from ...codec.autotune import DUAL_DECODE_AUTOTUNE_CONFIGS
+from ..primitives import decode_symbol, pack_bf16
 from .pointwise import _pointwise_location, _store_result
 
 

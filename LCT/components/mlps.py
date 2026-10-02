@@ -4,7 +4,7 @@ import torch
 from torch.autograd import Function
 
 from LCT.LCTensor import LCTTensor
-from LCT.dist_configs import act_dist, act_relu_dist
+from LCT.components.dist_configs import act_dist, act_relu_dist
 
 if TYPE_CHECKING:
     from LCT.tensor_buffer import TensorBuffer

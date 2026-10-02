@@ -3,11 +3,11 @@
 import triton
 from triton import language as tl
 
-from ..codec.autotune import (
+from ...codec.autotune import (
     DECODE_AUTOTUNE_CONFIGS,
     POINTWISE_FALLBACK_AUTOTUNE_CONFIGS,
 )
-from .primitives import decode_symbol, pack_bf16
+from ..primitives import decode_symbol, pack_bf16
 
 
 DENSE_OUTPUT = tl.constexpr(0)

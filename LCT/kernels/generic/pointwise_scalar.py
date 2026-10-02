@@ -7,11 +7,11 @@ hot path does not pay any scalar/alpha overhead.
 import triton
 from triton import language as tl
 
-from ..codec.autotune import (
+from ...codec.autotune import (
     DECODE_AUTOTUNE_CONFIGS,
     POINTWISE_FALLBACK_AUTOTUNE_CONFIGS,
 )
-from .primitives import decode_symbol, pack_bf16
+from ..primitives import decode_symbol, pack_bf16
 from .pointwise import (
     _pointwise_location,
     _pointwise_fallback_impl,

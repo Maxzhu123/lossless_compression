@@ -1,13 +1,11 @@
 from typing import Iterable, TYPE_CHECKING
 import math
 import torch
-import triton
 from torch import Tensor
 
 from LCT.LCTensor import LCTTensor
 from LCT.compress import a_compA_add_B
-from LCT.dist_configs import momentum_dist, momentum_first_dist
-from LCT.kernels.optimizer import muon_dense_update_kernel
+from LCT.components.dist_configs import momentum_dist, momentum_first_dist
 if TYPE_CHECKING:
     from LCT.tensor_buffer import TensorBuffer
 
@@ -102,7 +100,7 @@ class SparseMuon:
 
     def __init__(self, params: Iterable[LCTTensor | Tensor], lr=0.02, weight_decay=0, mu=0.95,
                  buffer: TensorBuffer|None=None, compressed=True, distribution=None,
-                 match_weight_update=False, zero_first_step=False, ns_iters=5):
+                 zero_first_step=False, ns_iters=5):
         self.params = list(params)
         for p in self.params:
             assert isinstance(p, (LCTTensor, Tensor)) and p.ndim >= 2, "Muon requires matrix parameters"
@@ -110,10 +108,7 @@ class SparseMuon:
         self.weight_decay = weight_decay
         self.mu = mu
         self.distribution = distribution or momentum_dist
-        self.match_weight_update = match_weight_update
         self.decay = torch.tensor([1 - lr * weight_decay], dtype=torch.float32, device="cuda")
-        if match_weight_update and any(p.ndim != 2 for p in self.params):
-            raise ValueError("Matching fused weight updates require matrix parameters")
         self.compressed = compressed
         self.buffer = buffer
 
@@ -153,19 +148,9 @@ class SparseMuon:
             # 2) Apply weight decay and the Muon update.
             if isinstance(p, LCTTensor):
                 p.mul_add_(self.decay, update, beta=self.neg_lr, alpha_is_one=self.weight_decay == 0)
-            elif self.match_weight_update:
-                muon_dense_update_kernel[(triton.cdiv(p.numel(), 1024),)](
-                    p, update, self.decay, self.neg_lr, p.numel(), p.shape[1],
-                    *p.stride(), *update.stride(),
-                    ALPHA_IS_ONE=self.weight_decay == 0, BLOCK=1024,
-                )
             else:
                 p.mul_(1 - self.lr * self.weight_decay)
                 p.add_(update, alpha=-self.lr)
-            if self.match_weight_update:
-                # Raw Triton writes and wrapper updates bypass PyTorch's
-                # automatic in-place version increment.
-                torch.autograd.graph.increment_version(p)
             del update
 
         self.first_step = False

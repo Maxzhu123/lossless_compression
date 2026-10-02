@@ -10,7 +10,7 @@ from LCT.tensor_buffer import TensorBuffer, visualize_buffer
 from LCT.LCTensor import LCTTensor
 from LCT.components.sparse_utils import SparseSGDM, SparseMuon
 from LCT.components.mlps import RMSFFN
-from LCT.dist_configs import weight_dist
+from LCT.components.dist_configs import weight_dist
 
 # Independent compression options; optimiser compression applies to momentum state.
 COMPRESS_WEIGHTS = False

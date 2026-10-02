@@ -31,3 +31,4 @@ nanogpt/data/fineweb10B/
 
 # TileLang runtime tuning diagnostics
 /autotuner.log
+*.log

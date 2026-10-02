@@ -12,18 +12,18 @@ from .encode import encode as compress_dense, encode_components as compress_comp
 from .decode import decode as decode_dense
 from .geometry import geometry
 from ..kernels.common.tables import _shift_decoding_table_kernel
-from ..kernels.pointwise import (
+from ..kernels.generic.pointwise import (
     COMPRESSED_OUTPUT,
     DENSE_OUTPUT,
     pointwise_compressed_dense_fallback_kernel,
     pointwise_compressed_dense_kernel,
     add_op, multiply_op
 )
-from ..kernels.pointwise_scalar import (
+from ..kernels.generic.pointwise_scalar import (
     pointwise_scalar_mul_add_dense_fallback_kernel,
     pointwise_scalar_mul_add_dense_kernel,
 )
-from ..kernels.pointwise_scalar_dual import (
+from ..kernels.generic.pointwise_scalar_dual import (
     _initialize_dual_maps_kernel,
     _prepare_dual_tables_and_maps_kernel,
     pointwise_scalar_mul_add_compressed_compressed_mapped_kernel,
