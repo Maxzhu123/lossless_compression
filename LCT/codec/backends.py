@@ -4,13 +4,14 @@ import torch
 
 from ..kernels.generic.decode import decode as decode_triton
 from ..kernels.generic.encode import encode, encode_components
+from . import config
 from .device import device_profile
 from .interfaces import KernelBackend
 
 
 def decode(data):
-    """Use the optimized CUDA decoder and retain the portable Triton backend."""
-    if torch.version.hip is not None:
+    """Select the decoder from the runtime configuration without probing support."""
+    if not config.use_tilelang:
         return decode_triton(data)
     from ..kernels.tilelang.decode import decode as decode_tilelang
 

@@ -10,7 +10,7 @@ from LCT.comp_format import DistType, Distribution, NoiseLevel
 
 SIZE_WEIGHTS = {50_000_000: 3, 200_000_000: 1}
 WARMUP = 5
-ITERS = 30
+ITERS = 100
 
 
 def make_empirical(n: int, scale: float = 0.5, seed: int = 0) -> torch.Tensor:
