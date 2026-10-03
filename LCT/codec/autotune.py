@@ -64,6 +64,13 @@ elif _gpu.model == "geforce_rtx_3070_laptop_gpu":
         triton.Config({}, num_warps=4, num_stages=2, maxnreg=48),
         triton.Config({}, num_warps=8, num_stages=2, maxnreg=32),
     ]
+elif _gpu.model == "geforce_rtx_4090":
+    ENCODE_AUTOTUNE_CONFIGS = [
+        triton.Config({}, num_warps=4, num_stages=2),
+    ]
+    DECODE_AUTOTUNE_CONFIGS = [
+        triton.Config({}, num_warps=4, num_stages=2),
+    ]
 
 
 # Standalone scatter is separate from the fused-operation fallback configs.
@@ -75,3 +82,7 @@ DENSE_SCATTER_AUTOTUNE_CONFIGS = [
 SUMMARY_BLOCK_LIMIT = 8192
 COMPACT_GRID_LIMIT = 820
 SCATTER_GRID_LIMIT = 410
+
+if _gpu.model == "geforce_rtx_4090":
+    COMPACT_GRID_LIMIT = 4096
+    SCATTER_GRID_LIMIT = 8192
