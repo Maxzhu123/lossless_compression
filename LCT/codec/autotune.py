@@ -15,6 +15,7 @@ ENCODE_AUTOTUNE_CONFIGS = [
     triton.Config({}, num_warps=8, num_stages=2, maxnreg=64),
     triton.Config({}, num_warps=4, num_stages=2, maxnreg=64),
     triton.Config({}, num_warps=4, num_stages=3, maxnreg=64),
+    triton.Config({}, num_warps=2, num_stages=3)
 ]
 COMPACT_BAD_STREAMS_AUTOTUNE_CONFIGS = [
     triton.Config({"BLOCK": 1024}, num_warps=1, num_stages=2),
@@ -65,10 +66,10 @@ elif _gpu.model == "geforce_rtx_3070_laptop_gpu":
         triton.Config({}, num_warps=8, num_stages=2, maxnreg=32),
     ]
 elif _gpu.model == "geforce_rtx_4090":
-    ENCODE_AUTOTUNE_CONFIGS = [
+    ENCODE_AUTOTUNE_CONFIGS = [ *ENCODE_AUTOTUNE_CONFIGS,
         triton.Config({}, num_warps=4, num_stages=2),
     ]
-    DECODE_AUTOTUNE_CONFIGS = [
+    DECODE_AUTOTUNE_CONFIGS = [ *DECODE_AUTOTUNE_CONFIGS,
         triton.Config({}, num_warps=4, num_stages=2),
     ]
 
