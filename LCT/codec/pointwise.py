@@ -7,7 +7,7 @@ import triton
 from ..comp_tensor import CompressedTensor
 from ..comp_format import StorageLayout
 from ..compression.huffman_tables import FIRST_BITS, FIRST_MASK, get_distribution_tables
-from .autotune import SCATTER_GRID_LIMIT
+from .autotune import SCATTER_GRID_LIMIT, SCATTER_TILE
 from .encode import encode as compress_dense, encode_components as compress_components
 from .decode import decode as decode_dense
 from .geometry import geometry
@@ -78,10 +78,10 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
         )
         fallback_meta = dict(
             OP=operation.triton_fn, OUTPUT_POLICY=output_policy,
-            BUFFERED=True, TILE=64, BLOCK=block_symbols,
+            BUFFERED=True, TILE=SCATTER_TILE, BLOCK=block_symbols,
             N_LANES=lanes, N_STEPS=steps,
         )
-        fallback_grid = (min(triton.cdiv(blocks * lanes, 64), SCATTER_GRID_LIMIT),)
+        fallback_grid = (min(triton.cdiv(blocks * lanes, SCATTER_TILE), SCATTER_GRID_LIMIT),)
         pointwise_compressed_dense_fallback_kernel[fallback_grid](
             *fallback_args, LOGICAL_NUMEL=data.logical_numel, **fallback_meta,
         )
@@ -94,10 +94,10 @@ def _launch_pointwise_compressed_dense(data, other, operation, output_policy):
         )
         fallback_meta = dict(
             OP=operation.triton_fn, OUTPUT_POLICY=output_policy,
-            BUFFERED=False, TILE=64, BLOCK=block_symbols,
+            BUFFERED=False, TILE=SCATTER_TILE, BLOCK=block_symbols,
             N_LANES=lanes, N_STEPS=steps,
         )
-        fallback_grid = (min(triton.cdiv(data.offsets.numel(), 64), SCATTER_GRID_LIMIT),)
+        fallback_grid = (min(triton.cdiv(data.offsets.numel(), SCATTER_TILE), SCATTER_GRID_LIMIT),)
         pointwise_compressed_dense_fallback_kernel[fallback_grid](
             *fallback_args, LOGICAL_NUMEL=data.logical_numel, **fallback_meta,
         )
@@ -157,10 +157,10 @@ def _launch_scalar_mul_add_compressed_dense(
             SCALE_OTHER=beta is not None,
             ALPHA_IS_ONE=alpha_is_one,
             OUTPUT_POLICY=output_policy,
-            BUFFERED=True, TILE=64, BLOCK=block_symbols,
+            BUFFERED=True, TILE=SCATTER_TILE, BLOCK=block_symbols,
             N_LANES=lanes, N_STEPS=steps,
         )
-        fallback_grid = (min(triton.cdiv(blocks * lanes, 64), SCATTER_GRID_LIMIT),)
+        fallback_grid = (min(triton.cdiv(blocks * lanes, SCATTER_TILE), SCATTER_GRID_LIMIT),)
         pointwise_scalar_mul_add_dense_fallback_kernel[fallback_grid](
             *fallback_args, LOGICAL_NUMEL=data.logical_numel, **fallback_meta,
         )
@@ -175,10 +175,10 @@ def _launch_scalar_mul_add_compressed_dense(
             SCALE_OTHER=beta is not None,
             ALPHA_IS_ONE=alpha_is_one,
             OUTPUT_POLICY=output_policy,
-            BUFFERED=False, TILE=64, BLOCK=block_symbols,
+            BUFFERED=False, TILE=SCATTER_TILE, BLOCK=block_symbols,
             N_LANES=lanes, N_STEPS=steps,
         )
-        fallback_grid = (min(triton.cdiv(data.offsets.numel(), 64), SCATTER_GRID_LIMIT),)
+        fallback_grid = (min(triton.cdiv(data.offsets.numel(), SCATTER_TILE), SCATTER_GRID_LIMIT),)
         pointwise_scalar_mul_add_dense_fallback_kernel[fallback_grid](
             *fallback_args, LOGICAL_NUMEL=data.logical_numel, **fallback_meta,
         )

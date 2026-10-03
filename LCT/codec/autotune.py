@@ -71,11 +71,13 @@ DENSE_SCATTER_AUTOTUNE_CONFIGS = [
     triton.Config({"ROW_TILE": 16}, num_warps=4, num_stages=2),
 ]
 
-# Bound the single-program prefix scan and persistent overflow grids.
+# Bound the single-program prefix scan and persistent overflow grids.  Grids are
+# min(cdiv(work, tile), limit) everywhere these are used.
 SUMMARY_BLOCK_LIMIT = 8192
 COMPACT_GRID_LIMIT = 820
 SCATTER_GRID_LIMIT = 410
-# Streams per program-tile for the standalone decode overflow scatter.
+# Streams per program-tile for the overflow scatter, shared by the plain decode
+# path and the fused pointwise fallbacks.
 SCATTER_TILE = 64
 
 if _gpu.profile == "rtx_4090":
