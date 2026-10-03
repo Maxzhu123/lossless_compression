@@ -75,3 +75,15 @@ DENSE_SCATTER_AUTOTUNE_CONFIGS = [
 SUMMARY_BLOCK_LIMIT = 8192
 COMPACT_GRID_LIMIT = 820
 SCATTER_GRID_LIMIT = 410
+# Streams per program-tile for the standalone decode overflow scatter.
+SCATTER_TILE = 64
+
+if _gpu.profile == "rtx_4090":
+    # Ada's 128 SMs leave the default persistent grids badly under-occupied.
+    # Both kernels grid-stride and the launch stays min(cdiv(work, tile), limit),
+    # so a higher cap only adds parallelism when there is work to fill it.
+    # Measured at 200M on the highest-overflow case: decode 1.213 -> 1.161 ms as
+    # the scatter cap goes 410 -> 8192, flat beyond ~8k.  The compaction cap is
+    # nearly flat (1.012 -> 1.003 ms) but free.
+    COMPACT_GRID_LIMIT = 4096
+    SCATTER_GRID_LIMIT = 8192

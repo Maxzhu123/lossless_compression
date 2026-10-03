@@ -7,7 +7,7 @@ from ..comp_tensor import CompressedTensor
 from ..compression.huffman_tables import get_distribution_tables
 from ..kernels.generic.compaction import _scatter_blocked_fallback_kernel
 from ..kernels import dispatch
-from .autotune import SCATTER_GRID_LIMIT
+from .autotune import SCATTER_GRID_LIMIT, SCATTER_TILE
 
 
 def decode(data: CompressedTensor) -> torch.Tensor:
@@ -32,7 +32,7 @@ def _restore_fallback(data: CompressedTensor, output: torch.Tensor) -> None:
     block_symbols, lanes, steps, _ = data.codec_geometry
     blocks = triton.cdiv(data.size, block_symbols)
     streams = blocks * lanes
-    scatter_tile = 64
+    scatter_tile = SCATTER_TILE
     scatter_meta = dict(
         LOGICAL_NUMEL=logical_numel,
         TILE=scatter_tile, BLOCK=block_symbols, N_LANES=lanes, N_STEPS=steps,

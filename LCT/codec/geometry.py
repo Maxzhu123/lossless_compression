@@ -9,10 +9,18 @@ BLOCK_SYMBOLS = 65536
 LANES = 256
 LANE_BITS = 800
 
-if device_profile(torch.device("cuda")).model == "a100_80gb_pcie":
+_device = device_profile(torch.device("cuda"))
+
+if _device.model == "a100_80gb_pcie":
     GAUSSIAN_BLOCK_SYMBOLS = 32768
     GAUSSIAN_LANE_BITS = 400 - 16
 else:
+    # The Gaussian clean geometry is pinned by the compression-ratio limits, not
+    # by speed.  `laplace/gaussian/clean` (Laplace data through the Gaussian
+    # codebook) already sits at ratio 0.824 against a 0.830 cap, and its ratio
+    # degrades as streams get shorter because the fixed 3-bit/symbol budget is
+    # easier to overrun.  Shorter streams do measure faster on Ada (50M decode
+    # 0.264 -> 0.205 ms at block 16,384) but are unaffordable here.
     GAUSSIAN_BLOCK_SYMBOLS = BLOCK_SYMBOLS
     GAUSSIAN_LANE_BITS = LANE_BITS - 32
 

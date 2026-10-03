@@ -10,6 +10,7 @@ import torch
 class DeviceProfile:
     model: str
     family: str
+    profile: str
 
 
 def model_key(name: str) -> str:
@@ -18,9 +19,21 @@ def model_key(name: str) -> str:
     return name.replace(" ", "_")
 
 
+# GPUs with a dedicated kernel-implementation package under ``LCT/kernels/``.
+# The value names that package; ``generic`` means "no specialized package".
+KERNEL_PROFILES: dict[str, str] = {
+    "geforce_rtx_4090": "rtx_4090",
+}
+
+
+def profile_for(model: str) -> str:
+    """Resolve the kernel-implementation profile for a normalized model name."""
+    return KERNEL_PROFILES.get(model, "generic")
+
+
 @lru_cache(maxsize=1)
 def device_profile(device: torch.device) -> DeviceProfile:
-    """Cache the model and family of the user's GPU."""
+    """Cache the model, family, and kernel-implementation profile of the GPU."""
     if device.type != "cuda":
         raise ValueError(f"LCT kernel dispatch requires a CUDA device, got {device}")
     properties = torch.cuda.get_device_properties(device)
@@ -32,4 +45,5 @@ def device_profile(device: torch.device) -> DeviceProfile:
         (8, 9): "ada", (9, 0): "hopper",
     }
     family = families.get(capability, "generic") if torch.version.hip is None else "generic"
-    return DeviceProfile(model=model_key(properties.name), family=family)
+    model = model_key(properties.name)
+    return DeviceProfile(model=model, family=family, profile=profile_for(model))

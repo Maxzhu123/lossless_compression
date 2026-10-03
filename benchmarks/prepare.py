@@ -8,7 +8,7 @@ from LCT.compress import compress, decompress
 from LCT.tensor_buffer import TensorBuffer
 from LCT.comp_format import DistType, Distribution, NoiseLevel
 
-SIZE_WEIGHTS = {50_000_000: 3, 200_000_000: 1}
+SIZE_WEIGHTS = {50_000_000: 3, 200_000_000: 1, 500_000_000: 0.5}
 WARMUP = 20
 ITERS = 100
 
